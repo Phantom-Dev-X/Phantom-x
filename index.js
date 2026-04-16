@@ -1,10 +1,22 @@
-const { default: makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, jidNormalizedUser } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
+const fs = require("fs");
+const path = require("path");
 
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const telBot = new Telegraf(TELEGRAM_TOKEN);
+
+// Track active socket so we can close it before opening a new one
+let activeSock = null;
+
+function clearAuthState() {
+    const authDir = path.join(__dirname, "auth_info");
+    if (fs.existsSync(authDir)) {
+        fs.rmSync(authDir, { recursive: true, force: true });
+    }
+}
 
 // --- TELEGRAM COMMANDS ---
 telBot.start((ctx) => {
@@ -14,17 +26,30 @@ telBot.start((ctx) => {
 telBot.command('pair', async (ctx) => {
     const input = ctx.message.text.split(' ')[1];
     if (!input) return ctx.reply("Abeg, add your number! Example: /pair 2348102756072");
-    
-    ctx.reply("Generating your pairing code... please wait 5 seconds.");
-    startBot(input, ctx);
+
+    // Close any existing socket connection first
+    if (activeSock) {
+        try { activeSock.end(); } catch (_) {}
+        activeSock = null;
+    }
+
+    // Clear old session data so WhatsApp doesn't rate-limit us
+    clearAuthState();
+
+    ctx.reply("🔄 Generating your pairing code... please wait a few seconds.");
+    startBot(input.trim(), ctx);
 });
 
 telBot.launch();
 
+// Graceful stop
+process.once("SIGINT", () => telBot.stop("SIGINT"));
+process.once("SIGTERM", () => telBot.stop("SIGTERM"));
+
 // --- WHATSAPP ENGINE ---
 async function startBot(phoneNumber, ctx) {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+
     const sock = makeWASocket({
         auth: {
             creds: state.creds,
@@ -34,26 +59,31 @@ async function startBot(phoneNumber, ctx) {
         logger: pino({ level: "fatal" }),
     });
 
+    activeSock = sock;
+
     if (!sock.authState.creds.registered) {
-        await delay(5000); // 5 second wait to avoid 428 error
+        await delay(3000);
         try {
-            const code = await sock.requestPairingCode(phoneNumber.trim());
-            await ctx.reply(`✅ Your Pairing Code is: ${code}`);
-            await ctx.reply("Copy this code and click the notification on your WhatsApp to link.");
+            const code = await sock.requestPairingCode(phoneNumber);
+            await ctx.reply(`✅ Your Pairing Code is:\n\n*${code}*\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.`, { parse_mode: "Markdown" });
         } catch (err) {
-            console.error(err);
-            ctx.reply("❌ Error: WhatsApp blocked the request. Wait 20 mins and try again.");
+            console.error("Pairing error:", err?.message || err);
+            await ctx.reply("❌ Failed to generate pairing code. Please try again with /pair <your number>.");
         }
+    } else {
+        await ctx.reply("ℹ️ This session is already registered. Connecting to WhatsApp...");
     }
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
-        if (connection === 'open') {
+    sock.ev.on("connection.update", (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === "open") {
             ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!");
-            console.log("Connected!");
+            console.log("WhatsApp connected!");
+        } else if (connection === "close") {
+            const reason = lastDisconnect?.error?.message || "unknown reason";
+            console.log("Connection closed:", reason);
         }
     });
 }
-
