@@ -19,21 +19,48 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const telBot = new Telegraf(TELEGRAM_TOKEN);
 const MAX_RETRIES = 5;
 const BOT_VERSION = "1.0.0";
+const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 
 // Per-user state
 const activeSockets = {};
 const retryCounts = {};
-const botOwners = {}; // userId -> ownerJid (the WhatsApp number they paired)
 
+// Anti-spam tracker: { jid: { count, lastTime } }
+const spamTracker = {};
+
+// GC Clone jobs: { groupJid: { members: [], index, interval } }
+const cloneJobs = {};
+
+// --- SETTINGS ---
+function loadSettings() {
+    if (!fs.existsSync(SETTINGS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveSettings(settings) {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
+function getGroupSetting(groupJid, key, def = false) {
+    const s = loadSettings();
+    return s[groupJid]?.[key] ?? def;
+}
+
+function setGroupSetting(groupJid, key, value) {
+    const s = loadSettings();
+    if (!s[groupJid]) s[groupJid] = {};
+    s[groupJid][key] = value;
+    saveSettings(s);
+}
+
+// --- HELPERS ---
 function getAuthDir(userId) {
     return path.join(__dirname, "auth_info", String(userId));
 }
 
 function clearAuthState(userId) {
     const authDir = getAuthDir(userId);
-    if (fs.existsSync(authDir)) {
-        fs.rmSync(authDir, { recursive: true, force: true });
-    }
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
 }
 
 function formatUptime() {
@@ -44,66 +71,99 @@ function formatUptime() {
     return `${h}h ${m}m ${sec}s`;
 }
 
-// Download a buffer from a URL
 function fetchBuffer(url) {
     return new Promise((resolve, reject) => {
         https.get(url, (res) => {
             const chunks = [];
-            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("data", (c) => chunks.push(c));
             res.on("end", () => resolve(Buffer.concat(chunks)));
             res.on("error", reject);
         }).on("error", reject);
     });
 }
 
-// --- MENU TEXT ---
+function containsLink(text) {
+    return /https?:\/\/|wa\.me\/|chat\.whatsapp\.com\/|bit\.ly\/|t\.me\//i.test(text);
+}
+
+// --- MENU ---
 function buildMenuText() {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
     return `
-╔═══════════════════════╗
-║                                           ║
-║   ░P░H░A░N░T░O░M░ ░X░   ║
-║                                           ║
-╚═══════════════════════╝
+╔══════════════════════╗
+║  ░▒▓  PHANTOM X  ▓▒░  ║
+╚══════════════════════╝
 
-👋 *Welcome, Boss!*
-Your WhatsApp automation beast is online and ready to go 🚀
+🌟 *Hey Boss, Welcome Back!*
+Your WhatsApp automation beast is online 🔥
 
-━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
 📌 *BOT INFO*
-━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
 🤖 Name      : *Phantom X*
 🔖 Version   : *v${BOT_VERSION}*
 🌐 Status    : *Public*
 ⏱️ Runtime   : *${formatUptime()}*
-🕒 Time      : *${time}*
-━━━━━━━━━━━━━━━━━━━━━
+🕐 Time (NG) : *${time}*
+━━━━━━━━━━━━━━━━━━━━
 
-📋 *AVAILABLE COMMANDS*
-━━━━━━━━━━━━━━━━━━━━━
-⚙️ *.menu*       — Show this menu
-ℹ️ *.info*       — Bot information
+📋 *GENERAL COMMANDS*
+  *.menu*   — Show this menu
+  *.info*   — Bot info
+
 👥 *GROUP COMMANDS*
-   *.add* <number>    — Add member
-   *.kick* <@tag>     — Remove member
-   *.promote* <@tag>  — Make admin
-   *.demote* <@tag>   — Remove admin
-   *.link*            — Get group link
-   *.revoke*          — Reset group link
-   *.mute*            — Mute group
-   *.unmute*          — Unmute group
+  *.add* <number>      — Add member
+  *.kick* @user        — Remove member
+  *.promote* @user     — Make admin
+  *.demote* @user      — Remove admin
+  *.link*              — Get group link
+  *.revoke*            — Reset group link
+  *.mute*              — Only admins can chat
+  *.unmute*            — Everyone can chat
 
-━━━━━━━━━━━━━━━━━━━━━
-💡 _Phantom X — Built different. Built cold._
-━━━━━━━━━━━━━━━━━━━━━
+🛡️ *GROUP PROTECTION*
+  *.antilink on/off*   — Block links in group
+  *.antispam on/off*   — Block message spam
+  *.antidemote on/off* — Auto re-promote admins
+
+📣 *NOTIFICATIONS*
+  *.welcome on/off*    — Welcome new members
+  *.goodbye on/off*    — Goodbye message on exit
+
+🔄 *GC CLONE*
+  *.clone* <invite-link> — Clone members from
+                            another group into
+                            this one (1 per 10 min)
+  *.stopclone*           — Stop an active clone
+
+━━━━━━━━━━━━━━━━━━━━
+💀 _Phantom X — Built different. Built cold._ 🖤
+━━━━━━━━━━━━━━━━━━━━
 `.trim();
 }
 
+// --- ANTI-SPAM CHECK ---
+function isSpamming(jid) {
+    const now = Date.now();
+    if (!spamTracker[jid]) spamTracker[jid] = { count: 0, lastTime: now };
+    const tracker = spamTracker[jid];
+    // Reset count if last message was more than 10 seconds ago
+    if (now - tracker.lastTime > 10000) {
+        tracker.count = 1;
+        tracker.lastTime = now;
+    } else {
+        tracker.count++;
+        tracker.lastTime = now;
+    }
+    // Flag as spam if more than 5 messages in 10 seconds
+    return tracker.count > 5;
+}
+
 // --- MESSAGE HANDLER ---
-async function handleMessage(sock, msg, userId) {
+async function handleMessage(sock, msg) {
     try {
         if (!msg.message) return;
-        if (msg.key.fromMe) return; // ignore messages the bot itself sends
+        if (msg.key.fromMe) return;
 
         const type = getContentType(msg.message);
         const body =
@@ -112,27 +172,53 @@ async function handleMessage(sock, msg, userId) {
             (type === "imageMessage" && msg.message.imageMessage?.caption) ||
             "";
 
-        if (!body) return;
-
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
-        const cmd = body.trim().toLowerCase().split(" ")[0];
+        const senderJid = isGroup
+            ? msg.key.participant || msg.participant
+            : from;
 
-        const reply = (text) =>
-            sock.sendMessage(from, { text }, { quoted: msg });
-
+        const reply = (text) => sock.sendMessage(from, { text }, { quoted: msg });
         const replyImg = async (imageUrl, caption) => {
             const buf = await fetchBuffer(imageUrl);
             await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
         };
 
+        // --- GROUP PROTECTION (runs on every group message) ---
+        if (isGroup) {
+            // Anti-link
+            if (getGroupSetting(from, "antilink") && body && containsLink(body)) {
+                try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                await sock.sendMessage(from, {
+                    text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!`,
+                    mentions: [senderJid],
+                });
+                return;
+            }
+
+            // Anti-spam
+            if (getGroupSetting(from, "antispam") && body) {
+                if (isSpamming(senderJid)) {
+                    try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                    await sock.sendMessage(from, {
+                        text: `🚫 @${senderJid.split("@")[0]}, slow down! You're sending messages too fast.`,
+                        mentions: [senderJid],
+                    });
+                    return;
+                }
+            }
+        }
+
+        if (!body) return;
+        const parts = body.trim().split(" ");
+        const cmd = parts[0].toLowerCase();
+
         switch (cmd) {
             case ".menu": {
-                const menuImg = "https://i.imgur.com/6LxHxwY.jpeg"; // dark futuristic bot image
                 try {
-                    await replyImg(menuImg, buildMenuText());
+                    const buf = await fetchBuffer("https://i.imgur.com/6LxHxwY.jpeg");
+                    await sock.sendMessage(from, { image: buf, caption: buildMenuText() }, { quoted: msg });
                 } catch {
-                    // If image fails, fall back to text only
                     await reply(buildMenuText());
                 }
                 break;
@@ -140,14 +226,15 @@ async function handleMessage(sock, msg, userId) {
 
             case ".info": {
                 await reply(
-                    `*Phantom X Bot*\n\nVersion: v${BOT_VERSION}\nRuntime: ${formatUptime()}\nBuilt with: Baileys + Node.js\n\n_Built different. Built cold._ 🖤`
+                    `🤖 *Phantom X Bot*\n\nVersion: v${BOT_VERSION}\nRuntime: ${formatUptime()}\nBuilt with: Baileys + Node.js\n\n_Built different. Built cold._ 🖤`
                 );
                 break;
             }
 
+            // --- GROUP ADMIN COMMANDS ---
             case ".add": {
                 if (!isGroup) return reply("This command only works in groups.");
-                const num = body.trim().split(" ")[1];
+                const num = parts[1];
                 if (!num) return reply("Usage: .add 234xxxxxxxxxx");
                 const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
                 await sock.groupParticipantsUpdate(from, [jid], "add");
@@ -160,23 +247,23 @@ async function handleMessage(sock, msg, userId) {
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 if (!mentioned.length) return reply("Tag the person to kick. Usage: .kick @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "remove");
-                await reply("✅ Member removed from the group.");
+                await reply("✅ Member removed.");
                 break;
             }
 
             case ".promote": {
                 if (!isGroup) return reply("This command only works in groups.");
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply("Tag the person to promote. Usage: .promote @user");
+                if (!mentioned.length) return reply("Tag the person. Usage: .promote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "promote");
-                await reply("✅ Member promoted to admin.");
+                await reply("✅ Promoted to admin.");
                 break;
             }
 
             case ".demote": {
                 if (!isGroup) return reply("This command only works in groups.");
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply("Tag the person to demote. Usage: .demote @user");
+                if (!mentioned.length) return reply("Tag the person. Usage: .demote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "demote");
                 await reply("✅ Admin privileges removed.");
                 break;
@@ -210,11 +297,165 @@ async function handleMessage(sock, msg, userId) {
                 break;
             }
 
+            // --- PROTECTION TOGGLES ---
+            case ".antilink": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .antilink on/off");
+                setGroupSetting(from, "antilink", val === "on");
+                await reply(`🔗 Anti-link is now *${val.toUpperCase()}* in this group.`);
+                break;
+            }
+
+            case ".antispam": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .antispam on/off");
+                setGroupSetting(from, "antispam", val === "on");
+                await reply(`🚫 Anti-spam is now *${val.toUpperCase()}* in this group.`);
+                break;
+            }
+
+            case ".antidemote": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .antidemote on/off");
+                setGroupSetting(from, "antidemote", val === "on");
+                await reply(`🛡️ Anti-demote is now *${val.toUpperCase()}* in this group.`);
+                break;
+            }
+
+            case ".welcome": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .welcome on/off");
+                setGroupSetting(from, "welcome", val === "on");
+                await reply(`📣 Welcome messages are now *${val.toUpperCase()}*.`);
+                break;
+            }
+
+            case ".goodbye": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .goodbye on/off");
+                setGroupSetting(from, "goodbye", val === "on");
+                await reply(`👋 Goodbye messages are now *${val.toUpperCase()}*.`);
+                break;
+            }
+
+            // --- GC CLONE ---
+            case ".clone": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const inviteLink = parts[1];
+                if (!inviteLink || !inviteLink.includes("chat.whatsapp.com/")) {
+                    return reply("Usage: .clone https://chat.whatsapp.com/xxxxxxxx\n\nProvide the invite link of the group you want to clone members from.");
+                }
+
+                if (cloneJobs[from]) return reply("⚠️ A clone job is already running for this group. Use .stopclone to stop it first.");
+
+                await reply("⏳ Fetching members from the source group...");
+
+                try {
+                    const code = inviteLink.split("chat.whatsapp.com/")[1].trim();
+                    const groupInfo = await sock.groupGetInviteInfo(code);
+                    const members = groupInfo.participants.map((p) => p.id);
+
+                    if (!members.length) return reply("❌ No members found in that group.");
+
+                    await reply(`✅ Found *${members.length}* members. Starting clone — adding 1 person every *10 minutes*.\n\nUse *.stopclone* to stop anytime.`);
+
+                    let index = 0;
+                    const interval = setInterval(async () => {
+                        if (index >= members.length) {
+                            clearInterval(interval);
+                            delete cloneJobs[from];
+                            await sock.sendMessage(from, { text: "🎉 Clone complete! All members have been added." });
+                            return;
+                        }
+
+                        const memberJid = members[index];
+                        try {
+                            await sock.groupParticipantsUpdate(from, [memberJid], "add");
+                            await sock.sendMessage(from, {
+                                text: `➕ Added ${index + 1}/${members.length}: @${memberJid.split("@")[0]}`,
+                                mentions: [memberJid],
+                            });
+                        } catch (e) {
+                            await sock.sendMessage(from, {
+                                text: `⚠️ Could not add @${memberJid.split("@")[0]} (${e?.message || "failed"})`,
+                                mentions: [memberJid],
+                            });
+                        }
+
+                        index++;
+                    }, 10 * 60 * 1000); // 10 minutes
+
+                    cloneJobs[from] = { interval, members, total: members.length };
+                } catch (err) {
+                    console.error("Clone error:", err?.message || err);
+                    await reply("❌ Failed to fetch group info. Make sure the invite link is valid.");
+                }
+                break;
+            }
+
+            case ".stopclone": {
+                if (!isGroup) return reply("This command only works in groups.");
+                if (!cloneJobs[from]) return reply("No active clone job in this group.");
+                clearInterval(cloneJobs[from].interval);
+                delete cloneJobs[from];
+                await reply("🛑 Clone job stopped.");
+                break;
+            }
+
             default:
-                break; // ignore unknown commands
+                break;
         }
     } catch (err) {
         console.error("Message handler error:", err?.message || err);
+    }
+}
+
+// --- GROUP EVENTS HANDLER ---
+async function handleGroupUpdate(sock, update) {
+    const { id: groupJid, participants, action } = update;
+
+    try {
+        if (action === "add" && getGroupSetting(groupJid, "welcome")) {
+            for (const jid of participants) {
+                const name = `@${jid.split("@")[0]}`;
+                await sock.sendMessage(groupJid, {
+                    text: `🎉 Welcome to the group, ${name}! 👋\n\nWe're glad to have you here. Please read the group rules and enjoy your stay! 🙏`,
+                    mentions: [jid],
+                });
+            }
+        }
+
+        if (action === "remove" && getGroupSetting(groupJid, "goodbye")) {
+            for (const jid of participants) {
+                const name = `@${jid.split("@")[0]}`;
+                await sock.sendMessage(groupJid, {
+                    text: `👋 ${name} has left the group.\n\nSafe travels! 🕊️`,
+                    mentions: [jid],
+                });
+            }
+        }
+
+        if (action === "demote" && getGroupSetting(groupJid, "antidemote")) {
+            // Re-promote anyone who got demoted
+            for (const jid of participants) {
+                try {
+                    await sock.groupParticipantsUpdate(groupJid, [jid], "promote");
+                    await sock.sendMessage(groupJid, {
+                        text: `🛡️ Anti-demote triggered! @${jid.split("@")[0]} has been re-promoted automatically.`,
+                        mentions: [jid],
+                    });
+                } catch (e) {
+                    console.error("Anti-demote error:", e?.message);
+                }
+            }
+        }
+    } catch (err) {
+        console.error("Group update handler error:", err?.message || err);
     }
 }
 
@@ -262,7 +503,6 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     activeSockets[userId] = sock;
 
-    // Request pairing code on fresh attempts only
     if (!isReconnect && !sock.authState.creds.registered) {
         await delay(3000);
         try {
@@ -278,12 +518,15 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // Listen for incoming WhatsApp messages
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
         for (const msg of messages) {
-            await handleMessage(sock, msg, userId);
+            await handleMessage(sock, msg);
         }
+    });
+
+    sock.ev.on("group-participants.update", async (update) => {
+        await handleGroupUpdate(sock, update);
     });
 
     sock.ev.on("connection.update", async (update) => {
