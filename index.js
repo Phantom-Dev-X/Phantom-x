@@ -117,6 +117,7 @@ Your WhatsApp automation beast is online 🔥
 📋 *GENERAL COMMANDS*
   *.menu*   — Show this menu
   *.info*   — Bot info
+  *.help*   — Full guide for every command
 
 👥 *GROUP COMMANDS*
   *.add* <number>      — Add member
@@ -233,6 +234,60 @@ async function handleMessage(sock, msg) {
             case ".info": {
                 await reply(
                     `🤖 *Phantom X Bot*\n\nVersion: v${BOT_VERSION}\nRuntime: ${formatUptime()}\nBuilt with: Baileys + Node.js\n\n_Built different. Built cold._ 🖤`
+                );
+                break;
+            }
+
+            case ".help": {
+                await reply(
+`📖 *Phantom X — Command Guide*
+━━━━━━━━━━━━━━━━━━━━
+
+📋 *GENERAL*
+• *.menu* — Shows the main menu with bot info and a list of all commands
+• *.info* — Shows the bot version and how long it's been running
+• *.help* — Shows this guide explaining what every command does
+
+━━━━━━━━━━━━━━━━━━━━
+👥 *GROUP MANAGEMENT*
+• *.add 234xxxxxxxx* — Adds a person to the group using their phone number (with country code, no +)
+• *.kick @user* — Removes a tagged member from the group
+• *.promote @user* — Makes a tagged member an admin
+• *.demote @user* — Removes admin status from a tagged member
+• *.link* — Gets the group's invite link and shares it in the chat
+• *.revoke* — Resets the group invite link so the old one no longer works
+• *.mute* — Locks the group so only admins can send messages
+• *.unmute* — Unlocks the group so everyone can send messages again
+
+━━━━━━━━━━━━━━━━━━━━
+🛡️ *GROUP PROTECTION*
+• *.antilink on/off* — When ON, any message containing a link (WhatsApp, website, etc.) is automatically deleted and the sender is warned
+• *.antispam on/off* — When ON, anyone who sends more than 5 messages in 10 seconds gets their message deleted and receives a warning
+• *.antidemote on/off* — When ON, if anyone tries to demote an admin, that person is immediately demoted as punishment and a message is sent saying the case is with the owner
+
+━━━━━━━━━━━━━━━━━━━━
+📣 *JOIN & LEAVE MESSAGES*
+• *.welcome on/off* — When ON, the bot sends a welcome message every time a new member joins the group
+• *.goodbye on/off* — When ON, the bot sends a farewell message whenever someone leaves the group
+
+━━━━━━━━━━━━━━━━━━━━
+🔄 *GC CLONE*
+• *.clone <source-link> <dest-link> <per-batch> <mins>*
+  Copies members from one group into another gradually.
+  — source-link = group to copy members FROM
+  — dest-link = group to add members TO
+  — per-batch = how many people to add at once (1–10)
+  — mins = how many minutes to wait between each batch (1–60)
+  _Example: .clone link1 link2 2 5 = add 2 people every 5 mins_
+
+• *.stopclone* — Stops a clone job that is currently running
+
+━━━━━━━━━━━━━━━━━━━━
+🚨 *AUTO-PROTECTION (always on)*
+• If the bot is kicked from a group, you get an instant alert on Telegram and the bot automatically tries to rejoin the group on its own.
+
+━━━━━━━━━━━━━━━━━━━━
+💡 _Tip: All group commands require the bot to be an admin in the group._`
                 );
                 break;
             }
