@@ -262,6 +262,73 @@ async function getClubFixtures(teamName) {
     return text;
 }
 
+// --- SONG SEARCH (iTunes API, free, no key) ---
+async function searchSongs(query) {
+    const encoded = encodeURIComponent(query);
+    const data = await fetchJSON(`https://itunes.apple.com/search?term=${encoded}&entity=song&limit=6`);
+    return data.results || [];
+}
+
+// --- LYRICS (lyrics.ovh, free, no key) ---
+async function getLyrics(artist, title) {
+    const data = await fetchJSON(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
+    return data.lyrics || null;
+}
+
+// --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
+function buildImageGenUrl(prompt) {
+    return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true`;
+}
+
+// --- SCREENSHOT (thum.io, free, no key) ---
+function buildScreenshotUrl(url) {
+    if (!url.startsWith("http")) url = "https://" + url;
+    return `https://image.thum.io/get/width/1280/crop/800/${url}`;
+}
+
+// --- GAME STATE ---
+const gameState = {}; // { chatJid: { type, board, players, turn, ... } }
+
+function renderTTTBoard(board) {
+    const symbols = { "X": "❌", "O": "⭕", "": "⬜" };
+    return [
+        `${symbols[board[0]]}${symbols[board[1]]}${symbols[board[2]]}`,
+        `${symbols[board[3]]}${symbols[board[4]]}${symbols[board[5]]}`,
+        `${symbols[board[6]]}${symbols[board[7]]}${symbols[board[8]]}`,
+    ].join("\n") + "\n\n1️⃣2️⃣3️⃣\n4️⃣5️⃣6️⃣\n7️⃣8️⃣9️⃣";
+}
+
+function checkTTTWin(board, mark) {
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    return wins.some(([a,b,c]) => board[a] === mark && board[b] === mark && board[c] === mark);
+}
+
+const TRUTHS = [
+    "What is the most embarrassing thing you've ever done?",
+    "What is your biggest fear?",
+    "Have you ever lied to get out of trouble?",
+    "What is something you've never told anyone?",
+    "What is the worst thing you've ever done?",
+    "Who do you have a crush on right now?",
+    "What is your most used app on your phone?",
+    "Have you ever cheated on a test?",
+    "What is your biggest regret?",
+    "What is the strangest dream you've ever had?",
+];
+
+const DARES = [
+    "Send a voice note singing any song for 10 seconds.",
+    "Change your WhatsApp status to something embarrassing for 10 minutes.",
+    "Send a selfie right now.",
+    "Call someone in this group and sing happy birthday.",
+    "Write a love letter to the person above you in this chat.",
+    "Send your last 3 emojis you used.",
+    "Post your last Google search.",
+    "Do 20 push-ups and send a video proof.",
+    "Let someone else send one message from your phone.",
+    "Speak in rhymes for your next 3 messages.",
+];
+
 async function getClubNews(teamName) {
     const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
     const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
@@ -327,6 +394,14 @@ Your WhatsApp automation beast is online 🔥
   *.delalias* <word>   — Delete alias
   *.aliases*           — List all aliases
 
+🤖 *AI & MEDIA*
+  *.ai* <question>     — Ask Gemini AI anything
+  *.imagine* <prompt>  — Generate an AI image
+  *.song* <title>      — Search for songs (iTunes)
+  *.lyrics* <artist> | <title> — Get song lyrics
+  *.ss* <url>          — Screenshot a website
+  *.viewonce*          — Reveal view-once (reply to it)
+
 🔍 *UTILITIES*
   *.groupid*           — Get group/community ID
   *.listonline*        — List online members
@@ -339,6 +414,13 @@ Your WhatsApp automation beast is online 🔥
   *.fixtures* <club>   — Club fixtures & results
   *.fnews* <club>      — Club news
   *.football* <club>   — Full club overview
+
+🎮 *GAMES*
+  *.ttt* @p1 @p2       — Tic-Tac-Toe (tag 2 players)
+  *.truth*             — Get a truth question
+  *.dare*              — Get a dare challenge
+  *.wordchain* [word]  — Start word chain game
+  *.wordchain stop*    — End active game
 
 🛡️ *GROUP PROTECTION*
   *.antilink on/off*   — Block links in group
@@ -384,30 +466,13 @@ async function handleMessage(sock, msg) {
 
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
-        const isSelfChat = msg.key.fromMe && !isGroup;
+        // Detect self-chat: check if the 'from' JID belongs to the bot's own number
+        const ownNumber = (sock.user?.id || "").split(':')[0].split('@')[0];
+        const fromNumber = from.split(':')[0].split('@')[0];
+        const isSelfChat = !isGroup && (msg.key.fromMe || fromNumber === ownNumber);
 
-        // --- VIEW-ONCE FORWARDER (auto, no command needed) ---
-        const viewOnceMsg = msg.message?.viewOnceMessage?.message ||
-                            msg.message?.viewOnceMessageV2?.message ||
-                            msg.message?.viewOnceMessageV2Extension?.message;
-        if (viewOnceMsg && !msg.key.fromMe) {
-            try {
-                const voType = getContentType(viewOnceMsg);
-                const buf = await downloadMediaMessage({ ...msg, message: viewOnceMsg }, "buffer", {}, { logger: pino({ level: "silent" }) });
-                const ownerJid = sock.user?.id;
-                const srcLabel = isGroup ? `group ${from.split("@")[0]}` : `+${from.split("@")[0]}`;
-                if (voType === "imageMessage") {
-                    await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ *View-once image* from ${srcLabel}` });
-                } else if (voType === "videoMessage") {
-                    await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ *View-once video* from ${srcLabel}` });
-                } else if (voType === "audioMessage") {
-                    await sock.sendMessage(ownerJid, { audio: buf, mimetype: "audio/mpeg" });
-                }
-            } catch (e) {
-                console.error("View-once forward error:", e?.message);
-            }
-            return;
-        }
+        // Skip non-message types cleanly
+        if (from === "status@broadcast") return;
 
         const type = getContentType(msg.message);
         const rawBody =
@@ -439,16 +504,73 @@ async function handleMessage(sock, msg) {
             }
         }
 
+        // --- ACTIVE GAME MOVE DETECTION (runs before trigger filter) ---
+        if (isGroup && rawBody && !msg.key.fromMe) {
+            const game = gameState[from];
+            if (game?.type === "ttt") {
+                const move = parseInt(rawBody.trim());
+                if (move >= 1 && move <= 9) {
+                    const idx = move - 1;
+                    const currentPlayer = game.players[game.turn % 2];
+                    if (senderJid !== currentPlayer) {
+                        // Not your turn
+                    } else if (game.board[idx] !== "") {
+                        await reply("❌ That spot is taken. Pick another number 1-9.");
+                    } else {
+                        const mark = game.turn % 2 === 0 ? "X" : "O";
+                        game.board[idx] = mark;
+                        game.turn++;
+                        if (checkTTTWin(game.board, mark)) {
+                            await sock.sendMessage(from, {
+                                text: `${renderTTTBoard(game.board)}\n\n🎉 @${senderJid.split("@")[0]} wins! 🏆`,
+                                mentions: [senderJid],
+                            });
+                            delete gameState[from];
+                        } else if (game.board.every(c => c !== "")) {
+                            await reply(`${renderTTTBoard(game.board)}\n\n🤝 It's a draw!`);
+                            delete gameState[from];
+                        } else {
+                            const next = game.players[game.turn % 2];
+                            await sock.sendMessage(from, {
+                                text: `${renderTTTBoard(game.board)}\n\n👉 @${next.split("@")[0]}'s turn (${game.turn % 2 === 0 ? "❌" : "⭕"})`,
+                                mentions: [next],
+                            });
+                        }
+                    }
+                    return;
+                }
+            }
+            if (game?.type === "wordchain") {
+                const word = rawBody.trim().toLowerCase().replace(/[^a-z]/g, "");
+                if (word.length > 0) {
+                    const lastLetter = game.lastWord?.slice(-1);
+                    if (lastLetter && word[0] !== lastLetter) {
+                        await reply(`❌ Word must start with *${lastLetter.toUpperCase()}*. Try again!`);
+                    } else if (game.usedWords?.includes(word)) {
+                        await reply(`❌ *${word}* already used! Pick a different word.`);
+                    } else {
+                        if (!game.usedWords) game.usedWords = [];
+                        game.usedWords.push(word);
+                        game.lastWord = word;
+                        game.lastPlayer = senderJid;
+                        const nextLetter = word.slice(-1).toUpperCase();
+                        await reply(`✅ *${word.toUpperCase()}* — Next word must start with *${nextLetter}*`);
+                    }
+                    return;
+                }
+            }
+        }
+
         // --- TRIGGER FILTER ---
         const triggerChars = ['.', ',', '?'];
         const trimmedBody = rawBody.trimStart();
         const hasTrigger = trimmedBody && triggerChars.some(c => trimmedBody.startsWith(c));
         const hasHidetagAnywhere = rawBody && rawBody.split('\n').some(l => l.trim().toLowerCase().startsWith('.hidetag'));
 
-        // For owner messages: only respond if starts with . , or ?
-        if (msg.key.fromMe && !hasTrigger && !hasHidetagAnywhere) return;
-        // Ignore DMs from other people (bot only takes commands from owner)
-        if (!isGroup && !msg.key.fromMe) return;
+        // For self-chat or owner group messages: only respond to trigger-prefixed commands
+        if ((msg.key.fromMe || isSelfChat) && !hasTrigger && !hasHidetagAnywhere) return;
+        // For DMs from other people: skip entirely (no command processing)
+        if (!isGroup && !isSelfChat && !msg.key.fromMe) return;
 
         // --- GROUP PROTECTION (runs on every group message) ---
         if (isGroup) {
@@ -1129,6 +1251,200 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            // --- VIEW ONCE (reply to a view-once message with .viewonce) ---
+            case ".viewonce": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                if (!quoted) return reply("👁️ Reply to a view-once message with *.viewonce* to reveal it.");
+                const voMsg = quoted?.viewOnceMessage?.message || quoted?.viewOnceMessageV2?.message || quoted;
+                const voType = getContentType(voMsg);
+                try {
+                    const fakeMsg = { ...msg, message: voMsg };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const ownerJid = sock.user?.id;
+                    if (voType === "imageMessage") {
+                        await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ View-once image revealed` });
+                        await reply("✅ Sent to your private chat!");
+                    } else if (voType === "videoMessage") {
+                        await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ View-once video revealed` });
+                        await reply("✅ Sent to your private chat!");
+                    } else {
+                        await reply("❌ Unsupported view-once type.");
+                    }
+                } catch (e) { await reply(`❌ Failed to reveal: ${e?.message}`); }
+                break;
+            }
+
+            // --- SONG SEARCH ---
+            case ".song": {
+                const query = parts.slice(1).join(" ").trim();
+                if (!query) return reply("Usage: .song <title> [artist]\nExample: .song Blinding Lights The Weeknd");
+                await reply(`🎵 Searching for *${query}*...`);
+                try {
+                    const results = await searchSongs(query);
+                    if (!results.length) return reply(`❌ No songs found for *${query}*.`);
+                    let text = `🎵 *Search results for "${query}":*\n━━━━━━━━━━━━━━━━━━━\n`;
+                    for (const s of results) {
+                        const mins = Math.floor(s.trackTimeMillis / 60000);
+                        const secs = String(Math.floor((s.trackTimeMillis % 60000) / 1000)).padStart(2, "0");
+                        text += `\n🎧 *${s.trackName}*\n👤 ${s.artistName}\n💿 ${s.collectionName}\n⏱️ ${mins}:${secs}\n`;
+                        if (s.previewUrl) text += `🔊 Preview: ${s.previewUrl}\n`;
+                        text += `─────────────────\n`;
+                    }
+                    text += `\n_Use .lyrics <artist> | <title> to get lyrics_`;
+                    await reply(text);
+                } catch (e) { await reply(`❌ Song search failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- LYRICS ---
+            case ".lyrics": {
+                const lyricsInput = parts.slice(1).join(" ").trim();
+                if (!lyricsInput.includes("|")) return reply("Usage: .lyrics <artist> | <song title>\nExample: .lyrics Burna Boy | Last Last");
+                const [artist, title] = lyricsInput.split("|").map(s => s.trim());
+                if (!artist || !title) return reply("Usage: .lyrics <artist> | <song title>");
+                await reply(`🎤 Fetching lyrics for *${title}* by *${artist}*...`);
+                try {
+                    const lyrics = await getLyrics(artist, title);
+                    if (!lyrics) return reply(`❌ Lyrics not found for *${title}* by *${artist}*.`);
+                    const header = `🎤 *${title.toUpperCase()}*\n👤 ${artist}\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                    const fullText = header + lyrics;
+                    // Split if too long (WhatsApp limit ~65000 chars)
+                    if (fullText.length > 4000) {
+                        await reply(fullText.slice(0, 4000) + "\n\n_(continued...)_");
+                        if (fullText.length > 4000) await reply(fullText.slice(4000, 8000));
+                    } else {
+                        await reply(fullText);
+                    }
+                } catch (e) { await reply(`❌ Lyrics fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- IMAGE GENERATION (Pollinations.ai - free, no API key) ---
+            case ".imagine": {
+                const prompt = parts.slice(1).join(" ").trim();
+                if (!prompt) return reply("Usage: .imagine <description>\nExample: .imagine a beautiful sunset over Lagos");
+                await reply(`🎨 Generating image for: _${prompt}_\nThis may take 10-20 seconds...`);
+                try {
+                    const imgUrl = buildImageGenUrl(prompt);
+                    const buf = await fetchBuffer(imgUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${prompt}_` }, { quoted: msg });
+                } catch (e) { await reply(`❌ Image generation failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SCREENSHOT ---
+            case ".ss":
+            case ".screenshot": {
+                const url = parts[1];
+                if (!url) return reply("Usage: .ss <url>\nExample: .ss google.com");
+                await reply(`📸 Taking screenshot of *${url}*...`);
+                try {
+                    const ssUrl = buildScreenshotUrl(url);
+                    const buf = await fetchBuffer(ssUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `📸 Screenshot of ${url}` }, { quoted: msg });
+                } catch (e) { await reply(`❌ Screenshot failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- AI CHAT (Google Gemini) ---
+            case ".ai":
+            case ".ask":
+            case ".gemini": {
+                const question = parts.slice(1).join(" ").trim();
+                if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
+                const GEMINI_KEY = process.env.GEMINI_API_KEY;
+                if (!GEMINI_KEY) return reply("⚠️ AI chat needs a Gemini API key.\n\nGet a FREE key at: https://aistudio.google.com/app/apikey\n\nThen add it as GEMINI_API_KEY in your Replit secrets.");
+                await reply("🤖 Thinking...");
+                try {
+                    const reqBody = JSON.stringify({ contents: [{ parts: [{ text: question }] }] });
+                    const aiReply = await new Promise((resolve, reject) => {
+                        const req = https.request({
+                            hostname: "generativelanguage.googleapis.com",
+                            path: `/v1beta/models/gemini-pro:generateContent?key=${GEMINI_KEY}`,
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                        }, (res) => {
+                            let data = "";
+                            res.on("data", c => data += c);
+                            res.on("end", () => {
+                                try {
+                                    const parsed = JSON.parse(data);
+                                    const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
+                                    resolve(text);
+                                } catch { reject(new Error("Parse error")); }
+                            });
+                        });
+                        req.on("error", reject);
+                        req.write(reqBody);
+                        req.end();
+                    });
+                    await reply(`🤖 *Gemini AI:*\n\n${aiReply}`);
+                } catch (e) { await reply(`❌ AI error: ${e?.message}`); }
+                break;
+            }
+
+            // --- TIC-TAC-TOE ---
+            case ".ttt": {
+                if (!isGroup) return reply("Tic-Tac-Toe only works in groups.");
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "stop" || sub === "end") {
+                    delete gameState[from];
+                    return reply("🛑 Tic-Tac-Toe game ended.");
+                }
+                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                if (mentioned.length < 2) return reply("Usage: .ttt @player1 @player2\n\nTag 2 players to start a game!");
+                if (gameState[from]) return reply("⚠️ A game is already active. Use *.ttt stop* to end it.");
+                gameState[from] = {
+                    type: "ttt",
+                    board: Array(9).fill(""),
+                    players: [mentioned[0], mentioned[1]],
+                    turn: 0,
+                };
+                await sock.sendMessage(from, {
+                    text: `❌⭕ *Tic-Tac-Toe Started!*\n\n` +
+                          `❌ @${mentioned[0].split("@")[0]} vs ⭕ @${mentioned[1].split("@")[0]}\n\n` +
+                          `${renderTTTBoard(gameState[from].board)}\n\n` +
+                          `👉 @${mentioned[0].split("@")[0]} goes first! Send a number *1-9* to make your move.`,
+                    mentions: mentioned,
+                });
+                break;
+            }
+
+            // --- TRUTH OR DARE ---
+            case ".truth": {
+                const truth = TRUTHS[Math.floor(Math.random() * TRUTHS.length)];
+                await reply(`🤔 *TRUTH:*\n\n_${truth}_`);
+                break;
+            }
+
+            case ".dare": {
+                const dare = DARES[Math.floor(Math.random() * DARES.length)];
+                await reply(`😈 *DARE:*\n\n_${dare}_`);
+                break;
+            }
+
+            // --- WORD CHAIN ---
+            case ".wordchain": {
+                if (!isGroup) return reply("Word Chain only works in groups.");
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "stop" || sub === "end") {
+                    delete gameState[from];
+                    return reply("🛑 Word Chain game ended.");
+                }
+                if (gameState[from]) return reply("⚠️ A game is already active. Use *.wordchain stop* to end it first.");
+                const startWord = parts[1] || "PHANTOM";
+                const word = startWord.toLowerCase().replace(/[^a-z]/g, "");
+                gameState[from] = { type: "wordchain", lastWord: word, usedWords: [word], lastPlayer: null };
+                const nextLetter = word.slice(-1).toUpperCase();
+                await reply(
+                    `🔤 *Word Chain Started!*\n\n` +
+                    `First word: *${word.toUpperCase()}*\n\n` +
+                    `Next word must start with *${nextLetter}*\n` +
+                    `Rules: No repeating words! Use *.wordchain stop* to end.`
+                );
+                break;
+            }
+
             default:
                 if (isSelfChat && body) {
                     await reply(`👋 I'm active! Type *.menu* to see all commands.`);
@@ -1344,9 +1660,10 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 // Send welcome message directly on WhatsApp (self-chat)
                 try {
                     await delay(3000);
-                    const selfJid = sock.user?.id;
+                    // Use number@s.whatsapp.net format for reliable self-message
+                    const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
                     await sock.sendMessage(selfJid, {
-                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X LIVE  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now CONNECTED!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n\n━━━━━━━━━━━━━━━━━━━━\n${buildMenuText()}`
+                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X LIVE  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now CONNECTED!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
                     });
                 } catch (e) { console.error("Welcome WA msg error:", e?.message); }
             }
