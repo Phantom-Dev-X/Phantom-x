@@ -156,6 +156,12 @@ Your WhatsApp automation beast is online 🔥
   *.mute*              — Only admins can chat
   *.unmute*            — Everyone can chat
 
+🏷️ *TAG COMMANDS*
+  *.hidetag*           — Tag all members secretly (no @numbers shown)
+  *.hidetag* <text>    — Tag all + show text
+  *.tagall*            — Tag all members (shows @numbers)
+  *.readmore* <text>   — Hide part of msg behind "Read more"
+
 🛡️ *GROUP PROTECTION*
   *.antilink on/off*   — Block links in group
   *.antispam on/off*   — Block message spam
@@ -210,10 +216,16 @@ async function handleMessage(sock, msg) {
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
         const isSelfChat = msg.key.fromMe && !isGroup;
+        const triggerChars = ['.', ',', '?'];
+        const trimmedBody = rawBody.trimStart();
+        const hasTrigger = trimmedBody && triggerChars.some(c => trimmedBody.startsWith(c));
+        // Also check if .hidetag appears on any line (multiline support)
+        const hasHidetagAnywhere = rawBody && rawBody.split('\n').some(l => l.trim().toLowerCase().startsWith('.hidetag'));
 
-        // In groups: skip the owner's non-command messages to avoid responding to normal chats
-        // In self-chat: allow everything through so the owner can use the bot by messaging themselves
-        if (msg.key.fromMe && !isSelfChat && !rawBody.startsWith(".")) return;
+        // For owner messages: only respond if message starts with . , or ? (or contains .hidetag on any line)
+        if (msg.key.fromMe && !hasTrigger && !hasHidetagAnywhere) return;
+        // Ignore DMs from other people (bot only takes commands from owner)
+        if (!isGroup && !msg.key.fromMe) return;
         const senderJid = isGroup
             ? msg.key.participant || msg.participant
             : from;
@@ -250,8 +262,33 @@ async function handleMessage(sock, msg) {
         }
 
         if (!body) return;
+
+        // Handle .hidetag appearing on any line (before or after a message)
+        const bodyLines = body.trim().split('\n');
+        const hidetagLineIdx = bodyLines.findIndex(l => l.trim().toLowerCase().startsWith('.hidetag'));
+        if (isGroup && hidetagLineIdx !== -1) {
+            try {
+                const meta = await sock.groupMetadata(from);
+                const members = meta.participants.map(p => p.id);
+                const otherText = bodyLines.filter((_, i) => i !== hidetagLineIdx).join('\n').trim();
+                // Invisible tag: mentions all members but shows no @numbers in text
+                const invisibleText = otherText || '\u200e';
+                await sock.sendMessage(from, {
+                    text: invisibleText,
+                    mentions: members,
+                }, { quoted: msg });
+            } catch (e) {
+                await reply(`❌ Failed to hidetag: ${e?.message || "error"}`);
+            }
+            return;
+        }
+
         const parts = body.trim().split(" ");
-        const cmd = parts[0].toLowerCase();
+        let cmd = parts[0].toLowerCase();
+        // Normalize , and ? prefix → . so users can use any of the three trigger chars
+        if (cmd.length > 1 && (cmd.startsWith(',') || cmd.startsWith('?'))) {
+            cmd = '.' + cmd.slice(1);
+        }
 
         switch (cmd) {
             case ".menu": {
@@ -564,6 +601,70 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            // --- HIDETAG (standalone, no text after command) ---
+            case ".hidetag": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    // Text after .hidetag on the same line
+                    const inlineText = parts.slice(1).join(" ").trim();
+                    const invisibleText = inlineText || '\u200e';
+                    await sock.sendMessage(from, {
+                        text: invisibleText,
+                        mentions: members,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to hidetag: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- TAGALL ---
+            case ".tagall": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    const customText = parts.slice(1).join(" ").trim();
+                    const tagText = members.map(j => `@${j.split("@")[0]}`).join(" ");
+                    const fullText = customText ? `${customText}\n\n${tagText}` : tagText;
+                    await sock.sendMessage(from, {
+                        text: fullText,
+                        mentions: members,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to tagall: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- READMORE ---
+            case ".readmore": {
+                // Usage: <visible text> .readmore <hidden text>
+                // OR: .readmore <hidden text> (visible text taken as nothing)
+                const fullText = body.trim();
+                const readmoreIdx = fullText.toLowerCase().indexOf('.readmore');
+                const beforeText = fullText.slice(0, readmoreIdx).trim();
+                const afterText = fullText.slice(readmoreIdx + '.readmore'.length).trim();
+
+                if (!afterText && !beforeText) {
+                    return reply(
+                        `❓ *How to use .readmore:*\n\n` +
+                        `Type the visible part, then *.readmore*, then the hidden part.\n\n` +
+                        `*Example:*\n` +
+                        `_Everyone send acc .readmore Link: wa.me/xxx_\n\n` +
+                        `Group members will see "Everyone send acc" and tap *Read more* to reveal the rest.`
+                    );
+                }
+
+                // WhatsApp shows "Read more" after ~700 characters or many newlines
+                const hiddenPadding = '\n'.repeat(700);
+                const formattedMsg = `${beforeText || ''}${hiddenPadding}${afterText}`;
+                await sock.sendMessage(from, { text: formattedMsg }, { quoted: msg });
+                break;
+            }
+
             default:
                 if (isSelfChat && body) {
                     await reply(`👋 I'm active! Type *.menu* to see all commands.`);
@@ -748,8 +849,9 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
-        if (type !== "notify") return;
         for (const msg of messages) {
+            // Process "notify" (normal incoming) OR any fromMe message (owner commands in self-chat/groups)
+            if (type !== "notify" && !msg.key.fromMe) continue;
             await handleMessage(sock, msg);
         }
     });
