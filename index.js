@@ -131,10 +131,9 @@ Your WhatsApp automation beast is online 🔥
   *.goodbye on/off*    — Goodbye message on exit
 
 🔄 *GC CLONE*
-  *.clone* <invite-link> — Clone members from
-                            another group into
-                            this one (1 per 10 min)
-  *.stopclone*           — Stop an active clone
+  *.clone* <link> <per-batch> <every-X-mins>
+  _e.g. .clone link 2 5 = 2 people every 5 mins_
+  *.stopclone*  — Stop an active clone job
 
 ━━━━━━━━━━━━━━━━━━━━
 💀 _Phantom X — Built different. Built cold._ 🖤
@@ -346,12 +345,31 @@ async function handleMessage(sock, msg) {
             // --- GC CLONE ---
             case ".clone": {
                 if (!isGroup) return reply("This command only works in groups.");
+
+                // Usage: .clone <invite-link> <members-per-batch> <interval-in-minutes>
+                // Example: .clone https://chat.whatsapp.com/xxx 2 5 → add 2 members every 5 mins
                 const inviteLink = parts[1];
+                const batchSize = parseInt(parts[2]) || 1;
+                const intervalMins = parseInt(parts[3]) || 10;
+
                 if (!inviteLink || !inviteLink.includes("chat.whatsapp.com/")) {
-                    return reply("Usage: .clone https://chat.whatsapp.com/xxxxxxxx\n\nProvide the invite link of the group you want to clone members from.");
+                    return reply(
+                        `❓ *How to use .clone:*\n\n` +
+                        `*.clone* <invite-link> <per-batch> <every-X-mins>\n\n` +
+                        `*Examples:*\n` +
+                        `• _.clone link 1 10_ — add 1 person every 10 mins\n` +
+                        `• _.clone link 2 5_ — add 2 people every 5 mins\n` +
+                        `• _.clone link 3 1_ — add 3 people every 1 min\n\n` +
+                        `_Tip: Keep it slow to avoid WhatsApp banning the group._`
+                    );
                 }
 
-                if (cloneJobs[from]) return reply("⚠️ A clone job is already running for this group. Use .stopclone to stop it first.");
+                if (cloneJobs[from]) {
+                    return reply("⚠️ A clone job is already running in this group.\n\nUse *.stopclone* to stop it first.");
+                }
+
+                if (batchSize < 1 || batchSize > 10) return reply("❌ Batch size must be between 1 and 10.");
+                if (intervalMins < 1 || intervalMins > 60) return reply("❌ Interval must be between 1 and 60 minutes.");
 
                 await reply("⏳ Fetching members from the source group...");
 
@@ -362,48 +380,63 @@ async function handleMessage(sock, msg) {
 
                     if (!members.length) return reply("❌ No members found in that group.");
 
-                    await reply(`✅ Found *${members.length}* members. Starting clone — adding 1 person every *10 minutes*.\n\nUse *.stopclone* to stop anytime.`);
+                    const totalBatches = Math.ceil(members.length / batchSize);
+                    const estTime = totalBatches * intervalMins;
+
+                    await reply(
+                        `✅ Found *${members.length}* members.\n\n` +
+                        `📋 *Clone Plan:*\n` +
+                        `• Adding *${batchSize}* person(s) every *${intervalMins} minute(s)*\n` +
+                        `• Total batches: *${totalBatches}*\n` +
+                        `• Estimated time: *~${estTime} minutes*\n\n` +
+                        `Use *.stopclone* to stop anytime. Starting now... 🚀`
+                    );
 
                     let index = 0;
-                    const interval = setInterval(async () => {
+                    const intervalMs = intervalMins * 60 * 1000;
+
+                    const intervalId = setInterval(async () => {
                         if (index >= members.length) {
-                            clearInterval(interval);
+                            clearInterval(intervalId);
                             delete cloneJobs[from];
-                            await sock.sendMessage(from, { text: "🎉 Clone complete! All members have been added." });
+                            await sock.sendMessage(from, { text: "🎉 *Clone complete!* All members have been added." });
                             return;
                         }
 
-                        const memberJid = members[index];
-                        try {
-                            await sock.groupParticipantsUpdate(from, [memberJid], "add");
-                            await sock.sendMessage(from, {
-                                text: `➕ Added ${index + 1}/${members.length}: @${memberJid.split("@")[0]}`,
-                                mentions: [memberJid],
-                            });
-                        } catch (e) {
-                            await sock.sendMessage(from, {
-                                text: `⚠️ Could not add @${memberJid.split("@")[0]} (${e?.message || "failed"})`,
-                                mentions: [memberJid],
-                            });
+                        const batch = members.slice(index, index + batchSize);
+
+                        for (const memberJid of batch) {
+                            try {
+                                await sock.groupParticipantsUpdate(from, [memberJid], "add");
+                                await sock.sendMessage(from, {
+                                    text: `➕ Added (${index + 1}/${members.length}): @${memberJid.split("@")[0]}`,
+                                    mentions: [memberJid],
+                                });
+                            } catch (e) {
+                                await sock.sendMessage(from, {
+                                    text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${e?.message || "failed"}`,
+                                    mentions: [memberJid],
+                                });
+                            }
+                            index++;
                         }
+                    }, intervalMs);
 
-                        index++;
-                    }, 10 * 60 * 1000); // 10 minutes
-
-                    cloneJobs[from] = { interval, members, total: members.length };
+                    cloneJobs[from] = { intervalId, members, total: members.length };
                 } catch (err) {
                     console.error("Clone error:", err?.message || err);
-                    await reply("❌ Failed to fetch group info. Make sure the invite link is valid.");
+                    await reply("❌ Failed to fetch group info. Make sure the invite link is valid and the group is not private.");
                 }
                 break;
             }
 
             case ".stopclone": {
                 if (!isGroup) return reply("This command only works in groups.");
-                if (!cloneJobs[from]) return reply("No active clone job in this group.");
-                clearInterval(cloneJobs[from].interval);
+                if (!cloneJobs[from]) return reply("⚠️ No active clone job in this group.");
+                clearInterval(cloneJobs[from].intervalId);
+                const done = cloneJobs[from].members.filter((_, i) => i < cloneJobs[from].total).length;
                 delete cloneJobs[from];
-                await reply("🛑 Clone job stopped.");
+                await reply(`🛑 *Clone stopped.*\n\nJob cancelled successfully.`);
                 break;
             }
 
@@ -441,14 +474,19 @@ async function handleGroupUpdate(sock, update) {
         }
 
         if (action === "demote" && getGroupSetting(groupJid, "antidemote")) {
-            // Re-promote anyone who got demoted
+            const culprit = update.author; // the person who did the demoting
             for (const jid of participants) {
                 try {
+                    // Re-promote the person who was demoted
                     await sock.groupParticipantsUpdate(groupJid, [jid], "promote");
                     await sock.sendMessage(groupJid, {
-                        text: `🛡️ Anti-demote triggered! @${jid.split("@")[0]} has been re-promoted automatically.`,
-                        mentions: [jid],
+                        text: `🛡️ Anti-demote triggered!\n\n@${jid.split("@")[0]} has been re-promoted.\n⚡ @${culprit ? culprit.split("@")[0] : "Someone"} has been demoted as punishment for demoting an admin.`,
+                        mentions: culprit ? [jid, culprit] : [jid],
                     });
+                    // Demote the culprit who triggered it
+                    if (culprit && culprit !== jid) {
+                        await sock.groupParticipantsUpdate(groupJid, [culprit], "demote");
+                    }
                 } catch (e) {
                     console.error("Anti-demote error:", e?.message);
                 }
