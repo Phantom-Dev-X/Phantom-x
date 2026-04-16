@@ -6,6 +6,7 @@ const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     getContentType,
+    downloadMediaMessage,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
@@ -38,6 +39,24 @@ const cloneJobs = {};
 const savedGroupLinks = {};
 // Saved group names: { groupJid: groupName }
 const groupNames = {};
+
+// Auto-react: { groupJid: emoji }
+const AUTO_REACT_FILE = path.join(__dirname, "auto_react.json");
+function loadAutoReact() { if (!fs.existsSync(AUTO_REACT_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTO_REACT_FILE, "utf8")); } catch { return {}; } }
+function saveAutoReact(d) { fs.writeFileSync(AUTO_REACT_FILE, JSON.stringify(d, null, 2)); }
+
+// Auto-reply keywords: { keyword: replyText }
+const AUTO_REPLY_FILE = path.join(__dirname, "auto_reply.json");
+function loadAutoReply() { if (!fs.existsSync(AUTO_REPLY_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTO_REPLY_FILE, "utf8")); } catch { return {}; } }
+function saveAutoReply(d) { fs.writeFileSync(AUTO_REPLY_FILE, JSON.stringify(d, null, 2)); }
+
+// Command aliases: { alias: realCommand }
+const ALIASES_FILE = path.join(__dirname, "aliases.json");
+function loadAliases() { if (!fs.existsSync(ALIASES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(ALIASES_FILE, "utf8")); } catch { return {}; } }
+function saveAliases(d) { fs.writeFileSync(ALIASES_FILE, JSON.stringify(d, null, 2)); }
+
+// Presence tracker: { jid: 'available'|'unavailable'|'composing'|... }
+const presenceTracker = {};
 
 // --- SETTINGS ---
 function loadSettings() {
@@ -120,6 +139,146 @@ function containsLink(text) {
     return /https?:\/\/|wa\.me\/|chat\.whatsapp\.com\/|bit\.ly\/|t\.me\//i.test(text);
 }
 
+// --- FETCH JSON (for APIs) ---
+function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Invalid JSON")); } });
+            res.on("error", reject);
+        }).on("error", reject);
+    });
+}
+
+// --- RESOLVE GROUP LINK OR JID ---
+async function resolveGroupJid(sock, input) {
+    input = input.trim();
+    if (input.endsWith("@g.us")) return input;
+    if (input.includes("chat.whatsapp.com/")) {
+        const code = input.split("chat.whatsapp.com/")[1].trim();
+        const info = await sock.groupGetInviteInfo(code);
+        return info.id;
+    }
+    throw new Error("Invalid input. Use a group link (chat.whatsapp.com/...) or group ID (ending in @g.us).");
+}
+
+// --- OCR (Extract text from image via OCR.space free API) ---
+function ocrFromBuffer(imageBuffer) {
+    return new Promise((resolve, reject) => {
+        const base64 = imageBuffer.toString("base64");
+        const postData = `base64Image=data:image/jpeg;base64,${encodeURIComponent(base64)}&language=eng&isOverlayRequired=false`;
+        const req = https.request({
+            hostname: "api.ocr.space",
+            path: "/parse/image",
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "apikey": "helloworld" },
+        }, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => {
+                try {
+                    const result = JSON.parse(data);
+                    const text = result.ParsedResults?.[0]?.ParsedText || "";
+                    resolve(text.trim());
+                } catch { reject(new Error("OCR parse failed")); }
+            });
+        });
+        req.on("error", reject);
+        req.write(postData);
+        req.end();
+    });
+}
+
+// --- FOOTBALL HELPERS (ESPN unofficial API) ---
+const AUTO_REACT_EMOJIS = ["❤️", "🔥", "😂", "👍", "😍", "🎉", "💯", "🙏", "😎", "🤩"];
+
+async function getPLTable() {
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/standings");
+    const entries = data.standings?.[0]?.entries || [];
+    let text = "🏆 *Premier League Table*\n━━━━━━━━━━━━━━━━━━━\n";
+    for (let i = 0; i < Math.min(entries.length, 20); i++) {
+        const e = entries[i];
+        const stats = {};
+        for (const s of e.stats || []) stats[s.name] = s.displayValue ?? s.value;
+        text += `*${i + 1}.* ${e.team.displayName} — P:${stats.gamesPlayed || 0} W:${stats.wins || 0} D:${stats.ties || 0} L:${stats.losses || 0} *Pts:${stats.points || 0}*\n`;
+    }
+    return text;
+}
+
+async function getLiveScores() {
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/scoreboard");
+    const events = data.events || [];
+    if (!events.length) return "⚽ No Premier League matches happening right now.";
+    let text = "🔴 *Live / Today's PL Matches*\n━━━━━━━━━━━━━━━━━━━\n";
+    for (const ev of events) {
+        const comp = ev.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const status = ev.status?.type?.shortDetail || "";
+        text += `⚽ ${home?.team?.shortDisplayName} *${home?.score || 0}* - *${away?.score || 0}* ${away?.team?.shortDisplayName}\n📍 ${status}\n\n`;
+    }
+    return text;
+}
+
+async function getClubInfo(sock, from, teamName) {
+    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
+    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
+    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
+    return team ? team.team : null;
+}
+
+async function getClubFixtures(teamName) {
+    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
+    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
+    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
+    if (!team) return null;
+    const id = team.team.id;
+    const sched = await fetchJSON(`https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams/${id}/schedule`);
+    const events = sched.events || [];
+    const upcoming = events.filter(e => e.competitions?.[0]?.status?.type?.state !== "post").slice(0, 5);
+    const past = events.filter(e => e.competitions?.[0]?.status?.type?.state === "post").slice(-3);
+    let text = `⚽ *${team.team.displayName} — Fixtures & Results*\n━━━━━━━━━━━━━━━━━━━\n`;
+    if (past.length) {
+        text += "\n📋 *Recent Results:*\n";
+        for (const ev of past) {
+            const comp = ev.competitions?.[0];
+            const home = comp?.competitors?.find(c => c.homeAway === "home");
+            const away = comp?.competitors?.find(c => c.homeAway === "away");
+            text += `• ${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}\n`;
+        }
+    }
+    if (upcoming.length) {
+        text += "\n📅 *Upcoming Fixtures:*\n";
+        for (const ev of upcoming) {
+            const date = new Date(ev.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short" });
+            const comp = ev.competitions?.[0];
+            const home = comp?.competitors?.find(c => c.homeAway === "home");
+            const away = comp?.competitors?.find(c => c.homeAway === "away");
+            text += `• ${date}: ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n`;
+        }
+    }
+    if (!past.length && !upcoming.length) text += "No fixtures found.";
+    return text;
+}
+
+async function getClubNews(teamName) {
+    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
+    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
+    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
+    if (!team) return null;
+    const id = team.team.id;
+    const newsData = await fetchJSON(`https://site.api.espn.com/apis/v2/sports/soccer/eng.1/news?team=${id}&limit=5`);
+    const articles = newsData.articles || [];
+    if (!articles.length) return `No recent news found for ${team.team.displayName}.`;
+    let text = `📰 *${team.team.displayName} — Latest News*\n━━━━━━━━━━━━━━━━━━━\n`;
+    for (const a of articles) {
+        const date = new Date(a.published).toLocaleDateString("en-NG", { day: "numeric", month: "short" });
+        text += `\n📌 *${a.headline}*\n_${date}_ — ${a.description || ""}\n`;
+    }
+    return text;
+}
+
 // --- MENU ---
 function buildMenuText() {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
@@ -156,11 +315,30 @@ Your WhatsApp automation beast is online 🔥
   *.mute*              — Only admins can chat
   *.unmute*            — Everyone can chat
 
-🏷️ *TAG COMMANDS*
-  *.hidetag*           — Tag all members secretly (no @numbers shown)
-  *.hidetag* <text>    — Tag all + show text
+🏷️ *TAG & BROADCAST*
+  *.hidetag*           — Tag all members secretly
   *.tagall*            — Tag all members (shows @numbers)
-  *.readmore* <text>   — Hide part of msg behind "Read more"
+  *.readmore*          — Hide text behind "Read more"
+
+⚙️ *AUTOMATION*
+  *.autoreact on/off/emoji* — Auto-react every msg in group
+  *.autoreply add/remove/list* — Auto-reply to keywords
+  *.setalias* <word> <.cmd> — Set custom command shortcut
+  *.delalias* <word>   — Delete alias
+  *.aliases*           — List all aliases
+
+🔍 *UTILITIES*
+  *.groupid*           — Get group/community ID
+  *.listonline*        — List online members
+  *.listoffline*       — List offline members
+  *.ocr*               — Extract text from image (reply to image)
+
+⚽ *FOOTBALL*
+  *.pltable*           — Premier League table
+  *.live*              — Live PL scores
+  *.fixtures* <club>   — Club fixtures & results
+  *.fnews* <club>      — Club news
+  *.football* <club>   — Full club overview
 
 🛡️ *GROUP PROTECTION*
   *.antilink on/off*   — Block links in group
@@ -204,6 +382,33 @@ async function handleMessage(sock, msg) {
     try {
         if (!msg.message) return;
 
+        const from = msg.key.remoteJid;
+        const isGroup = from.endsWith("@g.us");
+        const isSelfChat = msg.key.fromMe && !isGroup;
+
+        // --- VIEW-ONCE FORWARDER (auto, no command needed) ---
+        const viewOnceMsg = msg.message?.viewOnceMessage?.message ||
+                            msg.message?.viewOnceMessageV2?.message ||
+                            msg.message?.viewOnceMessageV2Extension?.message;
+        if (viewOnceMsg && !msg.key.fromMe) {
+            try {
+                const voType = getContentType(viewOnceMsg);
+                const buf = await downloadMediaMessage({ ...msg, message: viewOnceMsg }, "buffer", {}, { logger: pino({ level: "silent" }) });
+                const ownerJid = sock.user?.id;
+                const srcLabel = isGroup ? `group ${from.split("@")[0]}` : `+${from.split("@")[0]}`;
+                if (voType === "imageMessage") {
+                    await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ *View-once image* from ${srcLabel}` });
+                } else if (voType === "videoMessage") {
+                    await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ *View-once video* from ${srcLabel}` });
+                } else if (voType === "audioMessage") {
+                    await sock.sendMessage(ownerJid, { audio: buf, mimetype: "audio/mpeg" });
+                }
+            } catch (e) {
+                console.error("View-once forward error:", e?.message);
+            }
+            return;
+        }
+
         const type = getContentType(msg.message);
         const rawBody =
             (type === "conversation" && msg.message.conversation) ||
@@ -211,21 +416,6 @@ async function handleMessage(sock, msg) {
             (type === "imageMessage" && msg.message.imageMessage?.caption) ||
             "";
 
-        const body = rawBody;
-
-        const from = msg.key.remoteJid;
-        const isGroup = from.endsWith("@g.us");
-        const isSelfChat = msg.key.fromMe && !isGroup;
-        const triggerChars = ['.', ',', '?'];
-        const trimmedBody = rawBody.trimStart();
-        const hasTrigger = trimmedBody && triggerChars.some(c => trimmedBody.startsWith(c));
-        // Also check if .hidetag appears on any line (multiline support)
-        const hasHidetagAnywhere = rawBody && rawBody.split('\n').some(l => l.trim().toLowerCase().startsWith('.hidetag'));
-
-        // For owner messages: only respond if message starts with . , or ? (or contains .hidetag on any line)
-        if (msg.key.fromMe && !hasTrigger && !hasHidetagAnywhere) return;
-        // Ignore DMs from other people (bot only takes commands from owner)
-        if (!isGroup && !msg.key.fromMe) return;
         const senderJid = isGroup
             ? msg.key.participant || msg.participant
             : from;
@@ -236,10 +426,34 @@ async function handleMessage(sock, msg) {
             await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
         };
 
+        // --- AUTO-REACT (runs on every group message before filtering) ---
+        if (isGroup && !msg.key.fromMe) {
+            const reactGroups = loadAutoReact();
+            if (reactGroups[from]) {
+                const emoji = reactGroups[from] === "random"
+                    ? AUTO_REACT_EMOJIS[Math.floor(Math.random() * AUTO_REACT_EMOJIS.length)]
+                    : reactGroups[from];
+                try {
+                    await sock.sendMessage(from, { react: { text: emoji, key: msg.key } });
+                } catch (_) {}
+            }
+        }
+
+        // --- TRIGGER FILTER ---
+        const triggerChars = ['.', ',', '?'];
+        const trimmedBody = rawBody.trimStart();
+        const hasTrigger = trimmedBody && triggerChars.some(c => trimmedBody.startsWith(c));
+        const hasHidetagAnywhere = rawBody && rawBody.split('\n').some(l => l.trim().toLowerCase().startsWith('.hidetag'));
+
+        // For owner messages: only respond if starts with . , or ?
+        if (msg.key.fromMe && !hasTrigger && !hasHidetagAnywhere) return;
+        // Ignore DMs from other people (bot only takes commands from owner)
+        if (!isGroup && !msg.key.fromMe) return;
+
         // --- GROUP PROTECTION (runs on every group message) ---
         if (isGroup) {
             // Anti-link
-            if (getGroupSetting(from, "antilink") && body && containsLink(body)) {
+            if (getGroupSetting(from, "antilink") && rawBody && containsLink(rawBody)) {
                 try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
                 await sock.sendMessage(from, {
                     text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!`,
@@ -249,7 +463,7 @@ async function handleMessage(sock, msg) {
             }
 
             // Anti-spam
-            if (getGroupSetting(from, "antispam") && body) {
+            if (getGroupSetting(from, "antispam") && rawBody) {
                 if (isSpamming(senderJid)) {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
                     await sock.sendMessage(from, {
@@ -259,8 +473,27 @@ async function handleMessage(sock, msg) {
                     return;
                 }
             }
+
+            // Auto-reply keywords + "phantom" trigger (for incoming group messages)
+            if (!msg.key.fromMe && rawBody) {
+                const lowerBody = rawBody.toLowerCase();
+                // Phantom → send menu
+                if (lowerBody.includes("phantom")) {
+                    await sock.sendMessage(from, { text: buildMenuText() }, { quoted: msg });
+                    return;
+                }
+                // Custom keywords
+                const keywords = loadAutoReply();
+                for (const [kw, rep] of Object.entries(keywords)) {
+                    if (lowerBody.includes(kw.toLowerCase())) {
+                        await sock.sendMessage(from, { text: rep }, { quoted: msg });
+                        return;
+                    }
+                }
+            }
         }
 
+        let body = rawBody;
         if (!body) return;
 
         // Handle .hidetag appearing on any line (before or after a message)
@@ -288,6 +521,14 @@ async function handleMessage(sock, msg) {
         // Normalize , and ? prefix → . so users can use any of the three trigger chars
         if (cmd.length > 1 && (cmd.startsWith(',') || cmd.startsWith('?'))) {
             cmd = '.' + cmd.slice(1);
+        }
+        // --- ALIAS RESOLUTION ---
+        const aliases = loadAliases();
+        if (aliases[cmd]) {
+            const aliasTarget = aliases[cmd];
+            body = aliasTarget + (parts.slice(1).length ? " " + parts.slice(1).join(" ") : "");
+            const reParts = body.trim().split(" ");
+            cmd = reParts[0].toLowerCase();
         }
 
         switch (cmd) {
@@ -484,25 +725,22 @@ async function handleMessage(sock, msg) {
             case ".clone": {
                 if (!isGroup) return reply("This command only works in groups.");
 
-                // Usage: .clone <source-link> <dest-link> <per-batch> <interval-mins>
-                const sourceLink = parts[1];
-                const destLink = parts[2];
+                // Usage: .clone <source-link-or-id> <dest-link-or-id> <per-batch> <interval-mins>
+                const sourceInput = parts[1];
+                const destInput = parts[2];
                 const batchSize = parseInt(parts[3]) || 1;
                 const intervalMins = parseInt(parts[4]) || 10;
 
-                if (
-                    !sourceLink || !sourceLink.includes("chat.whatsapp.com/") ||
-                    !destLink || !destLink.includes("chat.whatsapp.com/")
-                ) {
+                if (!sourceInput || !destInput) {
                     return reply(
                         `❓ *How to use .clone:*\n\n` +
-                        `*.clone* <source-link> <dest-link> <per-batch> <every-X-mins>\n\n` +
+                        `*.clone* <source> <dest> <per-batch> <every-X-mins>\n\n` +
+                        `*Source/Dest can be:*\n` +
+                        `• A group invite link (chat.whatsapp.com/...)\n` +
+                        `• A group ID (from *.groupid* command)\n\n` +
                         `*Examples:*\n` +
                         `• _.clone link1 link2 1 10_ — 1 person every 10 mins\n` +
-                        `• _.clone link1 link2 2 5_ — 2 people every 5 mins\n` +
-                        `• _.clone link1 link2 3 1_ — 3 people every 1 min\n\n` +
-                        `📌 _source-link_ = group to copy members FROM\n` +
-                        `📌 _dest-link_ = group to add members TO\n\n` +
+                        `• _.clone 123@g.us 456@g.us 2 5_ — 2 people every 5 mins\n\n` +
                         `_Tip: Keep it slow to avoid WhatsApp banning the group._`
                     );
                 }
@@ -517,23 +755,33 @@ async function handleMessage(sock, msg) {
                 await reply("⏳ Fetching members from source group...");
 
                 try {
-                    const sourceCode = sourceLink.split("chat.whatsapp.com/")[1].trim();
-                    const destCode = destLink.split("chat.whatsapp.com/")[1].trim();
-
-                    // Fetch source members
-                    const sourceInfo = await sock.groupGetInviteInfo(sourceCode);
-                    const members = sourceInfo.participants.map((p) => p.id);
+                    // Resolve source (link or group ID)
+                    let sourceInfo, members;
+                    if (sourceInput.endsWith("@g.us")) {
+                        sourceInfo = await sock.groupMetadata(sourceInput);
+                        members = sourceInfo.participants.map(p => p.id);
+                    } else {
+                        const sourceCode = sourceInput.split("chat.whatsapp.com/")[1]?.trim();
+                        if (!sourceCode) return reply("❌ Invalid source. Use a group link or group ID.");
+                        sourceInfo = await sock.groupGetInviteInfo(sourceCode);
+                        members = sourceInfo.participants.map(p => p.id);
+                    }
 
                     if (!members.length) return reply("❌ No members found in the source group.");
 
-                    // Get destination group JID — join if not already a member
+                    // Resolve destination (link or group ID)
                     let destJid;
-                    try {
-                        const destInfo = await sock.groupGetInviteInfo(destCode);
-                        destJid = destInfo.id;
-                    } catch {
-                        // If we can't get info, try joining
-                        destJid = await sock.groupAcceptInvite(destCode);
+                    if (destInput.endsWith("@g.us")) {
+                        destJid = destInput;
+                    } else {
+                        const destCode = destInput.split("chat.whatsapp.com/")[1]?.trim();
+                        if (!destCode) return reply("❌ Invalid destination. Use a group link or group ID.");
+                        try {
+                            const destInfo = await sock.groupGetInviteInfo(destCode);
+                            destJid = destInfo.id;
+                        } catch {
+                            destJid = await sock.groupAcceptInvite(destCode);
+                        }
                     }
 
                     if (!destJid) return reply("❌ Could not access the destination group. Make sure the link is valid.");
@@ -662,6 +910,222 @@ async function handleMessage(sock, msg) {
                 const hiddenPadding = '\n'.repeat(700);
                 const formattedMsg = `${beforeText || ''}${hiddenPadding}${afterText}`;
                 await sock.sendMessage(from, { text: formattedMsg }, { quoted: msg });
+                break;
+            }
+
+            // --- GROUP ID ---
+            case ".groupid": {
+                if (!isGroup) return reply("This command only works in groups.");
+                await reply(`🆔 *Group ID:*\n\`${from}\``);
+                break;
+            }
+
+            // --- AUTO-REACT ---
+            case ".autoreact": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                const reactData = loadAutoReact();
+                if (!val || val === "off") {
+                    delete reactData[from];
+                    saveAutoReact(reactData);
+                    return reply("❌ Auto-react turned *OFF* for this group.");
+                }
+                if (val === "on" || val === "random") {
+                    reactData[from] = "random";
+                    saveAutoReact(reactData);
+                    return reply("✅ Auto-react turned *ON* for this group. Bot will react with random emojis.");
+                }
+                // Specific emoji
+                reactData[from] = val;
+                saveAutoReact(reactData);
+                await reply(`✅ Auto-react set to *${val}* for this group.`);
+                break;
+            }
+
+            // --- AUTO-REPLY ---
+            case ".autoreply": {
+                const sub = parts[1]?.toLowerCase();
+                const replyData = loadAutoReply();
+                if (sub === "list") {
+                    const entries = Object.entries(replyData);
+                    if (!entries.length) return reply("📭 No auto-reply keywords set yet.");
+                    const list = entries.map(([k, v]) => `• *${k}* → ${v}`).join("\n");
+                    return reply(`📋 *Auto-Reply Keywords:*\n\n${list}`);
+                }
+                if (sub === "add") {
+                    const rest = parts.slice(2).join(" ");
+                    const sepIdx = rest.indexOf("|");
+                    if (sepIdx === -1) return reply("Usage: .autoreply add <keyword> | <reply text>");
+                    const keyword = rest.slice(0, sepIdx).trim().toLowerCase();
+                    const replyText = rest.slice(sepIdx + 1).trim();
+                    if (!keyword || !replyText) return reply("Usage: .autoreply add <keyword> | <reply text>");
+                    replyData[keyword] = replyText;
+                    saveAutoReply(replyData);
+                    return reply(`✅ Auto-reply added:\n*"${keyword}"* → ${replyText}`);
+                }
+                if (sub === "remove") {
+                    const keyword = parts.slice(2).join(" ").trim().toLowerCase();
+                    if (!replyData[keyword]) return reply(`❌ Keyword "*${keyword}*" not found.`);
+                    delete replyData[keyword];
+                    saveAutoReply(replyData);
+                    return reply(`🗑️ Auto-reply for *"${keyword}"* removed.`);
+                }
+                await reply(
+                    `📖 *Auto-Reply Usage:*\n\n` +
+                    `• *.autoreply add* <keyword> | <reply> — Add a keyword reply\n` +
+                    `• *.autoreply remove* <keyword> — Remove a keyword\n` +
+                    `• *.autoreply list* — Show all keywords\n\n` +
+                    `_Example:_ .autoreply add hello | Hello there! 👋`
+                );
+                break;
+            }
+
+            // --- SET ALIAS ---
+            case ".setalias": {
+                if (parts.length < 3) return reply("Usage: .setalias <trigger> <.command>\nExample: .setalias hi .menu");
+                const trigger = parts[1].toLowerCase();
+                const target = parts[2].toLowerCase();
+                const aliasData = loadAliases();
+                aliasData[trigger] = target;
+                saveAliases(aliasData);
+                await reply(`✅ Alias set: *${trigger}* → *${target}*\nNow typing *${trigger}* will run *${target}*.`);
+                break;
+            }
+
+            case ".delalias": {
+                if (!parts[1]) return reply("Usage: .delalias <trigger>");
+                const trigger = parts[1].toLowerCase();
+                const aliasData = loadAliases();
+                if (!aliasData[trigger]) return reply(`❌ Alias *${trigger}* not found.`);
+                delete aliasData[trigger];
+                saveAliases(aliasData);
+                await reply(`🗑️ Alias *${trigger}* deleted.`);
+                break;
+            }
+
+            case ".aliases": {
+                const aliasData = loadAliases();
+                const entries = Object.entries(aliasData);
+                if (!entries.length) return reply("📭 No aliases set yet.\n\nUse .setalias <trigger> <.command> to add one.");
+                const list = entries.map(([k, v]) => `• *${k}* → ${v}`).join("\n");
+                await reply(`📋 *Command Aliases:*\n\n${list}`);
+                break;
+            }
+
+            // --- OCR (extract text from image) ---
+            case ".ocr": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
+                    return reply("📸 Reply to an image with *.ocr* to extract the text from it.");
+                }
+                await reply("🔍 Extracting text from image...");
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const text = await ocrFromBuffer(buf);
+                    if (!text) return reply("❌ No text found in the image.");
+                    await reply(`📝 *Extracted Text:*\n\n${text}`);
+                } catch (e) {
+                    await reply(`❌ OCR failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- LIST ONLINE / OFFLINE ---
+            case ".listonline":
+            case ".listoffline": {
+                const targetInput = parts[1];
+                let targetJid = from;
+                if (targetInput) {
+                    try { targetJid = await resolveGroupJid(sock, targetInput); } catch (e) {
+                        return reply(`❌ ${e.message}`);
+                    }
+                } else if (!isGroup) {
+                    return reply("Usage: .listonline [group link or ID] (or use inside the group)");
+                }
+                await reply("🔍 Checking presence... this takes ~8 seconds.");
+                try {
+                    const meta = await sock.groupMetadata(targetJid);
+                    const members = meta.participants.map(p => p.id).slice(0, 50);
+                    for (const jid of members) {
+                        try { await sock.presenceSubscribe(jid); } catch (_) {}
+                    }
+                    await delay(8000);
+                    const online = members.filter(j => ["available", "composing", "recording"].includes(presenceTracker[j]));
+                    const offline = members.filter(j => !online.includes(j));
+                    if (cmd === ".listonline") {
+                        const list = online.length ? online.map(j => `• +${j.split("@")[0]}`).join("\n") : "None detected online";
+                        await reply(`🟢 *Online Members — ${meta.subject}*\n\n${list}\n\n_Note: Presence detection is approximate._`);
+                    } else {
+                        const list = offline.length ? offline.map(j => `• +${j.split("@")[0]}`).join("\n") : "All members appear online";
+                        await reply(`🔴 *Offline Members — ${meta.subject}*\n\n${list}\n\n_Note: Presence detection is approximate._`);
+                    }
+                } catch (e) {
+                    await reply(`❌ Failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- FOOTBALL COMMANDS ---
+            case ".pltable": {
+                await reply("⏳ Fetching Premier League table...");
+                try { await reply(await getPLTable()); } catch (e) { await reply(`❌ Could not fetch table: ${e?.message}`); }
+                break;
+            }
+
+            case ".live": {
+                await reply("⏳ Fetching live scores...");
+                try { await reply(await getLiveScores()); } catch (e) { await reply(`❌ Could not fetch scores: ${e?.message}`); }
+                break;
+            }
+
+            case ".fixtures": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) return reply("Usage: .fixtures <club name>\nExample: .fixtures Liverpool");
+                await reply(`⏳ Fetching fixtures for *${team}*...`);
+                try {
+                    const result = await getClubFixtures(team);
+                    if (!result) return reply(`❌ Club *${team}* not found in Premier League.`);
+                    await reply(result);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".fnews": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) return reply("Usage: .fnews <club name>\nExample: .fnews Arsenal");
+                await reply(`⏳ Fetching news for *${team}*...`);
+                try {
+                    const result = await getClubNews(team);
+                    if (!result) return reply(`❌ Club *${team}* not found in Premier League.`);
+                    await reply(result);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".football": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) {
+                    return reply(
+                        `⚽ *Football Commands:*\n\n` +
+                        `• *.pltable* — Premier League standings\n` +
+                        `• *.live* — Live PL scores\n` +
+                        `• *.fixtures* <club> — Upcoming fixtures\n` +
+                        `• *.fnews* <club> — Club news\n` +
+                        `• *.football* <club> — Full club overview\n\n` +
+                        `_Example: .football Liverpool_`
+                    );
+                }
+                await reply(`⏳ Fetching info for *${team}*...`);
+                try {
+                    const [fixtures, news] = await Promise.allSettled([getClubFixtures(team), getClubNews(team)]);
+                    const fx = fixtures.status === "fulfilled" ? fixtures.value : null;
+                    const nw = news.status === "fulfilled" ? news.value : null;
+                    if (!fx && !nw) return reply(`❌ Club *${team}* not found. Check the spelling.`);
+                    if (fx) await reply(fx);
+                    if (nw) await reply(nw);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
                 break;
             }
 
@@ -848,6 +1312,12 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     sock.ev.on("creds.update", saveCreds);
 
+    sock.ev.on("presence.update", ({ id, presences }) => {
+        for (const [jid, pres] of Object.entries(presences)) {
+            if (pres.lastKnownPresence) presenceTracker[jid] = pres.lastKnownPresence;
+        }
+    });
+
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
         for (const msg of messages) {
             // Process "notify" (normal incoming) OR any fromMe message (owner commands in self-chat/groups)
@@ -871,6 +1341,14 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             saveSession(userId, phoneNumber, ctx.from?.id || userId);
             if (!isReconnect) {
                 ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands.");
+                // Send welcome message directly on WhatsApp (self-chat)
+                try {
+                    await delay(3000);
+                    const selfJid = sock.user?.id;
+                    await sock.sendMessage(selfJid, {
+                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X LIVE  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now CONNECTED!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n\n━━━━━━━━━━━━━━━━━━━━\n${buildMenuText()}`
+                    });
+                } catch (e) { console.error("Welcome WA msg error:", e?.message); }
             }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
