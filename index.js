@@ -24,12 +24,19 @@ const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 // Per-user state
 const activeSockets = {};
 const retryCounts = {};
+const botJids = {};        // userId -> bot's own WhatsApp JID
+const telegramCtxs = {};   // userId -> telegram ctx (for alerts)
 
 // Anti-spam tracker: { jid: { count, lastTime } }
 const spamTracker = {};
 
 // GC Clone jobs: { groupJid: { members: [], index, interval } }
 const cloneJobs = {};
+
+// Saved group invite links for auto-rejoin: { groupJid: inviteCode }
+const savedGroupLinks = {};
+// Saved group names: { groupJid: groupName }
+const groupNames = {};
 
 // --- SETTINGS ---
 function loadSettings() {
@@ -271,6 +278,12 @@ async function handleMessage(sock, msg) {
             case ".link": {
                 if (!isGroup) return reply("This command only works in groups.");
                 const inv = await sock.groupInviteCode(from);
+                // Save invite code for auto-rejoin if bot gets kicked
+                savedGroupLinks[from] = inv;
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    groupNames[from] = meta.subject;
+                } catch (_) {}
                 await reply(`🔗 Group Link:\nhttps://chat.whatsapp.com/${inv}`);
                 break;
             }
@@ -472,10 +485,49 @@ async function handleMessage(sock, msg) {
 }
 
 // --- GROUP EVENTS HANDLER ---
-async function handleGroupUpdate(sock, update) {
+async function handleGroupUpdate(sock, update, ctx, botJid) {
     const { id: groupJid, participants, action } = update;
 
     try {
+        // Save group name whenever we see any event from a group
+        try {
+            if (!groupNames[groupJid]) {
+                const meta = await sock.groupMetadata(groupJid);
+                groupNames[groupJid] = meta.subject;
+                // Also save invite link for auto-rejoin
+                const code = await sock.groupInviteCode(groupJid);
+                savedGroupLinks[groupJid] = code;
+            }
+        } catch (_) {}
+
+        // Detect when the bot itself is removed/kicked from a group
+        if (action === "remove" && botJid && participants.includes(botJid)) {
+            const gName = groupNames[groupJid] || groupJid;
+            const savedCode = savedGroupLinks[groupJid];
+
+            // Alert owner on Telegram immediately
+            try {
+                await ctx.reply(
+                    `🚨 *ALERT: Bot was kicked!*\n\n` +
+                    `I was removed from the group:\n*"${gName}"*\n\n` +
+                    `⚠️ Someone may be trying to steal or takeover that group.\n\n` +
+                    `${savedCode ? "🔄 Attempting to auto-rejoin now..." : "❌ No saved invite link — I can't rejoin automatically. Use *.link* in a group next time to enable auto-rejoin."}`
+                );
+            } catch (_) {}
+
+            // Try to auto-rejoin if we have a saved invite link
+            if (savedCode) {
+                try {
+                    await delay(3000);
+                    await sock.groupAcceptInvite(savedCode);
+                    await ctx.reply(`✅ Successfully rejoined *"${gName}"*. I'm back in the group!`);
+                } catch (rejoinErr) {
+                    await ctx.reply(`❌ Auto-rejoin failed for *"${gName}"*: ${rejoinErr?.message || "link may have expired or been changed."}`);
+                }
+            }
+            return;
+        }
+
         if (action === "add" && getGroupSetting(groupJid, "welcome")) {
             for (const jid of participants) {
                 const name = `@${jid.split("@")[0]}`;
@@ -589,7 +641,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     });
 
     sock.ev.on("group-participants.update", async (update) => {
-        await handleGroupUpdate(sock, update);
+        await handleGroupUpdate(sock, update, ctx, botJids[userId]);
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -597,8 +649,11 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
         if (connection === "open") {
             retryCounts[userId] = 0;
+            // Store the bot's own JID so we can detect when it gets kicked
+            botJids[userId] = sock.user?.id || sock.user?.jid || null;
+            telegramCtxs[userId] = ctx;
             ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands.");
-            console.log(`User ${userId} connected!`);
+            console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
 
         if (connection === "close") {
