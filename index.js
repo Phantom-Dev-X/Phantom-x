@@ -205,14 +205,15 @@ async function handleMessage(sock, msg) {
             (type === "imageMessage" && msg.message.imageMessage?.caption) ||
             "";
 
-        // Since the bot IS the user's number, fromMe = true for owner's messages.
-        // Only skip fromMe if it's NOT a command (avoids responding to bot's own replies).
-        if (msg.key.fromMe && !rawBody.startsWith(".")) return;
-
         const body = rawBody;
 
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
+        const isSelfChat = msg.key.fromMe && !isGroup;
+
+        // In groups: skip the owner's non-command messages to avoid responding to normal chats
+        // In self-chat: allow everything through so the owner can use the bot by messaging themselves
+        if (msg.key.fromMe && !isSelfChat && !rawBody.startsWith(".")) return;
         const senderJid = isGroup
             ? msg.key.participant || msg.participant
             : from;
@@ -564,6 +565,9 @@ async function handleMessage(sock, msg) {
             }
 
             default:
+                if (isSelfChat && body) {
+                    await reply(`👋 I'm active! Type *.menu* to see all commands.`);
+                }
                 break;
         }
     } catch (err) {
