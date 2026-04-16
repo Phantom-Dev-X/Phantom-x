@@ -22,6 +22,7 @@ const MAX_RETRIES = 5;
 const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
+const MODE_FILE = path.join(__dirname, "bot_mode.json");
 
 // Per-user state
 const activeSockets = {};
@@ -78,6 +79,22 @@ function setGroupSetting(groupJid, key, value) {
     if (!s[groupJid]) s[groupJid] = {};
     s[groupJid][key] = value;
     saveSettings(s);
+}
+
+// --- BOT MODE (public / owner) ---
+function loadModes() {
+    if (!fs.existsSync(MODE_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(MODE_FILE, "utf8")); } catch { return {}; }
+}
+function saveModes(d) { fs.writeFileSync(MODE_FILE, JSON.stringify(d, null, 2)); }
+function getBotMode(botJid) {
+    if (!botJid) return "public";
+    return loadModes()[botJid] || "public";
+}
+function setBotMode(botJid, mode) {
+    const d = loadModes();
+    d[botJid] = mode;
+    saveModes(d);
 }
 
 // --- HELPERS ---
@@ -347,8 +364,9 @@ async function getClubNews(teamName) {
 }
 
 // --- MENU ---
-function buildMenuText() {
+function buildMenuText(mode) {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
     return `
 ╔══════════════════════╗
 ║  ░▒▓  PHANTOM X  ▓▒░  ║
@@ -362,15 +380,17 @@ Your WhatsApp automation beast is online 🔥
 ━━━━━━━━━━━━━━━━━━━━
 🤖 Name      : *Phantom X*
 🔖 Version   : *v${BOT_VERSION}*
-🌐 Status    : *Public*
+🌐 Mode      : *${modeLabel}*
 ⏱️ Runtime   : *${formatUptime()}*
 🕐 Time (NG) : *${time}*
 ━━━━━━━━━━━━━━━━━━━━
 
 📋 *GENERAL COMMANDS*
-  *.menu*   — Show this menu
-  *.info*   — Bot info
-  *.help*   — Full guide for every command
+  *.menu*          — Show this menu
+  *.info*          — Bot info
+  *.help*          — Full guide for every command
+  *.mode public*   — Let everyone use commands
+  *.mode owner*    — Only you can use commands
 
 👥 *GROUP COMMANDS*
   *.add* <number>      — Add member
@@ -572,6 +592,12 @@ async function handleMessage(sock, msg) {
         // For DMs from other people: skip entirely (no command processing)
         if (!isGroup && !isSelfChat && !msg.key.fromMe) return;
 
+        // --- BOT MODE ENFORCEMENT ---
+        const botJid = sock.user?.id || null;
+        const currentMode = getBotMode(botJid);
+        // In owner mode, only process commands sent by the bot owner themselves (fromMe)
+        if (currentMode === "owner" && !msg.key.fromMe && !isSelfChat) return;
+
         // --- GROUP PROTECTION (runs on every group message) ---
         if (isGroup) {
             // Anti-link
@@ -601,7 +627,7 @@ async function handleMessage(sock, msg) {
                 const lowerBody = rawBody.toLowerCase();
                 // Phantom → send menu
                 if (lowerBody.includes("phantom")) {
-                    await sock.sendMessage(from, { text: buildMenuText() }, { quoted: msg });
+                    await sock.sendMessage(from, { text: buildMenuText(currentMode) }, { quoted: msg });
                     return;
                 }
                 // Custom keywords
@@ -655,12 +681,34 @@ async function handleMessage(sock, msg) {
 
         switch (cmd) {
             case ".menu": {
+                const menuText = buildMenuText(currentMode);
                 try {
                     const buf = await fetchBuffer("https://i.imgur.com/6LxHxwY.jpeg");
-                    await sock.sendMessage(from, { image: buf, caption: buildMenuText() }, { quoted: msg });
-                } catch {
-                    await reply(buildMenuText());
+                    await sock.sendMessage(from, { image: buf, caption: menuText }, { quoted: msg });
+                } catch (_imgErr) {
+                    try {
+                        await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                    } catch (sendErr) {
+                        console.error("Menu send error:", sendErr?.message);
+                    }
                 }
+                break;
+            }
+
+            case ".mode": {
+                const val = parts[1]?.toLowerCase();
+                if (!["owner", "public"].includes(val)) {
+                    return reply(
+                        `⚙️ *Bot Mode Settings*\n\n` +
+                        `Current mode: *${currentMode === "owner" ? "👤 Owner Only" : "🌍 Public"}*\n\n` +
+                        `• *.mode public* — Anyone in groups can use commands\n` +
+                        `• *.mode owner* — Only you (the bot owner) can use commands\n\n` +
+                        `_Default is public._`
+                    );
+                }
+                setBotMode(botJid, val);
+                const label = val === "owner" ? "👤 Owner Only" : "🌍 Public";
+                await reply(`✅ Bot mode set to *${label}*\n\n${val === "owner" ? "Only you can now trigger commands." : "Everyone in groups can now use commands."}`);
                 break;
             }
 
