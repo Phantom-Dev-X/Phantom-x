@@ -1,17 +1,28 @@
-const { default: makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, jidNormalizedUser } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
-const readline = require("readline");
 
 // --- CONFIGURATION ---
-const TELEGRAM_TOKEN = '8607342512:AAGI3M6y0zOnxk27iBRFDj0XycPBS6u_m2U'; // Paste your Tokend heddre
-const MY_CHAT_ID = '8277426999'; // Paste your ID here
+const TELEGRAM_TOKEN = '8607342512:AAGl3M6y...'; // Your token is already here
 const telBot = new Telegraf(TELEGRAM_TOKEN);
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+// --- TELEGRAM COMMANDS ---
+telBot.start((ctx) => {
+    ctx.reply("Welcome to Phantom-X Bot! 🤖\n\nI am running on your VPS. To link your WhatsApp, use:\n/pair 2348102756072");
+});
 
-async function startBot() {
+telBot.command('pair', async (ctx) => {
+    const input = ctx.message.text.split(' ')[1];
+    if (!input) return ctx.reply("Abeg, add your number! Example: /pair 2348102756072");
+    
+    ctx.reply("Generating your pairing code... please wait 5 seconds.");
+    startBot(input, ctx);
+});
+
+telBot.launch();
+
+// --- WHATSAPP ENGINE ---
+async function startBot(phoneNumber, ctx) {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     
     const sock = makeWASocket({
@@ -19,30 +30,30 @@ async function startBot() {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
         },
-        printQRInTerminal: false, // We don't want QR
+        printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
     });
 
-    // --- PAIRING CODE LOGIC ---
     if (!sock.authState.creds.registered) {
-        const phoneNumber = await question("Enter your phone number (e.g. 2348012345678): ");
-       await delay(3000);
-        const code = await sock.requestPairingCode(phoneNumber.trim());
-        
-        // Send the code to Telegram
-        await telBot.telegram.sendMessage(MY_CHAT_ID, `🚀 *Phantom-X Connection*\n\nYour Pairing Code is: \`${code}\``, { parse_mode: 'Markdown' });
-        console.log(`✅ Code sent to Telegram! Go check am.`);
+        await delay(5000); // 5 second wait to avoid 428 error
+        try {
+            const code = await sock.requestPairingCode(phoneNumber.trim());
+            await ctx.reply(`✅ Your Pairing Code is: ${code}`);
+            await ctx.reply("Copy this code and click the notification on your WhatsApp to link.");
+        } catch (err) {
+            console.error(err);
+            ctx.reply("❌ Error: WhatsApp blocked the request. Wait 20 mins and try again.");
+        }
     }
 
     sock.ev.on('creds.update', saveCreds);
-    
+
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log('✅ WhatsApp Bot is Connected and Live!');
+            ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!");
+            console.log("Connected!");
         }
     });
 }
-
-startBot();
 
