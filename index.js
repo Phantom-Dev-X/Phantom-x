@@ -3,7 +3,7 @@ const pino = require("pino");
 const { Telegraf } = require("telegraf");
 
 // --- CONFIGURATION ---
-const TELEGRAM_TOKEN = '8607342512:AAGl3M6y...'; // Your token is already here
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const telBot = new Telegraf(TELEGRAM_TOKEN);
 
 // --- TELEGRAM COMMANDS ---
