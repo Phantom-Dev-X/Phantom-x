@@ -20,6 +20,7 @@ const telBot = new Telegraf(TELEGRAM_TOKEN);
 const MAX_RETRIES = 5;
 const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
+const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 
 // Per-user state
 const activeSockets = {};
@@ -68,6 +69,32 @@ function getAuthDir(userId) {
 function clearAuthState(userId) {
     const authDir = getAuthDir(userId);
     if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+}
+
+// --- SESSION PERSISTENCE ---
+function loadSessions() {
+    if (!fs.existsSync(SESSIONS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveSession(userId, phoneNumber, chatId) {
+    const sessions = loadSessions();
+    sessions[userId] = { phoneNumber, chatId };
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+function deleteSession(userId) {
+    const sessions = loadSessions();
+    delete sessions[userId];
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+// Build a ctx-like wrapper using chat ID so we can send Telegram messages after restart
+function makeFakeCtx(chatId) {
+    return {
+        reply: (text, extra) => telBot.telegram.sendMessage(chatId, text, extra || {}),
+        from: { id: chatId },
+    };
 }
 
 function formatUptime() {
@@ -170,14 +197,19 @@ function isSpamming(jid) {
 async function handleMessage(sock, msg) {
     try {
         if (!msg.message) return;
-        if (msg.key.fromMe) return;
 
         const type = getContentType(msg.message);
-        const body =
+        const rawBody =
             (type === "conversation" && msg.message.conversation) ||
             (type === "extendedTextMessage" && msg.message.extendedTextMessage?.text) ||
             (type === "imageMessage" && msg.message.imageMessage?.caption) ||
             "";
+
+        // Since the bot IS the user's number, fromMe = true for owner's messages.
+        // Only skip fromMe if it's NOT a command (avoids responding to bot's own replies).
+        if (msg.key.fromMe && !rawBody.startsWith(".")) return;
+
+        const body = rawBody;
 
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
@@ -656,6 +688,29 @@ telBot.launch();
 process.once("SIGINT", () => telBot.stop("SIGINT"));
 process.once("SIGTERM", () => telBot.stop("SIGTERM"));
 
+// --- AUTO-RECONNECT SAVED SESSIONS ON STARTUP ---
+(async () => {
+    const sessions = loadSessions();
+    const entries = Object.entries(sessions);
+    if (!entries.length) return;
+    console.log(`[Startup] Found ${entries.length} saved session(s). Auto-reconnecting...`);
+    for (const [userId, { phoneNumber, chatId }] of entries) {
+        const authDir = getAuthDir(userId);
+        if (!fs.existsSync(authDir)) {
+            console.log(`[Startup] No auth folder for user ${userId}, skipping.`);
+            deleteSession(userId);
+            continue;
+        }
+        const fakeCtx = makeFakeCtx(chatId);
+        try {
+            await fakeCtx.reply("🔄 Bot restarted. Reconnecting your WhatsApp session automatically...");
+            startBot(Number(userId), phoneNumber, fakeCtx, true);
+        } catch (e) {
+            console.error(`[Startup] Failed to reconnect user ${userId}:`, e?.message);
+        }
+    }
+})();
+
 // --- WHATSAPP ENGINE ---
 async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
@@ -704,10 +759,13 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
         if (connection === "open") {
             retryCounts[userId] = 0;
-            // Store the bot's own JID so we can detect when it gets kicked
             botJids[userId] = sock.user?.id || sock.user?.jid || null;
             telegramCtxs[userId] = ctx;
-            ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands.");
+            // Save session so it auto-reconnects after restart
+            saveSession(userId, phoneNumber, ctx.from?.id || userId);
+            if (!isReconnect) {
+                ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands.");
+            }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
 
@@ -726,6 +784,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             if (shouldNotReconnect) {
                 delete activeSockets[userId];
                 delete retryCounts[userId];
+                deleteSession(userId);
                 if (statusCode === DisconnectReason.loggedOut) {
                     clearAuthState(userId);
                     ctx.reply("⚠️ WhatsApp session ended. Use /pair to reconnect.");
