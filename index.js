@@ -1,4 +1,11 @@
-const { default: makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, DisconnectReason } = require("@whiskeysockets/baileys");
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+} = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const fs = require("fs");
@@ -7,9 +14,11 @@ const path = require("path");
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const telBot = new Telegraf(TELEGRAM_TOKEN);
+const MAX_RETRIES = 5;
 
-// Each user gets their own socket and auth folder
+// Each user gets their own socket, auth folder and retry count
 const activeSockets = {};
+const retryCounts = {};
 
 function getAuthDir(userId) {
     return path.join(__dirname, "auth_info", String(userId));
@@ -38,7 +47,8 @@ telBot.command('pair', async (ctx) => {
         delete activeSockets[userId];
     }
 
-    // Clear only this user's old session data
+    // Reset retry count and clear old session
+    retryCounts[userId] = 0;
     clearAuthState(userId);
 
     ctx.reply("🔄 Generating your pairing code... please wait a few seconds.");
@@ -54,7 +64,11 @@ process.once("SIGTERM", () => telBot.stop("SIGTERM"));
 async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
 
+    // Always fetch the latest WhatsApp Web version to avoid 405 rejections
+    const { version } = await fetchLatestBaileysVersion();
+
     const sock = makeWASocket({
+        version,
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
@@ -70,10 +84,10 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         await delay(3000);
         try {
             const code = await sock.requestPairingCode(phoneNumber);
-            await ctx.reply(
-                `✅ Your Pairing Code is:\n\n*${code}*\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.`,
-                { parse_mode: "Markdown" }
-            );
+
+            // Send instructions and the code separately so the code is easy to copy
+            await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
+            await ctx.reply(`\`${code}\``, { parse_mode: "Markdown" });
         } catch (err) {
             console.error(`Pairing error for user ${userId}:`, err?.message || err);
             await ctx.reply("❌ Failed to generate pairing code. Please try again with /pair <your number>.");
@@ -87,6 +101,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         const { connection, lastDisconnect } = update;
 
         if (connection === "open") {
+            retryCounts[userId] = 0;
             ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!");
             console.log(`User ${userId} connected!`);
         }
@@ -104,18 +119,28 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             ].includes(statusCode);
 
             if (shouldNotReconnect) {
-                console.log(`User ${userId}: not reconnecting — ${reason}`);
                 delete activeSockets[userId];
+                delete retryCounts[userId];
                 if (statusCode === DisconnectReason.loggedOut) {
                     clearAuthState(userId);
                     ctx.reply("⚠️ WhatsApp session ended. Use /pair to reconnect.");
                 }
-            } else {
-                // Reconnect automatically — keeps connection alive for pairing to complete
-                console.log(`User ${userId}: reconnecting...`);
-                await delay(3000);
-                startBot(userId, phoneNumber, ctx, true);
+                return;
             }
+
+            // Limit reconnect attempts to avoid infinite loops
+            retryCounts[userId] = (retryCounts[userId] || 0) + 1;
+            if (retryCounts[userId] > MAX_RETRIES) {
+                console.log(`User ${userId}: max retries reached, stopping.`);
+                delete activeSockets[userId];
+                delete retryCounts[userId];
+                ctx.reply("❌ Could not connect to WhatsApp after several attempts. Please try /pair again.");
+                return;
+            }
+
+            console.log(`User ${userId}: reconnecting (attempt ${retryCounts[userId]})...`);
+            await delay(4000);
+            startBot(userId, phoneNumber, ctx, true);
         }
     });
 }
