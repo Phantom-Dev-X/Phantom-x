@@ -39,4 +39,3 @@ run = ["node", "index.js"]
 [userenv]
 
 [userenv.shared]
-TELEGRAM_TOKEN = "8690613602:AAH33JLKvpJe2RSdw6jP-Zm5JamGTpjoYuk"

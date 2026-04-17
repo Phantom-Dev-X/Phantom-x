@@ -18,6 +18,9 @@ const http = require("http");
 
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+if (!TELEGRAM_TOKEN) {
+    throw new Error("Missing TELEGRAM_TOKEN environment variable. Add it as a Replit secret before starting Phantom-X.");
+}
 const telBot = new Telegraf(TELEGRAM_TOKEN);
 const MAX_RETRIES = 5;
 const BOT_VERSION = "1.0.0";

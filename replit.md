@@ -97,8 +97,10 @@ HTTP server runs on `PORT` env var (default 3000). Returns `👻 Phantom X is al
 
 ## Configuration
 
-- `TELEGRAM_TOKEN` — Telegram Bot token (Replit secret)
+- `TELEGRAM_TOKEN` — Telegram Bot token (configured as a Replit secret; required at startup)
 - `GEMINI_API_KEY` — Optional, for AI chat commands
+
+The application now fails fast with a clear error if `TELEGRAM_TOKEN` is missing, keeping sensitive runtime configuration separate from application code.
 
 ## Running
 
