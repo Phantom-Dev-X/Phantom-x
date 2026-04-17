@@ -3950,6 +3950,30 @@ function startKeepAliveServer(port) {
 }
 startKeepAliveServer(PING_PORT);
 
+// --- SELF-PING (keeps the Replit repl awake without needing UptimeRobot) ---
+// Uses REPLIT_DEV_DOMAIN env var which Replit sets automatically — stable for this repl.
+// Pings itself every 4 minutes so the repl never sleeps.
+(function startSelfPing() {
+    const replitDomain = process.env.REPLIT_DEV_DOMAIN;
+    if (!replitDomain) return; // Not on Replit — skip (use external pinger or Always-On on your host)
+
+    const selfUrl = `https://${replitDomain}`;
+    console.log(`[SelfPing] Auto-pinging ${selfUrl} every 4 minutes to stay awake.`);
+
+    setInterval(() => {
+        try {
+            const mod = selfUrl.startsWith("https") ? require("https") : require("http");
+            mod.get(selfUrl, (res) => {
+                // Success — repl stays awake
+            }).on("error", (err) => {
+                console.log(`[SelfPing] Ping failed (will retry in 4 min): ${err.message}`);
+            });
+        } catch (e) {
+            // Silently ignore
+        }
+    }, 4 * 60 * 1000); // every 4 minutes
+})();
+
 // --- SCHEDULE TIMER (check every minute, fire scheduled messages) ---
 setInterval(async () => {
     const now = new Date();
