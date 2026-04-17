@@ -71,6 +71,26 @@ A Node.js bot bridging Telegram and WhatsApp via Baileys. Users link their Whats
 - 20 unique themes: Ghost, Matrix, Royal, Inferno, Minimal, Void, Vaporwave, Gothic, Cursive, Cosmos, Soft, Diamond, Thunder, Warrior, Neon, Spy, Pirate, Shadow, BoldTech, Echo
 - Switch with `.menudesign 1-20`
 
+### Bug Tools (Owner Only)
+- `.bugmenu` — Show all bug/hack tools
+- `.crash @user` — Send a multi-layer lag bomb (zero-width chars + RTL override + Arabic flood)
+- `.freeze @user` — Flood with 10,000+ invisible zero-width characters
+- `.zalgo <text>` — Corrupt text with demonic combining characters
+- `.bigtext <text>` — Convert text to giant emoji block letters
+- `.invisible` — Send a perfectly blank/invisible message
+- `.rtl <text>` — Flip text with right-to-left Unicode override
+- `.mock <text>` — SpOnGeBoB mOcK tExT
+- `.aesthetic <text>` — Ａｅｓｔｈｅｔｉｃ fullwidth text
+- `.reverse <text>` — Reverse text backwards
+- `.clap <text>` — Add 👏 between 👏 every 👏 word
+
+### Extras
+- `.sticker` — Reply to image with .sticker to convert it to a WhatsApp sticker
+- `.toimg` — Reply to a sticker with .toimg to convert it back to image
+- `.qr <text>` — Generate a QR code for any text or link
+- `.genpwd <length>` — Generate a strong random password (6-64 chars)
+- `.base64 encode/decode <text>` — Encode or decode Base64 text
+
 ## Keep-Alive
 
 HTTP server runs on `PORT` env var (default 3000). Returns `👻 Phantom X is alive!` on any request. Use UptimeRobot or cron-job.org to ping `https://<your-replit-url>/` every 5 minutes.
