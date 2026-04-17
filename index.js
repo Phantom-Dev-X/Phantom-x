@@ -23,6 +23,7 @@ const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 const MODE_FILE = path.join(__dirname, "bot_mode.json");
+const MENU_BANNER_FILE = path.join(__dirname, "menu_banner.jpg");
 
 // Per-user state
 const activeSockets = {};
@@ -368,98 +369,126 @@ function buildMenuText(mode) {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
     const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
     return `
-╔══════════════════════╗
-║  ░▒▓  PHANTOM X  ▓▒░  ║
-╚══════════════════════╝
+╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+   ☠️  *P  H  A  N  T  O  M  ✘*  ☠️
+   _The Ghost in Your Machine_ 👻
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 
-🌟 *Hey Boss, Welcome Back!*
-Your WhatsApp automation beast is online 🔥
+◈ ◈ ◈  *S Y S T E M  S T A T U S*  ◈ ◈ ◈
 
-━━━━━━━━━━━━━━━━━━━━
-📌 *BOT INFO*
-━━━━━━━━━━━━━━━━━━━━
-🤖 Name      : *Phantom X*
-🔖 Version   : *v${BOT_VERSION}*
-🌐 Mode      : *${modeLabel}*
-⏱️ Runtime   : *${formatUptime()}*
-🕐 Time (NG) : *${time}*
-━━━━━━━━━━━━━━━━━━━━
+  🤖  *Bot*      ›  Phantom X
+  📌  *Version*  ›  v${BOT_VERSION}
+  🌐  *Mode*     ›  ${modeLabel}
+  ⏱️  *Uptime*   ›  ${formatUptime()}
+  🕐  *Time*     ›  ${time}
 
-📋 *GENERAL COMMANDS*
-  *.menu*          — Show this menu
-  *.phantom*       — Show full menu (owner shortcut)
-  *.info*          — Bot info
-  *.help*          — Full guide for every command
-  *.mode public*   — Let everyone use commands
-  *.mode owner*    — Only you can use commands
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 
-👥 *GROUP COMMANDS*
-  *.add* <number>      — Add member
-  *.kick* @user        — Remove member
-  *.promote* @user     — Make admin
-  *.demote* @user      — Remove admin
-  *.link*              — Get group link
-  *.revoke*            — Reset group link
-  *.mute*              — Only admins can chat
-  *.unmute*            — Everyone can chat
+〔 📋 *G E N E R A L* 〕
 
-🏷️ *TAG & BROADCAST*
-  *.hidetag*           — Tag all members secretly
-  *.tagall*            — Tag all members (shows @numbers)
-  *.readmore*          — Hide text behind "Read more"
+  ✦  *.menu* / *.phantom*  —  Show this menu
+  ✦  *.setpp*  —  Set menu banner (reply to image)
+  ✦  *.info*  —  Bot info & uptime
+  ✦  *.help*  —  Full command guide
+  ✦  *.mode public/owner*  —  Switch access mode
 
-⚙️ *AUTOMATION*
-  *.autoreact on/off/emoji* — Auto-react every msg in group
-  *.autoreply add/remove/list* — Auto-reply to keywords
-  *.setalias* <word> <.cmd> — Set custom command shortcut
-  *.delalias* <word>   — Delete alias
-  *.aliases*           — List all aliases
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 
-🤖 *AI & MEDIA*
-  *.ai* <question>     — Ask Gemini AI anything
-  *.imagine* <prompt>  — Generate an AI image
-  *.song* <title>      — Search for songs (iTunes)
-  *.lyrics* <artist> | <title> — Get song lyrics
-  *.ss* <url>          — Screenshot a website
-  *.viewonce*          — Reveal view-once (reply to it)
+〔 👥 *G R O U P  M A N A G E M E N T* 〕
 
-🔍 *UTILITIES*
-  *.groupid*           — Get group/community ID
-  *.listonline*        — List online members
-  *.listoffline*       — List offline members
-  *.ocr*               — Extract text from image (reply to image)
+  ✦  *.add* ‹number›  —  Add a member
+  ✦  *.kick* @user  —  Remove a member
+  ✦  *.promote* @user  —  Make someone admin
+  ✦  *.demote* @user  —  Strip admin rights
+  ✦  *.link*  —  Get group invite link
+  ✦  *.revoke*  —  Reset group link
+  ✦  *.mute*  —  Lock group (admins only)
+  ✦  *.unmute*  —  Open group to everyone
 
-⚽ *FOOTBALL*
-  *.pltable*           — Premier League table
-  *.live*              — Live PL scores
-  *.fixtures* <club>   — Club fixtures & results
-  *.fnews* <club>      — Club news
-  *.football* <club>   — Full club overview
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 
-🎮 *GAMES*
-  *.ttt* @p1 @p2       — Tic-Tac-Toe (tag 2 players)
-  *.truth*             — Get a truth question
-  *.dare*              — Get a dare challenge
-  *.wordchain* [word]  — Start word chain game
-  *.wordchain stop*    — End active game
+〔 🏷️ *T A G  &  B R O A D C A S T* 〕
 
-🛡️ *GROUP PROTECTION*
-  *.antilink on/off*   — Block links in group
-  *.antispam on/off*   — Block message spam
-  *.antidemote on/off* — Punish anyone who demotes an admin
+  ✦  *.hidetag*  —  Silently tag all members
+  ✦  *.tagall*  —  Tag all (shows @numbers)
+  ✦  *.readmore*  —  Hide text behind Read More
 
-📣 *NOTIFICATIONS*
-  *.welcome on/off*    — Welcome new members
-  *.goodbye on/off*    — Goodbye message on exit
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 
-🔄 *GC CLONE*
-  *.clone* <source-link> <dest-link> <per-batch> <mins>
-  _e.g. .clone link1 link2 2 5 = 2 people every 5 mins_
-  *.stopclone*  — Stop an active clone job
+〔 ⚙️ *A U T O M A T I O N* 〕
 
-━━━━━━━━━━━━━━━━━━━━
-💀 _Phantom X — Built different. Built cold._ 🖤
-━━━━━━━━━━━━━━━━━━━━
+  ✦  *.autoreact on/off/emoji*  —  Auto-react to msgs
+  ✦  *.autoreply add/remove/list*  —  Keyword replies
+  ✦  *.setalias* ‹word› ‹.cmd›  —  Create shortcut
+  ✦  *.delalias* ‹word›  —  Delete shortcut
+  ✦  *.aliases*  —  List all shortcuts
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 🧠 *A I  &  M E D I A* 〕
+
+  ✦  *.ai* ‹question›  —  Ask Gemini AI
+  ✦  *.imagine* ‹prompt›  —  Generate AI image
+  ✦  *.song* ‹title›  —  Search songs (iTunes)
+  ✦  *.lyrics* ‹artist› | ‹title›  —  Get lyrics
+  ✦  *.ss* ‹url›  —  Screenshot a website
+  ✦  *.viewonce*  —  Reveal view-once (reply to it)
+  ✦  *.ocr*  —  Extract text from image
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 🔍 *U T I L I T I E S* 〕
+
+  ✦  *.groupid*  —  Get group / community ID
+  ✦  *.listonline*  —  Show online members
+  ✦  *.listoffline*  —  Show offline members
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 ⚽ *F O O T B A L L* 〕
+
+  ✦  *.pltable*  —  Premier League standings
+  ✦  *.live*  —  Live PL scores
+  ✦  *.fixtures* ‹club›  —  Club fixtures & results
+  ✦  *.fnews* ‹club›  —  Club latest news
+  ✦  *.football* ‹club›  —  Full club overview
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 🎮 *G A M E S* 〕
+
+  ✦  *.ttt* @p1 @p2  —  Tic-Tac-Toe
+  ✦  *.truth*  —  Truth question
+  ✦  *.dare*  —  Dare challenge
+  ✦  *.wordchain* [word]  —  Start word chain
+  ✦  *.wordchain stop*  —  End active game
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 🛡️ *G R O U P  P R O T E C T I O N* 〕
+
+  ✦  *.antilink on/off*  —  Block all links
+  ✦  *.antispam on/off*  —  Block message spam
+  ✦  *.antidemote on/off*  —  Punish demotions
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 📣 *N O T I F I C A T I O N S* 〕
+
+  ✦  *.welcome on/off*  —  Welcome new members
+  ✦  *.goodbye on/off*  —  Goodbye on exit
+
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+
+〔 🔄 *G C  C L O N E* 〕
+
+  ✦  *.clone* ‹src› ‹dst› ‹batch› ‹mins›
+     _Add members from one group to another_
+  ✦  *.stopclone*  —  Stop active clone job
+
+╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+  💀 _Phantom X — Built Different. Built Cold._ 🖤
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 `.trim();
 }
 
@@ -684,7 +713,34 @@ async function handleMessage(sock, msg) {
             case ".menu":
             case ".phantom": {
                 const menuText = buildMenuText(currentMode);
-                await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                if (fs.existsSync(MENU_BANNER_FILE)) {
+                    try {
+                        const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
+                        await sock.sendMessage(from, { image: bannerBuf, caption: menuText }, { quoted: msg });
+                    } catch (_) {
+                        await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                    }
+                } else {
+                    await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                }
+                break;
+            }
+
+            case ".setpp": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
+                    return reply("🖼️ Reply to an image with *.setpp* to set it as the menu banner.\n\nWhenever *.menu* or *.phantom* is used, that image will appear first.");
+                }
+                await reply("⏳ Saving your menu banner...");
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    fs.writeFileSync(MENU_BANNER_FILE, buf);
+                    await reply("✅ *Menu banner set!*\n\nNext time you or anyone uses *.menu* or *.phantom*, your image will show first. 🔥");
+                } catch (e) {
+                    await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
+                }
                 break;
             }
 
