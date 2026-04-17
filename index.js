@@ -387,6 +387,7 @@ Your WhatsApp automation beast is online 🔥
 
 📋 *GENERAL COMMANDS*
   *.menu*          — Show this menu
+  *.phantom*       — Show full menu (owner shortcut)
   *.info*          — Bot info
   *.help*          — Full guide for every command
   *.mode public*   — Let everyone use commands
@@ -680,18 +681,10 @@ async function handleMessage(sock, msg) {
         }
 
         switch (cmd) {
-            case ".menu": {
+            case ".menu":
+            case ".phantom": {
                 const menuText = buildMenuText(currentMode);
-                try {
-                    const buf = await fetchBuffer("https://i.imgur.com/6LxHxwY.jpeg");
-                    await sock.sendMessage(from, { image: buf, caption: menuText }, { quoted: msg });
-                } catch (_imgErr) {
-                    try {
-                        await sock.sendMessage(from, { text: menuText }, { quoted: msg });
-                    } catch (sendErr) {
-                        console.error("Menu send error:", sendErr?.message);
-                    }
-                }
+                await sock.sendMessage(from, { text: menuText }, { quoted: msg });
                 break;
             }
 
