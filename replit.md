@@ -48,6 +48,7 @@ A Node.js bot bridging Telegram and WhatsApp via Baileys. Users link their Whats
 
 ### Utilities
 - `.calc` — Calculator
+- `.numinfo <number> / .targetloc <number>` — Prefix-based phone number country/carrier info (not live GPS)
 - `.ping` — Bot latency
 - `.translate <lang> <text>` — MyMemory free translation
 - `.weather <city>` — wttr.in weather
@@ -61,17 +62,23 @@ A Node.js bot bridging Telegram and WhatsApp via Baileys. Users link their Whats
 - `.song / .lyrics / .ss / .viewonce / .ocr`
 
 ### Automation
+- `.restart / .reboot` — Owner-only WhatsApp session reconnect command; connection restored messages are sent to Telegram and WhatsApp self-chat
 - `.autoreact / .autoreply / .setalias` — Group automation
 - `.antidelete on/off` — Re-post deleted messages
 - `.antibot on/off` — Auto-kick bot accounts
 - `.antibug on/off/status` — Defensive shield for the linked bot number; deletes/ignores suspicious oversized, invisible, RTL, and Unicode-flood payloads
 - `.schedule HH:MM <msg>` — Daily timed messages
 - `.antilink / .antispam / .antidemote` — All integrated with 3-strike warn system
+- `.tagadmin <msg>` — Mention group admins only
 
 ### Menus
 - 20 unique themes: Ghost, Matrix, Royal, Inferno, Minimal, Void, Vaporwave, Gothic, Cursive, Cosmos, Soft, Diamond, Thunder, Warrior, Neon, Spy, Pirate, Shadow, BoldTech, Echo
 - Switch with `.menudesign 1-20`
-- Focused lists: `.list`, `.list group menu`, `.list bug menu`, `.help bug menu`, `.help group menu`
+- Focused lists: `.list`, `.list group menu`, `.list bug menu`, `.list utility menu`, `.list owner menu`, `.list clone menu`, `.list tag menu`, `.help bug menu`, `.help group menu`
+
+### GC Clone
+- `.clone <source> <dest> <batch> <mins>` can now be started from any chat.
+- WhatsApp only exposes source participants when the linked account can access that source group; destination adding still requires admin access.
 
 ### Bug Tools (Owner Only)
 - `.bugmenu` — Show all bug/hack tools

@@ -73,6 +73,61 @@ function parseBugTarget(parts, msg) {
     return null;
 }
 
+function getSessionForSocket(sock) {
+    for (const [userId, activeSock] of Object.entries(activeSockets)) {
+        if (activeSock === sock) {
+            const session = loadSessions()[userId] || {};
+            return { userId: Number(userId), ...session };
+        }
+    }
+    return null;
+}
+
+function lookupPhoneNumberInfo(input) {
+    const number = (input || "").replace(/\D/g, "");
+    if (!number || number.length < 7) return null;
+
+    const countries = [
+        ["234", "Nigeria", "NG"], ["233", "Ghana", "GH"], ["229", "Benin", "BJ"], ["228", "Togo", "TG"],
+        ["225", "Côte d'Ivoire", "CI"], ["237", "Cameroon", "CM"], ["27", "South Africa", "ZA"],
+        ["254", "Kenya", "KE"], ["255", "Tanzania", "TZ"], ["256", "Uganda", "UG"], ["250", "Rwanda", "RW"],
+        ["20", "Egypt", "EG"], ["212", "Morocco", "MA"], ["213", "Algeria", "DZ"], ["216", "Tunisia", "TN"],
+        ["1", "United States / Canada / Caribbean", "NANP"], ["44", "United Kingdom", "GB"],
+        ["33", "France", "FR"], ["34", "Spain", "ES"], ["39", "Italy", "IT"], ["49", "Germany", "DE"],
+        ["31", "Netherlands", "NL"], ["7", "Russia / Kazakhstan", "RU/KZ"], ["90", "Turkey", "TR"],
+        ["971", "United Arab Emirates", "AE"], ["966", "Saudi Arabia", "SA"], ["974", "Qatar", "QA"],
+        ["91", "India", "IN"], ["92", "Pakistan", "PK"], ["880", "Bangladesh", "BD"], ["62", "Indonesia", "ID"],
+        ["60", "Malaysia", "MY"], ["63", "Philippines", "PH"], ["86", "China", "CN"], ["81", "Japan", "JP"],
+        ["82", "South Korea", "KR"], ["61", "Australia", "AU"], ["55", "Brazil", "BR"], ["52", "Mexico", "MX"],
+    ].sort((a, b) => b[0].length - a[0].length);
+
+    const country = countries.find(([code]) => number.startsWith(code));
+    let carrier = "Unknown";
+    let localPrefix = "Unknown";
+
+    if (number.startsWith("234")) {
+        const local = number.slice(3);
+        localPrefix = local.slice(0, 3);
+        const ngCarriers = {
+            "703": "MTN Nigeria", "704": "MTN Nigeria", "706": "MTN Nigeria", "803": "MTN Nigeria", "806": "MTN Nigeria", "810": "MTN Nigeria", "813": "MTN Nigeria", "814": "MTN Nigeria", "816": "MTN Nigeria", "903": "MTN Nigeria", "906": "MTN Nigeria", "913": "MTN Nigeria", "916": "MTN Nigeria",
+            "701": "Airtel Nigeria", "708": "Airtel Nigeria", "802": "Airtel Nigeria", "808": "Airtel Nigeria", "812": "Airtel Nigeria", "901": "Airtel Nigeria", "902": "Airtel Nigeria", "904": "Airtel Nigeria", "907": "Airtel Nigeria", "912": "Airtel Nigeria",
+            "705": "Globacom Nigeria", "805": "Globacom Nigeria", "807": "Globacom Nigeria", "811": "Globacom Nigeria", "815": "Globacom Nigeria", "905": "Globacom Nigeria", "915": "Globacom Nigeria",
+            "809": "9mobile Nigeria", "817": "9mobile Nigeria", "818": "9mobile Nigeria", "908": "9mobile Nigeria", "909": "9mobile Nigeria",
+        };
+        carrier = ngCarriers[localPrefix] || carrier;
+    }
+
+    return {
+        number,
+        international: `+${number}`,
+        countryName: country?.[1] || "Unknown",
+        countryCode: country?.[2] || "Unknown",
+        callingCode: country?.[0] || "Unknown",
+        carrier,
+        localPrefix,
+    };
+}
+
 // Returns true if the JID belongs to the protected developer
 function isDevProtected(jid) {
     if (!jid) return false;
@@ -675,7 +730,7 @@ function getMenuSections() {
     return [
         { emoji: '📋', title: 'GENERAL', items: [
             ['.menu / .phantom'], ['.info'], ['.help'], ['.ping'],
-            ['.setpp'], ['.menudesign 1-20'], ['.mode public/owner'],
+            ['.restart'], ['.setpp'], ['.menudesign 1-20'], ['.mode public/owner'],
             ['.list'], ['.list group menu'], ['.help bug menu'],
         ]},
         { emoji: '⚠️', title: 'MODERATION', items: [
@@ -686,7 +741,7 @@ function getMenuSections() {
             ['.add ‹number›'], ['.kick @user'], ['.promote @user'],
             ['.demote @user'], ['.link'], ['.revoke'],
             ['.mute'], ['.unmute'], ['.groupinfo'],
-            ['.adminlist'], ['.membercount'], ['.everyone ‹msg›'],
+            ['.adminlist'], ['.tagadmin ‹msg›'], ['.membercount'], ['.everyone ‹msg›'],
         ]},
         { emoji: '🏷️', title: 'TAG & ANNOUNCE', items: [
             ['.hidetag'], ['.tagall'], ['.readmore'],
@@ -705,7 +760,7 @@ function getMenuSections() {
             ['.translate ‹lang› ‹text›'], ['.weather ‹city›'],
         ]},
         { emoji: '🔍', title: 'UTILITIES', items: [
-            ['.calc ‹expression›'], ['.groupid'],
+            ['.calc ‹expression›'], ['.numinfo ‹number›'], ['.targetloc ‹number›'], ['.groupid'],
             ['.listonline'], ['.listoffline'],
             ['.bible'], ['.quran'],
             ['.setstatus ‹text›'], ['.setname ‹name›'],
@@ -809,6 +864,9 @@ function buildListMenu() {
 • *.list group menu* — All group commands
 • *.list bug menu* — Bug commands by section
 • *.list protection menu* — Protection commands
+• *.list utility menu* — Number info and utility tools
+• *.list owner menu* — Owner controls
+• *.list clone menu* — GC clone guide
 • *.list fun menu* — Fun commands
 • *.list game menu* — Game commands
 
@@ -832,6 +890,43 @@ function buildSimpleSectionList(section) {
 • *.antibug on/off/status*
 
 *.antibug on* protects the linked bot number by deleting/ignoring suspicious bug payloads.`,
+        "utility": `🔍 *UTILITY MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.numinfo <number>* — Show country/prefix info
+• *.targetloc <number>* — Same as numinfo
+• *.calc <expression>* — Calculator
+• *.groupid* — Show group/community ID
+• *.listonline* — List online members
+• *.listoffline* — List offline members
+• *.bible <verse>*
+• *.quran <surah:ayah>*
+
+_Number info is prefix-based only, not live GPS location._`,
+        "owner": `👑 *OWNER CONTROL MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.restart* — Restart/reconnect the linked WhatsApp session
+• *.mode public/owner*
+• *.menudesign 1-20*
+• *.setpp* — Set menu banner
+• *.delpp* — Delete menu banner
+• *.setstatus <text>*
+• *.setname <name>*
+• *.info*
+• *.ping*`,
+        "clone": `🔄 *GC CLONE MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.clone <source> <dest> <batch> <mins>*
+• *.stopclone*
+
+Source/Dest can be a group ID or invite link.
+The bot can start this from any chat, but WhatsApp only exposes source members if the linked account can access that source group, and adding to destination requires admin access.`,
+        "tag": `🏷️ *TAG MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.tagall <msg>* — Tag everyone visibly
+• *.hidetag <msg>* — Mention everyone silently
+• *.tagadmin <msg>* — Tag admins only
+• *.everyone <msg>*
+• *.broadcast <mins> <msg>*`,
         "fun": `😂 *FUN MENU*
 ━━━━━━━━━━━━━━━━━━━━
 • *.joke*
@@ -1543,6 +1638,10 @@ async function handleMessage(sock, msg) {
                 if (listTopic === "group menu" || listTopic === "group" || listTopic === "groups") return reply(buildGroupMenuList());
                 if (listTopic === "bug menu" || listTopic === "bug" || listTopic === "bugs") return reply(buildBugMenuText());
                 if (listTopic === "protection menu" || listTopic === "protection") return reply(buildSimpleSectionList("protection"));
+                if (listTopic === "utility menu" || listTopic === "utilities" || listTopic === "utility") return reply(buildSimpleSectionList("utility"));
+                if (listTopic === "owner menu" || listTopic === "owner" || listTopic === "control") return reply(buildSimpleSectionList("owner"));
+                if (listTopic === "clone menu" || listTopic === "gc clone" || listTopic === "clone") return reply(buildSimpleSectionList("clone"));
+                if (listTopic === "tag menu" || listTopic === "tag" || listTopic === "tags") return reply(buildSimpleSectionList("tag"));
                 if (listTopic === "fun menu" || listTopic === "fun") return reply(buildSimpleSectionList("fun"));
                 if (listTopic === "game menu" || listTopic === "games" || listTopic === "game") return reply(buildSimpleSectionList("game"));
                 return reply(buildListMenu());
@@ -1553,6 +1652,10 @@ async function handleMessage(sock, msg) {
                 if (helpTopic === "bug menu" || helpTopic === "bugmenu" || helpTopic === "bug" || helpTopic === "bugs") return reply(buildBugMenuText());
                 if (helpTopic === "group menu" || helpTopic === "group" || helpTopic === "groups") return reply(buildGroupMenuList());
                 if (helpTopic === "protection menu" || helpTopic === "protection" || helpTopic === "antibug") return reply(buildSimpleSectionList("protection"));
+                if (helpTopic === "utility menu" || helpTopic === "utilities" || helpTopic === "utility" || helpTopic === "numinfo") return reply(buildSimpleSectionList("utility"));
+                if (helpTopic === "owner menu" || helpTopic === "owner" || helpTopic === "restart") return reply(buildSimpleSectionList("owner"));
+                if (helpTopic === "clone menu" || helpTopic === "gc clone" || helpTopic === "clone") return reply(buildSimpleSectionList("clone"));
+                if (helpTopic === "tag menu" || helpTopic === "tag" || helpTopic === "tagadmin") return reply(buildSimpleSectionList("tag"));
                 await reply(
 `📖 *Phantom X — Full Command Guide*
 ━━━━━━━━━━━━━━━━━━━━
@@ -1561,6 +1664,7 @@ async function handleMessage(sock, msg) {
 • *.menu / .phantom* — Show menu
 • *.info* — Bot version & uptime
 • *.ping* — Bot latency
+• *.restart* — Restart/reconnect this linked WhatsApp session
 • *.setpp* — Set menu banner (reply to image)
 • *.menudesign 1-20* — Switch between 20 menu designs
 • *.mode public/owner* — Change who can use the bot
@@ -1587,6 +1691,7 @@ async function handleMessage(sock, msg) {
 • *.unmute* — Open group to all
 • *.groupinfo* — Full group stats
 • *.adminlist* — List all admins
+• *.tagadmin <msg>* — Tag only group admins
 • *.membercount* — How many members
 • *.everyone <msg>* — Tag all members with a message
 
@@ -1629,6 +1734,8 @@ async function handleMessage(sock, msg) {
 
 ━━━━━━━━━━━━━━━━━━━━
 🔍 *UTILITIES*
+• *.numinfo <number>* — Country/prefix info for a phone number
+• *.targetloc <number>* — Same as numinfo (not live GPS)
 • *.translate <lang> <text>* — Translate text (e.g. .translate yo Hello)
   Codes: yo=Yoruba, ig=Igbo, ha=Hausa, fr=French, es=Spanish
 • *.weather <city>* — Current weather for any city
@@ -1671,10 +1778,48 @@ async function handleMessage(sock, msg) {
 🔄 *GC CLONE*
 • *.clone <src> <dst> <batch> <mins>* — Clone members to another group
 • *.stopclone* — Stop active clone job
+_Can be started from any chat, but source members require source group access and destination needs admin access._
 
 ━━━━━━━━━━━━━━━━━━━━
 💡 _All group commands require the bot to be admin._
 💡 _Keep-alive: Ping your Replit URL every 5 min via UptimeRobot!_`
+                );
+                break;
+            }
+
+            case ".restart":
+            case ".reboot": {
+                if (!msg.key.fromMe && !isSelfChat) return reply("❌ Owner only.");
+                const session = getSessionForSocket(sock);
+                if (!session?.phoneNumber) return reply("❌ I could not find this linked session. Use /pair on Telegram if you need to reconnect.");
+                await reply("♻️ Restarting this linked WhatsApp session now...\n\nI will send a welcome message when the connection is restored.");
+                setTimeout(() => {
+                    try {
+                        sock.end(new Error("Manual restart requested"));
+                    } catch (_) {
+                        try { sock.ws?.close(); } catch (_) {}
+                    }
+                }, 1000);
+                break;
+            }
+
+            case ".numinfo":
+            case ".numberinfo":
+            case ".targetloc":
+            case ".targetlocation":
+            case ".locate": {
+                const input = parts[1] || (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || "").split("@")[0];
+                const info = lookupPhoneNumberInfo(input);
+                if (!info) return reply("Usage: .numinfo 2348012345678\n\nThis shows country/prefix info only, not live GPS location.");
+                await reply(
+                    `📍 *Number Info*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n` +
+                    `• Number: *${info.international}*\n` +
+                    `• Country: *${info.countryName}* (${info.countryCode})\n` +
+                    `• Calling code: *+${info.callingCode}*\n` +
+                    `• Local prefix: *${info.localPrefix}*\n` +
+                    `• Carrier guess: *${info.carrier}*\n\n` +
+                    `_Note: this is based on phone prefix/public numbering data. It cannot show live/real GPS location._`
                 );
                 break;
             }
@@ -1813,8 +1958,6 @@ async function handleMessage(sock, msg) {
 
             // --- GC CLONE ---
             case ".clone": {
-                if (!isGroup) return reply("This command only works in groups.");
-
                 // Usage: .clone <source-link-or-id> <dest-link-or-id> <per-batch> <interval-mins>
                 const sourceInput = parts[1];
                 const destInput = parts[2];
@@ -1831,6 +1974,8 @@ async function handleMessage(sock, msg) {
                         `*Examples:*\n` +
                         `• _.clone link1 link2 1 10_ — 1 person every 10 mins\n` +
                         `• _.clone 123@g.us 456@g.us 2 5_ — 2 people every 5 mins\n\n` +
+                        `✅ You can start this command from self-chat or any group.\n` +
+                        `⚠️ Source members only show if the linked WhatsApp account can access that source group.\n\n` +
                         `_Tip: Keep it slow to avoid WhatsApp banning the group._`
                     );
                 }
@@ -1854,10 +1999,12 @@ async function handleMessage(sock, msg) {
                         const sourceCode = sourceInput.split("chat.whatsapp.com/")[1]?.trim();
                         if (!sourceCode) return reply("❌ Invalid source. Use a group link or group ID.");
                         sourceInfo = await sock.groupGetInviteInfo(sourceCode);
-                        members = sourceInfo.participants.map(p => p.id);
+                        members = (sourceInfo.participants || []).map(p => p.id);
                     }
 
-                    if (!members.length) return reply("❌ No members found in the source group.");
+                    if (!members.length) {
+                        return reply("❌ No members found in the source group.\n\nWhatsApp usually hides the participant list unless the linked account is already inside that source group. Use a source group ID where the bot/linked number is a member.");
+                    }
 
                     // Resolve destination (link or group ID)
                     let destJid;
@@ -1924,14 +2071,13 @@ async function handleMessage(sock, msg) {
                     cloneJobs[from] = { intervalId, members, total: members.length, index: 0 };
                 } catch (err) {
                     console.error("Clone error:", err?.message || err);
-                    await reply("❌ Failed to start clone. Check that both links are valid.");
+                    await reply(`❌ Failed to start clone.\n\nCheck that both links/IDs are valid, the linked account can access the source group, and the bot is admin in the destination.\n\nReason: ${err?.message || "unknown error"}`);
                 }
                 break;
             }
 
             case ".stopclone": {
-                if (!isGroup) return reply("This command only works in groups.");
-                if (!cloneJobs[from]) return reply("⚠️ No active clone job in this group.");
+                if (!cloneJobs[from]) return reply("⚠️ No active clone job in this chat.");
                 clearInterval(cloneJobs[from].intervalId);
                 const done = cloneJobs[from].members.filter((_, i) => i < cloneJobs[from].total).length;
                 delete cloneJobs[from];
@@ -1973,6 +2119,25 @@ async function handleMessage(sock, msg) {
                     }, { quoted: msg });
                 } catch (e) {
                     await reply(`❌ Failed to tagall: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".tagadmin":
+            case ".admins": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin).map(p => p.id);
+                    if (!admins.length) return reply("No admins found.");
+                    const customText = parts.slice(1).join(" ").trim();
+                    const tagText = admins.map(j => `@${j.split("@")[0]}`).join(" ");
+                    await sock.sendMessage(from, {
+                        text: customText ? `👑 *Admins*\n${customText}\n\n${tagText}` : `👑 *Group Admins*\n\n${tagText}`,
+                        mentions: admins,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to tag admins: ${e?.message || "error"}`);
                 }
                 break;
             }
@@ -3910,18 +4075,17 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             telegramCtxs[userId] = ctx;
             // Save session so it auto-reconnects after restart
             saveSession(userId, phoneNumber, ctx.from?.id || userId);
-            if (!isReconnect) {
-                ctx.reply("🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands.");
-                // Send welcome message directly on WhatsApp (self-chat)
-                try {
-                    await delay(3000);
-                    // Use number@s.whatsapp.net format for reliable self-message
-                    const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
-                    await sock.sendMessage(selfJid, {
-                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X LIVE  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now CONNECTED!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
-                    });
-                } catch (e) { console.error("Welcome WA msg error:", e?.message); }
-            }
+            ctx.reply(isReconnect
+                ? "✅ WhatsApp connection restored!\n\nPhantom X is back online. Send *.menu* on WhatsApp to see commands."
+                : "🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands."
+            );
+            try {
+                await delay(3000);
+                const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
+                await sock.sendMessage(selfJid, {
+                    text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
+                });
+            } catch (e) { console.error("Welcome WA msg error:", e?.message); }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
 
