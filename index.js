@@ -19,6 +19,37 @@ const http = require("http");
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
 
+// --- OWNER & WELCOME CONFIG ---
+const OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID ? process.env.OWNER_TELEGRAM_ID.toString() : null;
+
+const WELCOME_CONFIG_FILE = path.join(__dirname, "welcome_config.json");
+let welcomeConfig = {
+    text: "Welcome to *Phantom-X Bot!* 🤖\n\nTo link your WhatsApp, use:\n`/pair 2348102756072`\n\n_Replace the number with your own WhatsApp number (with country code)._",
+    photoFileId: null,
+};
+
+function loadWelcomeConfig() {
+    try {
+        if (fs.existsSync(WELCOME_CONFIG_FILE)) {
+            const raw = fs.readFileSync(WELCOME_CONFIG_FILE, "utf8");
+            welcomeConfig = { ...welcomeConfig, ...JSON.parse(raw) };
+        }
+    } catch (_) {}
+}
+
+function saveWelcomeConfig() {
+    try {
+        fs.writeFileSync(WELCOME_CONFIG_FILE, JSON.stringify(welcomeConfig, null, 2), "utf8");
+    } catch (_) {}
+}
+
+function isOwner(ctx) {
+    if (!OWNER_TELEGRAM_ID) return false;
+    return ctx.from?.id?.toString() === OWNER_TELEGRAM_ID;
+}
+
+loadWelcomeConfig();
+
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
@@ -3912,8 +3943,87 @@ async function handleGroupUpdate(sock, update, ctx, botJid) {
 }
 
 // --- TELEGRAM COMMANDS ---
-telBot.start((ctx) => {
-    ctx.reply("Welcome to Phantom-X Bot! 🤖\n\nTo link your WhatsApp, use:\n/pair 2348102756072");
+telBot.start(async (ctx) => {
+    try {
+        if (welcomeConfig.photoFileId) {
+            await ctx.replyWithPhoto(welcomeConfig.photoFileId, {
+                caption: welcomeConfig.text,
+                parse_mode: "Markdown",
+            });
+        } else {
+            await ctx.reply(welcomeConfig.text, { parse_mode: "Markdown" });
+        }
+    } catch (err) {
+        // Fallback if Markdown fails
+        await ctx.reply(welcomeConfig.text).catch(() => {});
+    }
+});
+
+// --- OWNER-ONLY: Set welcome message text ---
+telBot.command("setwelcome", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const newText = ctx.message.text.replace(/^\/setwelcome\s*/i, "").trim();
+    if (!newText) return ctx.reply(
+        "Usage: /setwelcome Your custom welcome message here\n\n" +
+        "You can use Telegram markdown:\n" +
+        "  *bold*  _italic_  `code`\n\n" +
+        "Example:\n/setwelcome Welcome to *My Bot!* 🎉\n\nSend /pair to link WhatsApp."
+    );
+    welcomeConfig.text = newText;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome message updated! Use /previewwelcome to see how it looks.");
+});
+
+// --- OWNER-ONLY: Set welcome photo (reply to a photo with this command) ---
+telBot.command("setwelcomepic", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const photo = ctx.message?.reply_to_message?.photo;
+    if (!photo || !photo.length) return ctx.reply(
+        "📸 How to set a welcome photo:\n\n" +
+        "1. Send the photo you want to use\n" +
+        "2. Then *reply to that photo* with /setwelcomepic\n\n" +
+        "_The photo will show whenever a user types /start_",
+        { parse_mode: "Markdown" }
+    );
+    // Use the highest-resolution version of the photo
+    const fileId = photo[photo.length - 1].file_id;
+    welcomeConfig.photoFileId = fileId;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome photo set! Use /previewwelcome to see the full welcome.");
+});
+
+// --- OWNER-ONLY: Remove welcome photo ---
+telBot.command("clearwelcomepic", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    welcomeConfig.photoFileId = null;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome photo removed. /start will now show text only.");
+});
+
+// --- OWNER-ONLY: Preview what users will see ---
+telBot.command("previewwelcome", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    await ctx.reply("👁 Here's what users will see when they type /start:\n─────────────────");
+    try {
+        if (welcomeConfig.photoFileId) {
+            await ctx.replyWithPhoto(welcomeConfig.photoFileId, {
+                caption: welcomeConfig.text,
+                parse_mode: "Markdown",
+            });
+        } else {
+            await ctx.reply(welcomeConfig.text, { parse_mode: "Markdown" });
+        }
+    } catch (err) {
+        await ctx.reply(welcomeConfig.text).catch(() => {});
+    }
+    await ctx.reply(
+        "─────────────────\n" +
+        "Owner commands:\n" +
+        "• /setwelcome <text> — change the welcome text\n" +
+        "• /setwelcomepic — reply to a photo to set welcome image\n" +
+        "• /clearwelcomepic — remove the welcome photo\n" +
+        "• /previewwelcome — see this preview again"
+    );
 });
 
 telBot.command("pair", async (ctx) => {
