@@ -107,13 +107,32 @@ HTTP server runs on `PORT` env var (default 3000). Returns `👻 Phantom X is al
 
 ## Configuration
 
-- `TELEGRAM_TOKEN` — Telegram Bot token (configured as a Replit secret; required at startup)
-- `GEMINI_API_KEY` — Optional, for AI chat commands
+- `TELEGRAM_TOKEN` — Required. Your Telegram Bot token from @BotFather.
+- `GEMINI_API_KEY` — Optional. For `.ai` / `.gemini` commands (from https://aistudio.google.com/).
+- `PORT` — Optional. Keep-alive server port (default: 3000).
 
-The application now fails fast with a clear error if `TELEGRAM_TOKEN` is missing, keeping sensitive runtime configuration separate from application code.
+### How to set these on different platforms
+
+| Platform | How to set |
+|----------|------------|
+| **Replit** | Secrets tab (not `.env`) |
+| **Render** | Dashboard → Environment → Add env var |
+| **Railway** | Project → Variables |
+| **Heroku** | Settings → Config Vars |
+| **VPS / Local** | Copy `.env.example` to `.env` and fill it in |
 
 ## Running
 
 ```bash
 npm start
 ```
+
+## Recommended Free Hosting Platforms (24/7)
+
+- **Render** (render.com) — Free tier available. Set `TELEGRAM_TOKEN` in Environment Variables. Use a background worker service.
+- **Railway** (railway.app) — $5 free credit/month. Very easy deploy from GitHub.
+- **Adaptable.io** — Free tier. Connect GitHub repo and set env vars.
+- **Koyeb** (koyeb.com) — Free nano instance. Good uptime.
+- **Fly.io** — Free allowance. Slightly more setup but reliable.
+
+> For 24/7 uptime: ping your app URL every 5 minutes using **UptimeRobot** (uptimerobot.com, free) to prevent sleep on free tiers.

@@ -16,10 +16,20 @@ const os = require("os");
 const https = require("https");
 const http = require("http");
 
+// Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
+try { require("dotenv").config(); } catch (_) {}
+
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
-    throw new Error("Missing TELEGRAM_TOKEN environment variable. Add it as a Replit secret before starting Phantom-X.");
+    throw new Error(
+        "Missing TELEGRAM_TOKEN environment variable.\n" +
+        "How to fix depending on where you are hosting:\n" +
+        "  • Render / Railway / Heroku: Add TELEGRAM_TOKEN in your platform's Environment Variables settings.\n" +
+        "  • VPS / Local: Create a .env file in the project root with: TELEGRAM_TOKEN=your_token_here\n" +
+        "  • Replit: Add it in the Secrets tab (not .env — Replit uses its own secret manager).\n" +
+        "Get your token from @BotFather on Telegram."
+    );
 }
 const telBot = new Telegraf(TELEGRAM_TOKEN);
 const MAX_RETRIES = 5;
@@ -574,13 +584,35 @@ const AUTO_REACT_EMOJIS = ["❤️", "🔥", "😂", "👍", "😍", "🎉", "�
 
 async function getPLTable() {
     const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/standings");
-    const entries = data.standings?.[0]?.entries || [];
+
+    // ESPN API can return data in several different structures — handle all of them
+    let entries = [];
+    if (Array.isArray(data.standings) && data.standings[0]?.entries?.length) {
+        entries = data.standings[0].entries;
+    } else if (data.children?.[0]?.standings?.entries?.length) {
+        entries = data.children[0].standings.entries;
+    } else if (data.standings?.entries?.length) {
+        entries = data.standings.entries;
+    } else if (Array.isArray(data.children)) {
+        for (const child of data.children) {
+            if (child.standings?.entries?.length) { entries = child.standings.entries; break; }
+        }
+    }
+
+    if (!entries.length) throw new Error("No standings data returned. The ESPN API may be temporarily unavailable.");
+
     let text = "🏆 *Premier League Table*\n━━━━━━━━━━━━━━━━━━━\n";
     for (let i = 0; i < Math.min(entries.length, 20); i++) {
         const e = entries[i];
         const stats = {};
         for (const s of e.stats || []) stats[s.name] = s.displayValue ?? s.value;
-        text += `*${i + 1}.* ${e.team.displayName} — P:${stats.gamesPlayed || 0} W:${stats.wins || 0} D:${stats.ties || 0} L:${stats.losses || 0} *Pts:${stats.points || 0}*\n`;
+        const pts  = stats.points  ?? stats.pts    ?? 0;
+        const played = stats.gamesPlayed ?? stats.played ?? 0;
+        const wins = stats.wins    ?? stats.w      ?? 0;
+        const draws = stats.ties   ?? stats.draws  ?? stats.d ?? 0;
+        const losses = stats.losses ?? stats.l     ?? 0;
+        const gd   = stats.pointDifferential ?? stats.goalDifference ?? stats.gd ?? "";
+        text += `*${i + 1}.* ${e.team.displayName} — P:${played} W:${wins} D:${draws} L:${losses}${gd !== "" ? ` GD:${gd}` : ""} *Pts:${pts}*\n`;
     }
     return text;
 }
@@ -1437,6 +1469,21 @@ async function handleMessage(sock, msg) {
         let body = rawBody;
         if (!body) return;
 
+        // Handle .readmore appearing ANYWHERE in the message (e.g. "Everyone send acc .readmore link here")
+        // This must run before the switch so it works mid-sentence
+        if (body.toLowerCase().includes('.readmore')) {
+            const rmIdx = body.toLowerCase().indexOf('.readmore');
+            const beforeText = body.slice(0, rmIdx).trim();
+            const afterText  = body.slice(rmIdx + '.readmore'.length).trim();
+            if (beforeText || afterText) {
+                // WhatsApp collapses long text behind a "Read more" tap after ~700 newlines
+                const hiddenPadding = '\n'.repeat(700);
+                const formattedMsg = `${beforeText || ''}${hiddenPadding}${afterText}`;
+                await sock.sendMessage(from, { text: formattedMsg }, { quoted: msg });
+                return;
+            }
+        }
+
         // Handle .hidetag appearing on any line (before or after a message)
         const bodyLines = body.trim().split('\n');
         const hidetagLineIdx = bodyLines.findIndex(l => l.trim().toLowerCase().startsWith('.hidetag'));
@@ -1515,12 +1562,25 @@ async function handleMessage(sock, msg) {
                         `Current mode: *${currentMode === "owner" ? "👤 Owner Only" : "🌍 Public"}*\n\n` +
                         `• *.mode public* — Anyone in groups can use commands\n` +
                         `• *.mode owner* — Only you (the bot owner) can use commands\n\n` +
-                        `_Default is public._`
+                        `_Shortcuts: .public or .owner_`
                     );
                 }
                 setBotMode(botJid, val);
                 const label = val === "owner" ? "👤 Owner Only" : "🌍 Public";
                 await reply(`✅ Bot mode set to *${label}*\n\n${val === "owner" ? "Only you can now trigger commands." : "Everyone in groups can now use commands."}`);
+                break;
+            }
+
+            case ".public": {
+                setBotMode(botJid, "public");
+                await reply(`✅ Bot mode set to *🌍 Public*\n\nEveryone in groups can now use commands.\n\nUse *.owner* to restrict it back to only you.`);
+                break;
+            }
+
+            case ".owner": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can restrict the bot to owner mode.");
+                setBotMode(botJid, "owner");
+                await reply(`✅ Bot mode set to *👤 Owner Only*\n\nOnly you can now trigger commands.\n\nUse *.public* to open it to everyone again.`);
                 break;
             }
 
@@ -2143,28 +2203,18 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // --- READMORE ---
+            // Note: .readmore is also intercepted BEFORE this switch (above) so it works
+            // even when .readmore appears mid-sentence like "Everyone send acc .readmore link here"
             case ".readmore": {
-                // Usage: <visible text> .readmore <hidden text>
-                // OR: .readmore <hidden text> (visible text taken as nothing)
-                const fullText = body.trim();
-                const readmoreIdx = fullText.toLowerCase().indexOf('.readmore');
-                const beforeText = fullText.slice(0, readmoreIdx).trim();
-                const afterText = fullText.slice(readmoreIdx + '.readmore'.length).trim();
-
-                if (!afterText && !beforeText) {
-                    return reply(
-                        `❓ *How to use .readmore:*\n\n` +
-                        `Type the visible part, then *.readmore*, then the hidden part.\n\n` +
-                        `*Example:*\n` +
-                        `_Everyone send acc .readmore Link: wa.me/xxx_\n\n` +
-                        `Group members will see "Everyone send acc" and tap *Read more* to reveal the rest.`
-                    );
-                }
-
-                // WhatsApp shows "Read more" after ~700 characters or many newlines
-                const hiddenPadding = '\n'.repeat(700);
-                const formattedMsg = `${beforeText || ''}${hiddenPadding}${afterText}`;
-                await sock.sendMessage(from, { text: formattedMsg }, { quoted: msg });
+                // Reaching here means the user typed only ".readmore" with nothing before/after
+                await reply(
+                    `❓ *How to use .readmore:*\n\n` +
+                    `Put *.readmore* between the visible text and the hidden text.\n\n` +
+                    `*Example:*\n` +
+                    `_Everyone send acc .readmore Link: wa.me/xxx_\n\n` +
+                    `Group members will see *"Everyone send acc"* and tap *Read more* to see the rest.\n\n` +
+                    `_You can type it anywhere in the sentence — not just at the start._`
+                );
                 break;
             }
 
@@ -3880,13 +3930,25 @@ process.once("SIGINT", () => telBot.stop("SIGINT"));
 process.once("SIGTERM", () => telBot.stop("SIGTERM"));
 
 // --- KEEP-ALIVE HTTP SERVER (for UptimeRobot / cron-job.org pings) ---
-const PING_PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("👻 Phantom X is alive!\n");
-}).listen(PING_PORT, () => {
-    console.log(`[Ping] Keep-alive server running on port ${PING_PORT}`);
-});
+const PING_PORT = parseInt(process.env.PORT) || 3000;
+function startKeepAliveServer(port) {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("👻 Phantom X is alive!\n");
+    });
+    server.on("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+            console.log(`[Ping] Port ${port} already in use — trying ${port + 1}...`);
+            setTimeout(() => startKeepAliveServer(port + 1), 1000);
+        } else {
+            console.error("[Ping] Server error:", err.message);
+        }
+    });
+    server.listen(port, () => {
+        console.log(`[Ping] Keep-alive server running on port ${port}`);
+    });
+}
+startKeepAliveServer(PING_PORT);
 
 // --- SCHEDULE TIMER (check every minute, fire scheduled messages) ---
 setInterval(async () => {
