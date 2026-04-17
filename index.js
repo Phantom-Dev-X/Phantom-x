@@ -14,6 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const https = require("https");
+const http = require("http");
 
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -43,6 +44,146 @@ const broadcastJobs = {};
 
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
+
+// --- WARNS ---
+const WARNS_FILE = path.join(__dirname, "warns.json");
+function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
+function saveWarns(d) { fs.writeFileSync(WARNS_FILE, JSON.stringify(d, null, 2)); }
+function getWarnCount(groupJid, userJid) { return loadWarns()[groupJid]?.[userJid] || 0; }
+function addWarn(groupJid, userJid) { const d = loadWarns(); if (!d[groupJid]) d[groupJid] = {}; d[groupJid][userJid] = (d[groupJid][userJid] || 0) + 1; saveWarns(d); return d[groupJid][userJid]; }
+function resetWarns(groupJid, userJid) { const d = loadWarns(); if (d[groupJid]) { delete d[groupJid][userJid]; saveWarns(d); } }
+function getAllWarns(groupJid) { return loadWarns()[groupJid] || {}; }
+
+// --- BANS (bot-level, per botJid) ---
+const BANS_FILE = path.join(__dirname, "bans.json");
+function loadBans() { if (!fs.existsSync(BANS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(BANS_FILE, "utf8")); } catch { return {}; } }
+function saveBans(d) { fs.writeFileSync(BANS_FILE, JSON.stringify(d, null, 2)); }
+function isBanned(botJid, userJid) { return (loadBans()[botJid] || []).includes(userJid); }
+function addBan(botJid, userJid) { const d = loadBans(); if (!d[botJid]) d[botJid] = []; if (!d[botJid].includes(userJid)) d[botJid].push(userJid); saveBans(d); }
+function removeBan(botJid, userJid) { const d = loadBans(); if (d[botJid]) { d[botJid] = d[botJid].filter(j => j !== userJid); saveBans(d); } }
+
+// --- SCHEDULES ---
+const SCHEDULES_FILE = path.join(__dirname, "schedules.json");
+const scheduleTimers = {};
+function loadSchedules() { if (!fs.existsSync(SCHEDULES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, "utf8")); } catch { return {}; } }
+function saveSchedules(d) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(d, null, 2)); }
+
+// --- GAME STATE (hangman, trivia) ---
+const hangmanState = {};
+const triviaState = {};
+
+// --- RANDOM CONTENT ARRAYS ---
+const JOKES = [
+    "Why don't scientists trust atoms? Because they make up everything! 😂",
+    "I told my wife she was drawing her eyebrows too high. She looked surprised. 😂",
+    "Why do cows wear bells? Because their horns don't work! 🐄",
+    "I asked my dog what two minus two is. He said nothing. 🐶",
+    "Why can't you give Elsa a balloon? Because she'll let it go! ❄️",
+    "What do you call a fake noodle? An impasta! 🍝",
+    "Why did the scarecrow win an award? He was outstanding in his field! 🌾",
+    "I'm reading a book about anti-gravity. It's impossible to put down! 📚",
+    "Why did the bicycle fall over? Because it was two-tired! 🚲",
+    "What do you call cheese that isn't yours? Nacho cheese! 🧀",
+    "Why did the math book look so sad? It had too many problems! 📖",
+    "I used to hate facial hair but then it grew on me! 😂",
+    "How do you organize a space party? You planet! 🚀",
+    "Why don't eggs tell jokes? They'd crack each other up! 🥚",
+    "What do you call a sleeping dinosaur? A dino-snore! 🦕",
+];
+const FACTS = [
+    "🧠 Humans share 50% of their DNA with bananas.",
+    "🐘 Elephants are the only animals that can't jump.",
+    "🌍 Nigeria is home to more English speakers than England itself.",
+    "🦈 Sharks are older than trees — they've existed for 450 million years.",
+    "🍯 Honey never expires. 3000-year-old honey found in Egyptian tombs was still edible.",
+    "🌙 A day on Venus is longer than a year on Venus.",
+    "🦋 Butterflies taste with their feet.",
+    "💡 The lighter was invented before the match.",
+    "🐙 Octopuses have three hearts and blue blood.",
+    "🌊 The ocean covers 71% of Earth but 95% of it is still unexplored.",
+    "🧲 A teaspoon of neutron star would weigh 6 billion tonnes.",
+    "🐌 Snails can sleep for up to 3 years.",
+    "🎵 Music can trigger the same brain response as food or sex.",
+    "📱 The first iPhone was released in 2007. WhatsApp didn't exist until 2009.",
+    "🌿 There are more trees on Earth than stars in the Milky Way.",
+];
+const QUOTES = [
+    "💬 \"The secret of getting ahead is getting started.\" — Mark Twain",
+    "💬 \"In the middle of every difficulty lies opportunity.\" — Albert Einstein",
+    "💬 \"It does not matter how slowly you go as long as you do not stop.\" — Confucius",
+    "💬 \"Success is not final; failure is not fatal: it is the courage to continue that counts.\" — Churchill",
+    "💬 \"Believe you can and you're halfway there.\" — Theodore Roosevelt",
+    "💬 \"The only way to do great work is to love what you do.\" — Steve Jobs",
+    "💬 \"Don't watch the clock; do what it does. Keep going.\" — Sam Levenson",
+    "💬 \"An investment in knowledge pays the best interest.\" — Benjamin Franklin",
+    "💬 \"The future belongs to those who believe in the beauty of their dreams.\" — Eleanor Roosevelt",
+    "💬 \"You miss 100% of the shots you don't take.\" — Wayne Gretzky",
+    "💬 \"Hard work beats talent when talent doesn't work hard.\" — Tim Notke",
+    "💬 \"The man who has no imagination has no wings.\" — Muhammad Ali",
+    "💬 \"Fall seven times, stand up eight.\" — Japanese Proverb",
+    "💬 \"No pressure, no diamonds.\" — Thomas Carlyle",
+    "💬 \"A smooth sea never made a skilled sailor.\" — Franklin D. Roosevelt",
+];
+const ROASTS = [
+    "📵 Your WiFi signal has a better connection than your personality.",
+    "🧠 I'd roast you, but my mum said I'm not allowed to burn trash.",
+    "👁️ You have the face of a saint — a Saint Bernard.",
+    "📚 You're proof that evolution can go in reverse.",
+    "💤 I'd agree with you, but then we'd both be wrong.",
+    "🪟 If laughter is the best medicine, your face must be curing diseases.",
+    "🏃 You're not stupid; you just have bad luck thinking.",
+    "🎭 I've seen better looking things crawl out of soup.",
+    "🕹️ You're like a software update. Whenever I see you, I think 'not now'.",
+    "📉 You have miles to go before you reach mediocre.",
+    "🎪 Your brain must be the size of a pebble. Cute, but useless.",
+    "🔋 You have the energy of a dying phone battery.",
+    "🗑️ I'd insult your intelligence, but I'm not sure you have any.",
+    "😴 You're so boring even your phone goes to sleep around you.",
+    "🌚 I'm not saying I hate you, but I'd unplug your life support for a charger.",
+];
+const COMPLIMENTS = [
+    "🌟 You are genuinely one of the most amazing people in this group!",
+    "💛 Your energy brightens up every conversation you're in. Keep shining!",
+    "🏆 You have the kind of intelligence that makes the room smarter.",
+    "🌸 You're the human equivalent of a warm cup of tea on a cold day.",
+    "🎯 You have an incredible ability to make people feel heard and valued.",
+    "🚀 Honestly? The world is better because you're in it.",
+    "💎 You're rare. Not everybody has the depth of character you carry.",
+    "🧠 You think in a way most people can't — and that's your superpower.",
+    "🔥 You work harder than 90% of people and it shows. Respect.",
+    "🌺 Your kindness is contagious. People leave conversations with you feeling better.",
+    "⚡ You have a vibe that can't be faked. Stay real.",
+    "👑 You're built different. Don't ever let anyone dim that.",
+    "🌍 Your potential is literally limitless. Chase it.",
+    "💯 You're exactly the kind of person people are grateful to know.",
+    "🕊️ You make people feel safe. That's a rare and powerful gift.",
+];
+const EIGHTBALL = [
+    "✅ It is certain.", "✅ Without a doubt.", "✅ Yes definitely!",
+    "✅ You may rely on it.", "✅ As I see it, yes.", "✅ Most likely.",
+    "🤷 Reply hazy, try again.", "🤷 Ask again later.", "🤷 Better not tell you now.",
+    "🤷 Cannot predict now.", "🤷 Concentrate and ask again.",
+    "❌ Don't count on it.", "❌ My reply is no.", "❌ My sources say no.",
+    "❌ Outlook not so good.", "❌ Very doubtful.",
+];
+const HANGMAN_WORDS = ["phantom","nigeria","whatsapp","telegram","javascript","keyboard","elephant","football","lightning","champion","universe","sunshine","waterfall","mountain","butterfly","network","software","wireless","password","keyboard","government","tropical","abundance","satellite","emergency","community","democracy","education","knowledge","adventure","celebrate","discovery","excellent","beautiful","integrity","creativity","hurricane","evolution","migration","resilience"];
+const TRIVIA_QUESTIONS = [
+    { q: "What is the capital of Nigeria?", a: "abuja", hint: "It starts with A" },
+    { q: "How many states does Nigeria have?", a: "36", hint: "It's a number between 35 and 37" },
+    { q: "What year did Nigeria gain independence?", a: "1960", hint: "Think early 1960s" },
+    { q: "What is 15 × 15?", a: "225", hint: "It's greater than 200" },
+    { q: "Which planet is known as the Red Planet?", a: "mars", hint: "Named after the Roman god of war" },
+    { q: "What is the largest ocean on Earth?", a: "pacific", hint: "It's the biggest" },
+    { q: "How many sides does a hexagon have?", a: "6", hint: "Between 5 and 7" },
+    { q: "What is the chemical symbol for gold?", a: "au", hint: "From the Latin word 'aurum'" },
+    { q: "Who invented the telephone?", a: "bell", hint: "His last name is also a sound" },
+    { q: "What is the fastest land animal?", a: "cheetah", hint: "Spotted big cat" },
+    { q: "What gas do plants absorb?", a: "co2", hint: "Also written as carbon dioxide" },
+    { q: "What is the boiling point of water in Celsius?", a: "100", hint: "Triple digits" },
+    { q: "Which country has the largest population?", a: "india", hint: "South Asian country" },
+    { q: "What is 8 squared?", a: "64", hint: "Between 60 and 70" },
+    { q: "Who wrote Romeo and Juliet?", a: "shakespeare", hint: "Famous English playwright" },
+];
 // Saved group names: { groupJid: groupName }
 const groupNames = {};
 
@@ -387,79 +528,64 @@ async function getClubNews(teamName) {
 function getMenuSections() {
     return [
         { emoji: '📋', title: 'GENERAL', items: [
-            ['.menu / .phantom', 'Show this menu'],
-            ['.setpp', 'Set menu banner image (reply to image)'],
-            ['.menudesign 1-20', 'Switch menu style (20 designs)'],
-            ['.info', 'Bot info & uptime'],
-            ['.help', 'Full command guide'],
-            ['.mode public/owner', 'Switch access mode'],
+            ['.menu / .phantom'], ['.info'], ['.help'], ['.ping'],
+            ['.setpp'], ['.menudesign 1-20'], ['.mode public/owner'],
         ]},
-        { emoji: '📡', title: 'BROADCAST', items: [
-            ['.broadcast ‹mins› ‹message›', 'Send to all groups on schedule'],
-            ['.stopbroadcast', 'Stop active broadcast'],
+        { emoji: '⚠️', title: 'MODERATION', items: [
+            ['.warn @user'], ['.warnlist'], ['.resetwarn @user'],
+            ['.ban @user'], ['.unban @user'],
         ]},
         { emoji: '👥', title: 'GROUP MANAGEMENT', items: [
-            ['.add ‹number›', 'Add a member'],
-            ['.kick @user', 'Remove a member'],
-            ['.promote @user', 'Make someone admin'],
-            ['.demote @user', 'Strip admin rights'],
-            ['.link', 'Get group invite link'],
-            ['.revoke', 'Reset group link'],
-            ['.mute', 'Lock group (admins only)'],
-            ['.unmute', 'Open group to everyone'],
+            ['.add ‹number›'], ['.kick @user'], ['.promote @user'],
+            ['.demote @user'], ['.link'], ['.revoke'],
+            ['.mute'], ['.unmute'], ['.groupinfo'],
+            ['.adminlist'], ['.membercount'], ['.everyone ‹msg›'],
         ]},
-        { emoji: '🏷️', title: 'TAG & BROADCAST', items: [
-            ['.hidetag', 'Silently tag all members'],
-            ['.tagall', 'Tag all (shows @numbers)'],
-            ['.readmore', 'Hide text behind Read More'],
+        { emoji: '🏷️', title: 'TAG & ANNOUNCE', items: [
+            ['.hidetag'], ['.tagall'], ['.readmore'],
+            ['.broadcast ‹mins› ‹message›'], ['.stopbroadcast'],
+            ['.schedule ‹HH:MM› ‹message›'], ['.unschedule ‹HH:MM›'], ['.schedules'],
         ]},
         { emoji: '⚙️', title: 'AUTOMATION', items: [
-            ['.autoreact on/off/emoji', 'Auto-react to every message'],
-            ['.autoreply add/remove/list', 'Keyword auto-replies'],
-            ['.setalias ‹word› ‹.cmd›', 'Create command shortcut'],
-            ['.delalias ‹word›', 'Delete a shortcut'],
-            ['.aliases', 'List all shortcuts'],
+            ['.autoreact on/off/emoji'], ['.autoreply add/remove/list'],
+            ['.setalias ‹word› ‹.cmd›'], ['.delalias ‹word›'], ['.aliases'],
+            ['.antidelete on/off'], ['.antibot on/off'],
         ]},
         { emoji: '🧠', title: 'AI & MEDIA', items: [
-            ['.ai ‹question›', 'Ask Gemini AI'],
-            ['.imagine ‹prompt›', 'Generate AI image'],
-            ['.song ‹title›', 'Search songs (iTunes)'],
-            ['.lyrics ‹artist› | ‹title›', 'Get song lyrics'],
-            ['.ss ‹url›', 'Screenshot a website'],
-            ['.viewonce', 'Reveal view-once (reply to it)'],
-            ['.ocr', 'Extract text from image'],
+            ['.ai ‹question›'], ['.imagine ‹prompt›'],
+            ['.song ‹title›'], ['.lyrics ‹artist› | ‹title›'],
+            ['.ss ‹url›'], ['.viewonce'], ['.ocr'],
+            ['.translate ‹lang› ‹text›'], ['.weather ‹city›'],
         ]},
         { emoji: '🔍', title: 'UTILITIES', items: [
-            ['.groupid', 'Get group / community ID'],
-            ['.listonline', 'Show online members'],
-            ['.listoffline', 'Show offline members'],
+            ['.calc ‹expression›'], ['.groupid'],
+            ['.listonline'], ['.listoffline'],
+            ['.bible'], ['.quran'],
+            ['.setstatus ‹text›'], ['.setname ‹name›'],
         ]},
         { emoji: '⚽', title: 'FOOTBALL', items: [
-            ['.pltable', 'Premier League standings'],
-            ['.live', 'Live PL scores'],
-            ['.fixtures ‹club›', 'Club fixtures & results'],
-            ['.fnews ‹club›', 'Club latest news'],
-            ['.football ‹club›', 'Full club overview'],
+            ['.pltable'], ['.live'], ['.fixtures ‹club›'],
+            ['.fnews ‹club›'], ['.football ‹club›'],
         ]},
         { emoji: '🎮', title: 'GAMES', items: [
-            ['.ttt @p1 @p2', 'Tic-Tac-Toe'],
-            ['.truth', 'Truth question'],
-            ['.dare', 'Dare challenge'],
-            ['.wordchain [word]', 'Start word chain game'],
-            ['.wordchain stop', 'End active game'],
+            ['.ttt @p1 @p2'], ['.truth'], ['.dare'],
+            ['.wordchain ‹word›'], ['.flip'], ['.dice'],
+            ['.8ball ‹question›'], ['.rps rock/paper/scissors'],
+            ['.slots'], ['.trivia'], ['.hangman ‹guess›'],
+        ]},
+        { emoji: '😂', title: 'FUN', items: [
+            ['.joke'], ['.fact'], ['.quote'],
+            ['.roast @user'], ['.compliment @user'],
         ]},
         { emoji: '🛡️', title: 'GROUP PROTECTION', items: [
-            ['.antilink on/off', 'Block all links in group'],
-            ['.antispam on/off', 'Block message spam'],
-            ['.antidemote on/off', 'Punish demotions instantly'],
+            ['.antilink on/off'], ['.antispam on/off'],
+            ['.antidemote on/off'],
         ]},
         { emoji: '📣', title: 'NOTIFICATIONS', items: [
-            ['.welcome on/off', 'Welcome new members'],
-            ['.goodbye on/off', 'Goodbye on member exit'],
+            ['.welcome on/off'], ['.goodbye on/off'],
         ]},
         { emoji: '🔄', title: 'GC CLONE', items: [
-            ['.clone ‹src› ‹dst› ‹batch› ‹mins›', 'Clone members to another group'],
-            ['.stopclone', 'Stop active clone job'],
+            ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
     ];
 }
@@ -467,35 +593,35 @@ function getMenuSections() {
 // ─── THEME 1: GHOST ───
 function buildThemeGhost(ml, time, up, S) {
     let o = `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n   ☠️  *P H A N T O M  ✘*  ☠️\n   _The Ghost in Your Machine_ 👻\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n◈ ◈ ◈  *S Y S T E M  S T A T U S*  ◈ ◈ ◈\n\n  🤖  *Bot*     ›  Phantom X\n  📌  *Ver*     ›  v${BOT_VERSION}\n  🌐  *Mode*    ›  ${ml}\n  ⏱️  *Uptime*  ›  ${up}\n  🕐  *Time*    ›  ${time}\n`;
-    for (const s of S) { o += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${s.emoji} *${s.title}* 〕\n\n`; for (const [c,d] of s.items) o += `  ✦  *${c}*  —  ${d}\n`; }
+    for (const s of S) { o += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${s.emoji} *${s.title}* 〕\n\n`; for (const [c] of s.items) o += `  ✦  *${c}*\n`; }
     return (o + `\n╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n  💀 _Phantom X — Built Different. Built Cold._ 🖤\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`).trim();
 }
 
 // ─── THEME 2: MATRIX ───
 function buildThemeMatrix(ml, time, up, S) {
     let o = `█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█\n█   💻  *PHANTOM_X  v${BOT_VERSION}*   💻   █\n█   _> SYSTEM ONLINE ✓_         █\n█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█\n\n*[ SYS_INFO ]*\n  »  *Bot*    :  Phantom X\n  »  *Mode*   :  ${ml}\n  »  *Uptime* :  ${up}\n  »  *Time*   :  ${time}\n`;
-    for (const s of S) { o += `\n══════════════════════════════\n*[ MODULE :: ${s.title} ]*  ${s.emoji}\n`; for (const [c,d] of s.items) o += `  *>*  \`${c}\`   //  ${d}\n`; }
+    for (const s of S) { o += `\n══════════════════════════════\n*[ MODULE :: ${s.title} ]*  ${s.emoji}\n`; for (const [c] of s.items) o += `  *>*  \`${c}\`\n`; }
     return (o + `\n══════════════════════════════\n_> PHANTOM_X — Ghost Protocol Active._ 👻`).trim();
 }
 
 // ─── THEME 3: ROYAL ───
 function buildThemeRoyal(ml, time, up, S) {
     let o = `♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n         👑  *PHANTOM X*  👑\n    _ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ. ᴅɪɢɪᴛᴀʟ._\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n\n✦ *ROYAL STATUS* ✦\n\n   ◆  *Bot*     ∷  Phantom X\n   ◆  *Version* ∷  v${BOT_VERSION}\n   ◆  *Mode*    ∷  ${ml}\n   ◆  *Uptime*  ∷  ${up}\n   ◆  *Time*    ∷  ${time}\n`;
-    for (const s of S) { o += `\n═══════════════════════════════\n❖  *${s.emoji} ${s.title}*  ❖\n\n`; for (const [c,d] of s.items) o += `   ◆  *${c}*  ▸  ${d}\n`; }
+    for (const s of S) { o += `\n═══════════════════════════════\n❖  *${s.emoji} ${s.title}*  ❖\n\n`; for (const [c] of s.items) o += `   ◆  *${c}*\n`; }
     return (o + `\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n  👑 _Phantom X — The Digital Monarch_ 🖤\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛`).trim();
 }
 
 // ─── THEME 4: INFERNO ───
 function buildThemeInferno(ml, time, up, S) {
     let o = `🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n   💥  *P H A N T O M  X*  💥\n   _No Cap. No Mercy. Built Cold._ 🥶\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n\n⚡ *SYSTEM STATUS* ⚡\n\n  🔸  *Bot*     »  Phantom X\n  🔸  *Version* »  v${BOT_VERSION}\n  🔸  *Mode*    »  ${ml}\n  🔸  *Uptime*  »  ${up}\n  🔸  *Time*    »  ${time}\n`;
-    for (const s of S) { o += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${s.emoji} ${s.title}* 💀\n\n`; for (const [c,d] of s.items) o += `  ⚡  *${c}*  ⟶  ${d}\n`; }
+    for (const s of S) { o += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${s.emoji} ${s.title}* 💀\n\n`; for (const [c] of s.items) o += `  ⚡  *${c}*\n`; }
     return (o + `\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n  💀 _Phantom X — Straight Savage. No Filter._ 🔥\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥`).trim();
 }
 
 // ─── THEME 5: MINIMAL ───
 function buildThemeMinimal(ml, time, up, S) {
     let o = `─────────────────────────────\n   ✧  *PHANTOM X*  ·  v${BOT_VERSION}  ✧\n─────────────────────────────\n\n  Bot    ·  Phantom X\n  Mode   ·  ${ml}\n  Uptime ·  ${up}\n  Time   ·  ${time}\n`;
-    for (const s of S) { o += `\n─────────────────────────────\n  *${s.emoji} ${s.title}*\n─────────────────────────────\n`; for (const [c,d] of s.items) o += `  ›  *${c}*\n     ${d}\n`; }
+    for (const s of S) { o += `\n─────────────────────────────\n  *${s.emoji} ${s.title}*\n─────────────────────────────\n`; for (const [c] of s.items) o += `  ›  *${c}*\n`; }
     return (o + `\n─────────────────────────────\n  _Phantom X — Built Different_ 🖤\n─────────────────────────────`).trim();
 }
 
@@ -505,7 +631,7 @@ function buildThemeVoid(ml, time, up, S) {
     let i = 0;
     for (const s of S) {
         o += `\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n:: ${s.emoji} ${s.title} ::\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n`;
-        for (const [c,d] of s.items) { i++; o += `  [*${String(i).padStart(2,'0')}*]  *${c}*\n         └─ ${d}\n`; }
+        for (const [c] of s.items) { i++; o += `  [*${String(i).padStart(2,'0')}*]  *${c}*\n`; }
     }
     return (o + `\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n> 𝚃𝚁𝙰𝙽𝚂𝙼𝙸𝚂𝚂𝙸𝙾𝙽_𝙴𝙽𝙳 ◆ 𝙶𝙷𝙾𝚂𝚃_𝙿𝚁𝙾𝚃𝙾𝙲𝙾𝙻_𝙰𝙲𝚃𝙸𝚅𝙴\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓`).trim();
 }
@@ -513,56 +639,56 @@ function buildThemeVoid(ml, time, up, S) {
 // ─── THEME 7: VAPORWAVE ───
 function buildThemeVaporwave(ml, time, up, S) {
     let o = `░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  Ｐ Ｈ Ａ Ｎ Ｔ Ｏ Ｍ  Ｘ\n  ａ ｅ ｓ ｔ ｈ ｅ ｔ ｉ ｃ\n\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  ♡  Ｂｏｔ      ：  Ｐｈａｎｔｏｍ Ｘ\n  ♡  Ｖｅｒｓｉｏｎ  ：  ｖ${BOT_VERSION}\n  ♡  Ｍｏｄｅ     ：  ${ml}\n  ♡  Ｕｐｔｉｍｅ   ：  ${up}\n  ♡  Ｔｉｍｅ     ：  ${time}\n`;
-    for (const s of S) { o += `\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n  ${s.emoji}  ｛  *${s.title}*  ｝\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n`; for (const [c,d] of s.items) o += `  ✦ ｜  *${c}*\n       ${d}\n`; }
+    for (const s of S) { o += `\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n  ${s.emoji}  ｛  *${s.title}*  ｝\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n`; for (const [c] of s.items) o += `  ✦ ｜  *${c}*\n`; }
     return (o + `\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n  ｐｈａｎｔｏｍ ｘ  ♡  ｂｕｉｌｔ ｄｉｆｆｅｒｅｎｔ\n░░░░░░░░░░░░░░░░░░░░░░░░░░░`).trim();
 }
 
 // ─── THEME 8: GOTHIC ───
 function buildThemeGothic(ml, time, up, S) {
     let o = `✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n   𝔓 𝔥 𝔞 𝔫 𝔱 𝔬 𝔪  𝔛\n  _𝔗𝔥𝔢 𝔇𝔞𝔯𝔨 𝔒𝔯𝔡𝔢𝔯 𝔄𝔴𝔞𝔨𝔢𝔫𝔰_\n\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n  ☩  𝔅𝔬𝔱      ∶  𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛\n  ☩  𝔙𝔢𝔯𝔰𝔦𝔬𝔫  ∶  ｖ${BOT_VERSION}\n  ☩  𝔐𝔬𝔡𝔢     ∶  ${ml}\n  ☩  𝔘𝔭𝔱𝔦𝔪𝔢   ∶  ${up}\n  ☩  𝔗𝔦𝔪𝔢     ∶  ${time}\n`;
-    for (const s of S) { o += `\n✠═══════════════════════════✠\n  ☩  *${s.emoji} ${s.title}*\n✠═══════════════════════════✠\n`; for (const [c,d] of s.items) o += `  ✝  *${c}*  ·  ${d}\n`; }
+    for (const s of S) { o += `\n✠═══════════════════════════✠\n  ☩  *${s.emoji} ${s.title}*\n✠═══════════════════════════✠\n`; for (const [c] of s.items) o += `  ✝  *${c}*\n`; }
     return (o + `\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n  ☩ _𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛 — 𝔅𝔲𝔦𝔩𝔱 𝔬𝔣 𝔇𝔞𝔯𝔨𝔫𝔢𝔰𝔰_ 🖤\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠`).trim();
 }
 
 // ─── THEME 9: CURSIVE ───
 function buildThemeCursive(ml, time, up, S) {
     let o = `❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n   𝒫 𝒽 𝒶 𝓃 𝓉 ℴ 𝓂  𝒳\n  _𝒢𝒽ℴ𝓈𝓉 𝒾𝓃 𝓉𝒽ℯ 𝒮𝒽ℯ𝓁𝓁_ ✨\n\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n  ❧  𝐵ℴ𝓉      ·  𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳\n  ❧  𝒱ℯ𝓇𝓈𝒾ℴ𝓃  ·  v${BOT_VERSION}\n  ❧  𝑀ℴ𝒹ℯ     ·  ${ml}\n  ❧  𝒰𝓅𝓉𝒾𝓂ℯ   ·  ${up}\n  ❧  𝒯𝒾𝓂ℯ     ·  ${time}\n`;
-    for (const s of S) { o += `\n❦───────────────────────────❦\n  ❧ *${s.emoji} ${s.title}*\n❦───────────────────────────❦\n`; for (const [c,d] of s.items) o += `  ❧  *${c}*\n     _${d}_\n`; }
+    for (const s of S) { o += `\n❦───────────────────────────❦\n  ❧ *${s.emoji} ${s.title}*\n❦───────────────────────────❦\n`; for (const [c] of s.items) o += `  ❧  *${c}*\n`; }
     return (o + `\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n  ❧ _𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳 — 𝐵𝓊𝒾𝓁𝓉 𝒟𝒾𝒻𝒻ℯ𝓇ℯ𝓃𝓉_ 🖤\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦`).trim();
 }
 
 // ─── THEME 10: COSMOS ───
 function buildThemeCosmos(ml, time, up, S) {
     let o = `🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n   🛸  *P H A N T O M  X*  🛸\n   _Drifting Through the Digital Void_\n\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n  🌟  *Bot*     ⟶  Phantom X\n  🪐  *Version* ⟶  v${BOT_VERSION}\n  🛰️  *Mode*    ⟶  ${ml}\n  ☄️  *Uptime*  ⟶  ${up}\n  🌙  *Time*    ⟶  ${time}\n`;
-    for (const s of S) { o += `\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n🌌 *${s.emoji} ${s.title}* 🌌\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n`; for (const [c,d] of s.items) o += `  🌠  *${c}*\n       ${d}\n`; }
+    for (const s of S) { o += `\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n🌌 *${s.emoji} ${s.title}* 🌌\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n`; for (const [c] of s.items) o += `  🌠  *${c}*\n`; }
     return (o + `\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n  🛸 _Phantom X — Lost in the Stars_ ✨\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌`).trim();
 }
 
 // ─── THEME 11: SOFT ───
 function buildThemeSoft(ml, time, up, S) {
     let o = `˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n   ℙ ℍ 𝔸 ℕ 𝕋 𝕆 𝕄  𝕏\n  _ꜱᴏꜰᴛ. ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ._ 🌸\n\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n  ˚✦  *ᴮᵒᵗ*       ⌇  Phantom X\n  ˚✦  *ᵛᵉʳˢⁱᵒⁿ*   ⌇  v${BOT_VERSION}\n  ˚✦  *ᴹᵒᵈᵉ*      ⌇  ${ml}\n  ˚✦  *ᵁᵖᵗⁱᵐᵉ*    ⌇  ${up}\n  ˚✦  *ᵀⁱᵐᵉ*      ⌇  ${time}\n`;
-    for (const s of S) { o += `\n˚ · . ꒰ ${s.emoji} *${s.title}* ꒱ . · ˚\n`; for (const [c,d] of s.items) o += `  ♡  *${c}*  ˚  ${d}\n`; }
+    for (const s of S) { o += `\n˚ · . ꒰ ${s.emoji} *${s.title}* ꒱ . · ˚\n`; for (const [c] of s.items) o += `  ♡  *${c}*\n`; }
     return (o + `\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n  🌸 _Phantom X — Soft but Deadly_ 💫\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚`).trim();
 }
 
 // ─── THEME 12: DIAMOND ───
 function buildThemeDiamond(ml, time, up, S) {
     let o = `◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n   💎  *𝐏 𝐇 𝐀 𝐍 𝐓 𝐎 𝐌  𝐗*  💎\n   _𝐄𝐥𝐢𝐭𝐞. 𝐏𝐨𝐥𝐢𝐬𝐡𝐞𝐝. 𝐋𝐞𝐠𝐞𝐧𝐝𝐚𝐫𝐲._\n\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n  💠  *𝐁𝐨𝐭*      ⬩  𝐏𝐡𝐚𝐧𝐭𝐨𝐦 𝐗\n  💠  *𝐕𝐞𝐫𝐬𝐢𝐨𝐧* ⬩  v${BOT_VERSION}\n  💠  *𝐌𝐨𝐝𝐞*     ⬩  ${ml}\n  💠  *𝐔𝐩𝐭𝐢𝐦𝐞*   ⬩  ${up}\n  💠  *𝐓𝐢𝐦𝐞*     ⬩  ${time}\n`;
-    for (const s of S) { o += `\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n💎 *${s.emoji} ${s.title}* 💎\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n`; for (const [c,d] of s.items) o += `  ◆  *${c}*  ⬩  ${d}\n`; }
+    for (const s of S) { o += `\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n💎 *${s.emoji} ${s.title}* 💎\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n`; for (const [c] of s.items) o += `  ◆  *${c}*\n`; }
     return (o + `\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n  💎 _Phantom X — Rare. Refined. Relentless._ 💎\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇`).trim();
 }
 
 // ─── THEME 13: THUNDER ───
 function buildThemeThunder(ml, time, up, S) {
     let o = `⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗣 𝗛 𝗔 𝗡 𝗧 𝗢 𝗠  𝗫*  ⚡\n  _𝗦𝘁𝗿𝗶𝗸𝗲𝘀 𝗟𝗶𝗸𝗲 𝗟𝗶𝗴𝗵𝘁𝗻𝗶𝗻𝗴. 𝗡𝗼 𝗪𝗮𝗿𝗻𝗶𝗻𝗴._\n\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗕𝗼𝘁*      ⟹  Phantom X\n  ⚡  *𝗩𝗲𝗿𝘀𝗶𝗼𝗻* ⟹  v${BOT_VERSION}\n  ⚡  *𝗠𝗼𝗱𝗲*     ⟹  ${ml}\n  ⚡  *𝗨𝗽𝘁𝗶𝗺𝗲*  ⟹  ${up}\n  ⚡  *𝗧𝗶𝗺𝗲*     ⟹  ${time}\n`;
-    for (const s of S) { o += `\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n  *${s.emoji} ${s.title}*\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n`; for (const [c,d] of s.items) o += `  ⚡  *${c}*  ⟹  ${d}\n`; }
+    for (const s of S) { o += `\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n  *${s.emoji} ${s.title}*\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n`; for (const [c] of s.items) o += `  ⚡  *${c}*\n`; }
     return (o + `\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n  ⚡ _Phantom X — 𝗨𝗻𝘀𝘁𝗼𝗽𝗽𝗮𝗯𝗹𝗲. 𝗨𝗻𝘁𝗿𝗮𝗰𝗲𝗮𝗯𝗹𝗲._ ⚡\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡`).trim();
 }
 
 // ─── THEME 14: WARRIOR ───
 function buildThemeWarrior(ml, time, up, S) {
     let o = `⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n   🛡️  *ᴘʜᴀɴᴛᴏᴍ  x*  🛡️\n   _ꜰᴏʀɢᴇᴅ ɪɴ ᴛʜᴇ ᴅɪɢɪᴛᴀʟ ꜰɪʀᴇ_\n\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n  🗡️  *ʙᴏᴛ*      ⟫  Phantom X\n  🗡️  *ᴠᴇʀꜱɪᴏɴ*  ⟫  v${BOT_VERSION}\n  🗡️  *ᴍᴏᴅᴇ*     ⟫  ${ml}\n  🗡️  *ᴜᴘᴛɪᴍᴇ*   ⟫  ${up}\n  🗡️  *ᴛɪᴍᴇ*     ⟫  ${time}\n`;
-    for (const s of S) { o += `\n⚔️ ──────────────────────── ⚔️\n  🛡️ *${s.emoji} ${s.title}*\n⚔️ ──────────────────────── ⚔️\n`; for (const [c,d] of s.items) o += `  🗡️  *${c}*  ⟫  ${d}\n`; }
+    for (const s of S) { o += `\n⚔️ ──────────────────────── ⚔️\n  🛡️ *${s.emoji} ${s.title}*\n⚔️ ──────────────────────── ⚔️\n`; for (const [c] of s.items) o += `  🗡️  *${c}*\n`; }
     return (o + `\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n  🛡️ _ᴘʜᴀɴᴛᴏᴍ x — ɴᴏ ᴍᴇʀᴄʏ. ɴᴏ ʀᴇᴛʀᴇᴀᴛ._ ⚔️\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️`).trim();
 }
 
@@ -570,42 +696,42 @@ function buildThemeWarrior(ml, time, up, S) {
 function buildThemeNeon(ml, time, up, S) {
     let o = `🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🌈  *Ⓟ Ⓗ Ⓐ Ⓝ Ⓣ Ⓞ Ⓜ  ✘*  🌈\n  _Ⓛⓘⓣ  ⓤⓟ.  Ⓑⓤⓘⓛⓣ  ⓓⓘⓕⓕⓔⓡⓔⓝⓣ._\n\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🟣  *Bot*      ⇒  Phantom X\n  🔵  *Version*  ⇒  v${BOT_VERSION}\n  🟢  *Mode*     ⇒  ${ml}\n  🟡  *Uptime*   ⇒  ${up}\n  🟠  *Time*     ⇒  ${time}\n`;
     const neonDots = ['🟣','🔵','🟢','🟡','🟠','🔴']; let ni = 0;
-    for (const s of S) { o += `\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n${neonDots[ni%6]}  *${s.emoji} ${s.title}*\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n`; ni++; for (const [c,d] of s.items) o += `  ${neonDots[ni%6]}  *${c}*  ⇒  ${d}\n`; }
+    for (const s of S) { o += `\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n${neonDots[ni%6]}  *${s.emoji} ${s.title}*\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n`; ni++; for (const [c] of s.items) o += `  ${neonDots[ni%6]}  *${c}*\n`; }
     return (o + `\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n  🌈 _Phantom X — Neon. Bold. Unstoppable._ 🌈\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣`).trim();
 }
 
 // ─── THEME 16: SPY ───
 function buildThemeSpy(ml, time, up, S) {
     let o = `🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  ██  *[CLASSIFIED]*  ██\n  *PHANTOM X* — OPERATION: GHOST\n  _CLEARANCE LEVEL: ULTRA_ 🔐\n\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  🔐  *AGENT*    :  PHANTOM X\n  🔐  *VERSION*  :  v${BOT_VERSION} [REDACTED]\n  🔐  *ACCESS*   :  ${ml}\n  🔐  *RUNTIME*  :  ${up}\n  🔐  *LOCAL_T*  :  ${time}\n`;
-    for (const s of S) { o += `\n██████████████████████████\n🔐 *[MODULE :: ${s.title}]* ${s.emoji}\n██████████████████████████\n`; for (const [c,d] of s.items) o += `  ⬛  *${c}*\n       ${d}\n`; }
+    for (const s of S) { o += `\n██████████████████████████\n🔐 *[MODULE :: ${s.title}]* ${s.emoji}\n██████████████████████████\n`; for (const [c] of s.items) o += `  ⬛  *${c}*\n`; }
     return (o + `\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n  🔐 _[END OF FILE] — PHANTOM X // EYES ONLY_ 🕵️\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️`).trim();
 }
 
 // ─── THEME 17: PIRATE ───
 function buildThemePirate(ml, time, up, S) {
     let o = `🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n   ☠️  *P H A N T O M  X*  ☠️\n   _Sail the Digital Seas. Fear No Code._\n\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n  ⚓  *Ship*    »  Phantom X\n  ⚓  *Ver*     »  v${BOT_VERSION}\n  ⚓  *Crew*    »  ${ml}\n  ⚓  *Voyage*  »  ${up}\n  ⚓  *Waters*  »  ${time}\n`;
-    for (const s of S) { o += `\n☠️ ─────────────────────────☠️\n  ⚓ *${s.emoji} ${s.title}*\n☠️ ─────────────────────────☠️\n`; for (const [c,d] of s.items) o += `  🗺️  *${c}*  ⟶  ${d}\n`; }
+    for (const s of S) { o += `\n☠️ ─────────────────────────☠️\n  ⚓ *${s.emoji} ${s.title}*\n☠️ ─────────────────────────☠️\n`; for (const [c] of s.items) o += `  🗺️  *${c}*\n`; }
     return (o + `\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n  ⚓ _Phantom X — Plunder the Net. Leave No Trace._ ☠️\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️`).trim();
 }
 
 // ─── THEME 18: SHADOW ───
 function buildThemeShadow(ml, time, up, S) {
     let o = `◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n   🌑  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*  🌑\n   _𝘈𝘭𝘸𝘢𝘺𝘴 𝘞𝘢𝘵𝘤𝘩𝘪𝘯𝘨. 𝘕𝘦𝘷𝘦𝘳 𝘚𝘦𝘦𝘯._\n\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n  🌑  *Bot*      ⌁  Phantom X\n  🌑  *Version*  ⌁  v${BOT_VERSION}\n  🌑  *Mode*     ⌁  ${ml}\n  🌑  *Uptime*   ⌁  ${up}\n  🌑  *Time*     ⌁  ${time}\n`;
-    for (const s of S) { o += `\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n  🌑 *${s.emoji} ${s.title}*\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n`; for (const [c,d] of s.items) o += `  🌑  *${c}*\n       _${d}_\n`; }
+    for (const s of S) { o += `\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n  🌑 *${s.emoji} ${s.title}*\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n`; for (const [c] of s.items) o += `  🌑  *${c}*\n`; }
     return (o + `\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n  🌑 _Phantom X — The Shadow Never Sleeps_ 🖤\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼`).trim();
 }
 
 // ─── THEME 19: BOLD TECH ───
 function buildThemeBoldTech(ml, time, up, S) {
     let o = `▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  🔲  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*\n  _𝑷𝒓𝒐𝒈𝒓𝒂𝒎𝒎𝒆𝒅 𝒕𝒐 𝑫𝒐𝒎𝒊𝒏𝒂𝒕𝒆._\n\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  ▣  *Bot*      →  Phantom X\n  ▣  *Version*  →  v${BOT_VERSION}\n  ▣  *Mode*     →  ${ml}\n  ▣  *Uptime*   →  ${up}\n  ▣  *Time*     →  ${time}\n`;
-    for (const s of S) { o += `\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n  ▣ *${s.emoji} ${s.title}*\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n`; for (const [c,d] of s.items) o += `  ▣  *${c}*  →  ${d}\n`; }
+    for (const s of S) { o += `\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n  ▣ *${s.emoji} ${s.title}*\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n`; for (const [c] of s.items) o += `  ▣  *${c}*\n`; }
     return (o + `\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n  ▣ _Phantom X — 𝑷𝒓𝒆𝒄𝒊𝒔𝒊𝒐𝒏. 𝑷𝒐𝒘𝒆𝒓. 𝑷𝒉𝒂𝒏𝒕𝒐𝒎._ 🔲\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰`).trim();
 }
 
 // ─── THEME 20: ECHO ───
 function buildThemeEcho(ml, time, up, S) {
     let o = `· · · · · · · · · · · · · · ·\n   ·   *P H A N T O M  X*   ·\n  · ·  _E · C · H · O_  · ·\n · · ·  )))  signal lost  · · ·\n· · · · · · · · · · · · · · ·\n\n  )))  Bot      ~  Phantom X\n  )))  Version  ~  v${BOT_VERSION}\n  )))  Mode     ~  ${ml}\n  )))  Uptime   ~  ${up}\n  )))  Time     ~  ${time}\n`;
-    for (const s of S) { o += `\n· · · · · · · · · · · · · · ·\n  ))) *${s.emoji} ${s.title}* (\n· · · · · · · · · · · · · · ·\n`; for (const [c,d] of s.items) o += `  ·))  *${c}*\n        ~ ${d}\n`; }
+    for (const s of S) { o += `\n· · · · · · · · · · · · · · ·\n  ))) *${s.emoji} ${s.title}* (\n· · · · · · · · · · · · · · ·\n`; for (const [c] of s.items) o += `  ·))  *${c}*\n`; }
     return (o + `\n· · · · · · · · · · · · · · ·\n  ))) _Phantom X — Echo fades. Ghost remains._ ·\n· · · · · · · · · · · · · · ·`).trim();
 }
 
@@ -776,15 +902,25 @@ async function handleMessage(sock, msg) {
         // In owner mode, only process commands sent by the bot owner themselves (fromMe)
         if (currentMode === "owner" && !msg.key.fromMe && !isSelfChat) return;
 
+        // --- BAN CHECK (bot-level, skip if banned) ---
+        if (!msg.key.fromMe && botJid && isBanned(botJid, senderJid)) return;
+
         // --- GROUP PROTECTION (runs on every group message) ---
         if (isGroup) {
             // Anti-link
             if (getGroupSetting(from, "antilink") && rawBody && containsLink(rawBody)) {
                 try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                await sock.sendMessage(from, {
-                    text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!`,
-                    mentions: [senderJid],
-                });
+                const alWarnCount = addWarn(from, senderJid);
+                if (alWarnCount >= 3) {
+                    resetWarns(from, senderJid);
+                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antilink warnings!`, mentions: [senderJid] });
+                } else {
+                    await sock.sendMessage(from, {
+                        text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
+                        mentions: [senderJid],
+                    });
+                }
                 return;
             }
 
@@ -792,10 +928,27 @@ async function handleMessage(sock, msg) {
             if (getGroupSetting(from, "antispam") && rawBody) {
                 if (isSpamming(senderJid)) {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                    await sock.sendMessage(from, {
-                        text: `🚫 @${senderJid.split("@")[0]}, slow down! You're sending messages too fast.`,
-                        mentions: [senderJid],
-                    });
+                    const asWarnCount = addWarn(from, senderJid);
+                    if (asWarnCount >= 3) {
+                        resetWarns(from, senderJid);
+                        try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                        await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antispam warnings!`, mentions: [senderJid] });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: `🚫 @${senderJid.split("@")[0]}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
+                            mentions: [senderJid],
+                        });
+                    }
+                    return;
+                }
+            }
+
+            // Anti-bot (kick any JID that looks like a bot: @lid or contains "bot")
+            if (getGroupSetting(from, "antibot") && !msg.key.fromMe) {
+                const isLikelyBot = senderJid.endsWith("@lid") || senderJid.toLowerCase().includes("bot");
+                if (isLikelyBot) {
+                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, { text: `🤖 @${senderJid.split("@")[0]} was removed — anti-bot protection active.`, mentions: [senderJid] });
                     return;
                 }
             }
@@ -1020,54 +1173,127 @@ async function handleMessage(sock, msg) {
 
             case ".help": {
                 await reply(
-`📖 *Phantom X — Command Guide*
+`📖 *Phantom X — Full Command Guide*
 ━━━━━━━━━━━━━━━━━━━━
 
 📋 *GENERAL*
-• *.menu* — Shows the main menu with bot info and a list of all commands
-• *.info* — Shows the bot version and how long it's been running
-• *.help* — Shows this guide explaining what every command does
+• *.menu / .phantom* — Show menu
+• *.info* — Bot version & uptime
+• *.ping* — Bot latency
+• *.setpp* — Set menu banner (reply to image)
+• *.menudesign 1-20* — Switch between 20 menu designs
+• *.mode public/owner* — Change who can use the bot
+• *.setstatus <text>* — Change WhatsApp About text
+• *.setname <name>* — Change WhatsApp display name
+
+━━━━━━━━━━━━━━━━━━━━
+⚠️ *MODERATION*
+• *.warn @user* — Warn someone (3 warnings = auto-kick)
+• *.warnlist* — See all warnings in this group
+• *.resetwarn @user* — Clear a member's warnings
+• *.ban @user* — Ban from using this bot entirely
+• *.unban @user* — Remove ban
 
 ━━━━━━━━━━━━━━━━━━━━
 👥 *GROUP MANAGEMENT*
-• *.add 234xxxxxxxx* — Adds a person to the group using their phone number (with country code, no +)
-• *.kick @user* — Removes a tagged member from the group
-• *.promote @user* — Makes a tagged member an admin
-• *.demote @user* — Removes admin status from a tagged member
-• *.link* — Gets the group's invite link and shares it in the chat
-• *.revoke* — Resets the group invite link so the old one no longer works
-• *.mute* — Locks the group so only admins can send messages
-• *.unmute* — Unlocks the group so everyone can send messages again
+• *.add 234xxxxxxxx* — Add member by phone number
+• *.kick @user* — Remove a member
+• *.promote @user* — Make admin
+• *.demote @user* — Remove admin
+• *.link* — Get group invite link
+• *.revoke* — Reset invite link
+• *.mute* — Lock group (admins only)
+• *.unmute* — Open group to all
+• *.groupinfo* — Full group stats
+• *.adminlist* — List all admins
+• *.membercount* — How many members
+• *.everyone <msg>* — Tag all members with a message
+
+━━━━━━━━━━━━━━━━━━━━
+🏷️ *TAG & ANNOUNCE*
+• *.hidetag* — Silently tag all members (invisible mentions)
+• *.tagall* — Tag all with visible @numbers
+• *.readmore* — Hide text behind Read More
+• *.broadcast <mins> <msg>* — Send to all groups periodically
+• *.stopbroadcast* — Stop broadcast
+• *.schedule HH:MM <msg>* — Send a message daily at a specific time
+• *.unschedule HH:MM* — Remove a schedule
+• *.schedules* — View all active schedules
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ *AUTOMATION*
+• *.autoreact on/off/emoji* — Auto-react to every message
+• *.autoreply add/remove/list* — Keyword auto-replies
+• *.setalias <word> <.cmd>* — Create command shortcut
+• *.delalias <word>* — Delete shortcut
+• *.aliases* — List all shortcuts
+• *.antidelete on/off* — Catch and re-post deleted messages
+• *.antibot on/off* — Auto-kick accounts that look like bots
 
 ━━━━━━━━━━━━━━━━━━━━
 🛡️ *GROUP PROTECTION*
-• *.antilink on/off* — When ON, any message containing a link (WhatsApp, website, etc.) is automatically deleted and the sender is warned
-• *.antispam on/off* — When ON, anyone who sends more than 5 messages in 10 seconds gets their message deleted and receives a warning
-• *.antidemote on/off* — When ON, if anyone tries to demote an admin, that person is immediately demoted as punishment and a message is sent saying the case is with the owner
+• *.antilink on/off* — Block & warn for links (3 strikes = kick)
+• *.antispam on/off* — Block rapid messages (3 strikes = kick)
+• *.antidemote on/off* — Instantly punish anyone who demotes an admin
 
 ━━━━━━━━━━━━━━━━━━━━
-📣 *JOIN & LEAVE MESSAGES*
-• *.welcome on/off* — When ON, the bot sends a welcome message every time a new member joins the group
-• *.goodbye on/off* — When ON, the bot sends a farewell message whenever someone leaves the group
+🧠 *AI & MEDIA*
+• *.ai / .ask / .gemini <question>* — Ask Gemini AI (need free API key)
+• *.imagine <prompt>* — Generate AI image (free)
+• *.song <title>* — Search songs via iTunes
+• *.lyrics <artist> | <title>* — Get song lyrics
+• *.ss / .screenshot <url>* — Screenshot a website
+• *.viewonce* — Reveal a view-once image/video (reply to it)
+• *.ocr* — Extract text from an image (reply to it)
+
+━━━━━━━━━━━━━━━━━━━━
+🔍 *UTILITIES*
+• *.translate <lang> <text>* — Translate text (e.g. .translate yo Hello)
+  Codes: yo=Yoruba, ig=Igbo, ha=Hausa, fr=French, es=Spanish
+• *.weather <city>* — Current weather for any city
+• *.calc <expression>* — Calculator (e.g. .calc 5 * 3)
+• *.bible <verse>* — Bible verse (e.g. .bible John 3:16)
+• *.quran <surah:ayah>* — Quran verse (e.g. .quran 2:255)
+• *.groupid* — Get group/community ID
+
+━━━━━━━━━━━━━━━━━━━━
+🎮 *GAMES*
+• *.flip* — Coin flip (Heads or Tails)
+• *.dice [sides]* — Roll a dice (default 6-sided)
+• *.8ball <question>* — Magic 8-ball answer
+• *.rps rock/paper/scissors* — Play against the bot
+• *.slots* — Slot machine (try your luck!)
+• *.trivia* — Answer a trivia question (.trivia skip to skip)
+• *.hangman <letter>* — Guess the hidden word letter by letter
+• *.ttt @p1 @p2* — Start a Tic-Tac-Toe game
+• *.truth* — Get a truth question
+• *.dare* — Get a dare challenge
+• *.wordchain [word]* — Start a word chain game
+
+━━━━━━━━━━━━━━━━━━━━
+😂 *FUN*
+• *.joke* — Random Nigerian-style joke
+• *.fact* — Random interesting fact
+• *.quote* — Motivational quote
+• *.roast @user* — Roast someone
+• *.compliment @user* — Compliment someone
+
+━━━━━━━━━━━━━━━━━━━━
+⚽ *FOOTBALL*
+• *.pltable* — Premier League standings
+• *.live* — Live PL match scores
+• *.fixtures <club>* — Club fixtures & results
+• *.fnews <club>* — Latest club news
+• *.football <club>* — Full club overview
 
 ━━━━━━━━━━━━━━━━━━━━
 🔄 *GC CLONE*
-• *.clone <source-link> <dest-link> <per-batch> <mins>*
-  Copies members from one group into another gradually.
-  — source-link = group to copy members FROM
-  — dest-link = group to add members TO
-  — per-batch = how many people to add at once (1–10)
-  — mins = how many minutes to wait between each batch (1–60)
-  _Example: .clone link1 link2 2 5 = add 2 people every 5 mins_
-
-• *.stopclone* — Stops a clone job that is currently running
+• *.clone <src> <dst> <batch> <mins>* — Clone members to another group
+• *.stopclone* — Stop active clone job
 
 ━━━━━━━━━━━━━━━━━━━━
-🚨 *AUTO-PROTECTION (always on)*
-• If the bot is kicked from a group, you get an instant alert on Telegram and the bot automatically tries to rejoin the group on its own.
-
-━━━━━━━━━━━━━━━━━━━━
-💡 _Tip: All group commands require the bot to be an admin in the group._`
+💡 _All group commands require the bot to be admin._
+💡 _Keep-alive: Ping your Replit URL every 5 min via UptimeRobot!_`
                 );
                 break;
             }
@@ -1792,6 +2018,435 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            // --- PING ---
+            case ".ping": {
+                const start = Date.now();
+                await reply(`🏓 Pong! *${Date.now() - start}ms*`);
+                break;
+            }
+
+            // --- CALCULATOR ---
+            case ".calc": {
+                const expr = parts.slice(1).join("").replace(/[^0-9+\-*/.%()\s]/g, "");
+                if (!expr) return reply("Usage: .calc 5 * 3 + 2");
+                try { await reply(`🧮 *${expr} = ${eval(expr)}*`); } catch { await reply("❌ Invalid expression."); }
+                break;
+            }
+
+            // --- COIN FLIP ---
+            case ".flip": {
+                await reply(`🪙 *${Math.random() < 0.5 ? "HEADS" : "TAILS"}!*`);
+                break;
+            }
+
+            // --- DICE ---
+            case ".dice": {
+                const sides = parseInt(parts[1]) || 6;
+                const roll = Math.floor(Math.random() * sides) + 1;
+                await reply(`🎲 Rolled a *${sides}-sided die*: *${roll}!*`);
+                break;
+            }
+
+            // --- MAGIC 8-BALL ---
+            case ".8ball": {
+                const q = parts.slice(1).join(" ").trim();
+                if (!q) return reply("Usage: .8ball Will I win today?");
+                const ans = EIGHTBALL[Math.floor(Math.random() * EIGHTBALL.length)];
+                await reply(`🎱 *Question:* _${q}_\n\n🎱 *Answer:* ${ans}`);
+                break;
+            }
+
+            // --- ROCK PAPER SCISSORS ---
+            case ".rps": {
+                const choices = { rock: "🪨", paper: "📄", scissors: "✂️" };
+                const wins = { rock: "scissors", paper: "rock", scissors: "paper" };
+                const user = parts[1]?.toLowerCase();
+                if (!choices[user]) return reply("Usage: .rps rock/paper/scissors");
+                const bot = Object.keys(choices)[Math.floor(Math.random() * 3)];
+                let result = user === bot ? "🤝 It's a *draw*!" : wins[user] === bot ? "🎉 You *win*!" : "😈 You *lose*!";
+                await reply(`✊ *Rock Paper Scissors!*\n\nYou: ${choices[user]} *${user}*\nMe: ${choices[bot]} *${bot}*\n\n${result}`);
+                break;
+            }
+
+            // --- SLOTS ---
+            case ".slots": {
+                const sym = ["🍒","🍋","🍊","🍇","⭐","💎","🔔"];
+                const r = [sym[Math.floor(Math.random()*7)], sym[Math.floor(Math.random()*7)], sym[Math.floor(Math.random()*7)]];
+                const won = r[0]===r[1] && r[1]===r[2];
+                await reply(`🎰 *SLOTS!*\n\n┌─────────────┐\n│  ${r[0]}  │  ${r[1]}  │  ${r[2]}  │\n└─────────────┘\n\n${won ? "🎉 *JACKPOT! You win!* 💰" : r[0]===r[1]||r[1]===r[2]||r[0]===r[2] ? "✨ *Two of a kind!* Almost there..." : "❌ No match. Try again!"}`);
+                break;
+            }
+
+            // --- TRIVIA ---
+            case ".trivia": {
+                if (triviaState[from]) {
+                    const t = triviaState[from];
+                    const guess = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (!guess) return reply(`❓ *Question:* _${t.q}_\n\n💡 Hint: ${t.hint}\n\nType *.trivia <answer>* to answer!`);
+                    if (guess === t.a) {
+                        delete triviaState[from];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe answer was: *${t.a}*`);
+                    } else {
+                        return reply(`❌ Wrong! Try again or type *.trivia skip* to skip.`);
+                    }
+                }
+                if (parts[1]?.toLowerCase() === "skip") { delete triviaState[from]; return reply("⏭️ Question skipped!"); }
+                const tq = TRIVIA_QUESTIONS[Math.floor(Math.random() * TRIVIA_QUESTIONS.length)];
+                triviaState[from] = tq;
+                await reply(`🧠 *TRIVIA TIME!*\n\n❓ *${tq.q}*\n\n💡 Hint: ${tq.hint}\n\nType *.trivia <your answer>*`);
+                break;
+            }
+
+            // --- HANGMAN ---
+            case ".hangman": {
+                const HANG = ["⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n⬜⬜⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n⬜🟧⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n🟦⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n🟦🟪⬜⬜⬜","💀 DEAD"];
+                if (!hangmanState[from] || parts[1]?.toLowerCase() === "start" || parts[1]?.toLowerCase() === "new") {
+                    const word = HANGMAN_WORDS[Math.floor(Math.random() * HANGMAN_WORDS.length)];
+                    hangmanState[from] = { word, guessed: [], wrong: 0 };
+                    const display = word.split("").map(l => "_").join(" ");
+                    return reply(`🎯 *HANGMAN!*\n\nWord: *${display}*\nWrong guesses: 0/6\n\n${HANG[0]}\n\nType *.hangman <letter>* to guess!`);
+                }
+                if (parts[1]?.toLowerCase() === "stop") { delete hangmanState[from]; return reply("🛑 Hangman stopped."); }
+                const hState = hangmanState[from];
+                const letter = parts[1]?.toLowerCase().replace(/[^a-z]/g,"");
+                if (!letter || letter.length !== 1) return reply("Type *.hangman <single letter>* to guess, or *.hangman new* to start.");
+                if (hState.guessed.includes(letter)) return reply(`⚠️ You already guessed *${letter}*! Try a different letter.`);
+                hState.guessed.push(letter);
+                if (!hState.word.includes(letter)) hState.wrong++;
+                const display = hState.word.split("").map(l => hState.guessed.includes(l) ? l.toUpperCase() : "_").join(" ");
+                const isWon = hState.word.split("").every(l => hState.guessed.includes(l));
+                const isLost = hState.wrong >= 6;
+                if (isWon) { delete hangmanState[from]; return reply(`🎉 *YOU WIN!*\n\nWord: *${hState.word.toUpperCase()}*\n\nCongratulations! Type *.hangman new* to play again.`); }
+                if (isLost) { delete hangmanState[from]; return reply(`💀 *GAME OVER!*\n\nThe word was: *${hState.word.toUpperCase()}*\n\n${HANG[6]}\n\nType *.hangman new* to try again.`); }
+                await reply(`🎯 *HANGMAN*\n\nWord: *${display}*\nGuessed: ${hState.guessed.join(", ")}\nWrong: ${hState.wrong}/6\n\n${HANG[hState.wrong]}`);
+                break;
+            }
+
+            // --- JOKE ---
+            case ".joke": {
+                await reply(`😂 *Random Joke*\n\n${JOKES[Math.floor(Math.random() * JOKES.length)]}`);
+                break;
+            }
+
+            // --- FACT ---
+            case ".fact": {
+                await reply(`📚 *Fun Fact*\n\n${FACTS[Math.floor(Math.random() * FACTS.length)]}`);
+                break;
+            }
+
+            // --- QUOTE ---
+            case ".quote": {
+                await reply(`✨ *Quote of the Moment*\n\n${QUOTES[Math.floor(Math.random() * QUOTES.length)]}`);
+                break;
+            }
+
+            // --- ROAST ---
+            case ".roast": {
+                const roastTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                const name = roastTarget ? `@${roastTarget.split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const roast = ROASTS[Math.floor(Math.random() * ROASTS.length)];
+                await sock.sendMessage(from, { text: `🔥 *Roast for ${name}:*\n\n${roast}`, mentions: roastTarget ? [roastTarget] : [] }, { quoted: msg });
+                break;
+            }
+
+            // --- COMPLIMENT ---
+            case ".compliment": {
+                const compTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                const cname = compTarget ? `@${compTarget.split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const comp = COMPLIMENTS[Math.floor(Math.random() * COMPLIMENTS.length)];
+                await sock.sendMessage(from, { text: `💛 *Compliment for ${cname}:*\n\n${comp}`, mentions: compTarget ? [compTarget] : [] }, { quoted: msg });
+                break;
+            }
+
+            // --- TRANSLATE (MyMemory free API) ---
+            case ".translate":
+            case ".tr": {
+                const trParts = parts.slice(1);
+                if (trParts.length < 2) return reply("Usage: .translate <lang> <text>\nExample: .translate yoruba Good morning everyone\nLanguage codes: yo (Yoruba), ig (Igbo), ha (Hausa), fr (French), es (Spanish), de (German), zh (Chinese)");
+                const toLang = trParts[0];
+                const trText = trParts.slice(1).join(" ");
+                await reply(`🌐 Translating to *${toLang}*...`);
+                try {
+                    const encoded = encodeURIComponent(trText);
+                    const trResult = await new Promise((resolve, reject) => {
+                        https.get(`https://api.mymemory.translated.net/get?q=${encoded}&langpair=en|${toLang}`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                try { const p = JSON.parse(data); resolve(p.responseData?.translatedText || "No translation"); } catch { reject(new Error("Parse error")); }
+                            });
+                        }).on("error", reject);
+                    });
+                    await reply(`🌐 *Translation (${toLang}):*\n\n_${trText}_\n\n➡️ *${trResult}*`);
+                } catch (e) { await reply(`❌ Translation failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- WEATHER (wttr.in free API) ---
+            case ".weather":
+            case ".wx": {
+                const city = parts.slice(1).join(" ").trim();
+                if (!city) return reply("Usage: .weather Lagos\nExample: .weather Abuja");
+                await reply(`🌤️ Fetching weather for *${city}*...`);
+                try {
+                    const wxResult = await new Promise((resolve, reject) => {
+                        https.get(`https://wttr.in/${encodeURIComponent(city)}?format=4`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => resolve(data.trim()));
+                        }).on("error", reject);
+                    });
+                    await reply(`🌍 *Weather: ${city}*\n\n${wxResult}\n\n_Powered by wttr.in_`);
+                } catch (e) { await reply(`❌ Weather fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- BIBLE (bible-api.com free) ---
+            case ".bible": {
+                const bRef = parts.slice(1).join(" ").trim();
+                const bQuery = bRef || "john 3:16";
+                await reply(`📖 Fetching *${bQuery}*...`);
+                try {
+                    const bVerse = await new Promise((resolve, reject) => {
+                        https.get(`https://bible-api.com/${encodeURIComponent(bQuery)}`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                try { const p = JSON.parse(data); resolve(p.text ? { ref: p.reference, text: p.text.trim() } : null); } catch { reject(new Error("Parse")); }
+                            });
+                        }).on("error", reject);
+                    });
+                    if (!bVerse) return reply("❌ Verse not found. Example: .bible John 3:16");
+                    await reply(`📖 *${bVerse.ref}*\n\n_"${bVerse.text}"_\n\n_— Holy Bible (KJV)_`);
+                } catch (e) { await reply(`❌ Bible fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- QURAN (alquran.cloud free API) ---
+            case ".quran": {
+                const qInput = parts.slice(1).join(":").trim();
+                const [surahStr, ayahStr] = qInput.split(":").map(s => s?.trim());
+                const surah = parseInt(surahStr) || 1;
+                const ayah = parseInt(ayahStr) || 1;
+                await reply(`📗 Fetching Surah *${surah}*, Ayah *${ayah}*...`);
+                try {
+                    const [arResult, enResult] = await Promise.all([
+                        new Promise((resolve, reject) => {
+                            https.get(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}`, (res) => {
+                                let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                    try { const p = JSON.parse(data); resolve(p.data || null); } catch { reject(new Error("Parse")); }
+                                });
+                            }).on("error", reject);
+                        }),
+                        new Promise((resolve, reject) => {
+                            https.get(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}/en.asad`, (res) => {
+                                let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                    try { const p = JSON.parse(data); resolve(p.data || null); } catch { reject(new Error("Parse")); }
+                                });
+                            }).on("error", reject);
+                        }),
+                    ]);
+                    if (!arResult) return reply("❌ Ayah not found. Example: .quran 2:255");
+                    const surahName = arResult.surah?.englishName || `Surah ${surah}`;
+                    await reply(`📗 *${surahName} — Ayah ${ayah}*\n\n*Arabic:*\n${arResult.text}\n\n*English:*\n_"${enResult?.text || "Translation unavailable."}"_`);
+                } catch (e) { await reply(`❌ Quran fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- GROUP INFO ---
+            case ".groupinfo": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin);
+                    const created = new Date(meta.creation * 1000).toLocaleDateString("en-NG");
+                    await reply(
+                        `👥 *GROUP INFO*\n━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `📌 *Name:* ${meta.subject}\n` +
+                        `🆔 *ID:* ${from}\n` +
+                        `👤 *Members:* ${meta.participants.length}\n` +
+                        `🛡️ *Admins:* ${admins.length}\n` +
+                        `📅 *Created:* ${created}\n` +
+                        `📝 *Description:*\n_${meta.desc || "No description"}_`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- ADMIN LIST ---
+            case ".adminlist": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin);
+                    if (!admins.length) return reply("No admins found.");
+                    let txt = `🛡️ *Admin List — ${meta.subject}*\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                    admins.forEach((a, i) => { txt += `${i+1}. @${a.id.split("@")[0]} ${a.admin === "superadmin" ? "👑" : "🛡️"}\n`; });
+                    await sock.sendMessage(from, { text: txt, mentions: admins.map(a => a.id) }, { quoted: msg });
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- MEMBER COUNT ---
+            case ".membercount": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    await reply(`👥 *Member Count:* *${meta.participants.length}* members in *${meta.subject}*`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- EVERYONE (tag all members) ---
+            case ".everyone":
+            case ".all": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                const evMsg = parts.slice(1).join(" ").trim() || "📢 *Attention everyone!*";
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    const mentionText = members.map(j => `@${j.split("@")[0]}`).join(" ");
+                    await sock.sendMessage(from, { text: `${evMsg}\n\n${mentionText}`, mentions: members }, { quoted: msg });
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SET STATUS (WhatsApp about) ---
+            case ".setstatus": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can use this.");
+                const statusText = parts.slice(1).join(" ").trim();
+                if (!statusText) return reply("Usage: .setstatus <your new status>");
+                try {
+                    await sock.updateProfileStatus(statusText);
+                    await reply(`✅ Status updated to:\n_${statusText}_`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SET NAME (WhatsApp display name) ---
+            case ".setname": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can use this.");
+                const newName = parts.slice(1).join(" ").trim();
+                if (!newName) return reply("Usage: .setname <new name>");
+                try {
+                    await sock.updateProfileName(newName);
+                    await reply(`✅ Display name updated to: *${newName}*`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- WARN ---
+            case ".warn": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can warn members.");
+                const warnTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                if (!warnTarget) return reply("Usage: .warn @user — Reply or tag someone.");
+                const wCount = addWarn(from, warnTarget);
+                if (wCount >= 3) {
+                    resetWarns(from, warnTarget);
+                    try { await sock.groupParticipantsUpdate(from, [warnTarget], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, { text: `🚫 @${warnTarget.split("@")[0]} has been *kicked* — 3 warnings reached!`, mentions: [warnTarget] }, { quoted: msg });
+                } else {
+                    await sock.sendMessage(from, { text: `⚠️ @${warnTarget.split("@")[0]} has been warned!\n\n⚠️ Warning *${wCount}/3* — 3 = kick.`, mentions: [warnTarget] }, { quoted: msg });
+                }
+                break;
+            }
+
+            // --- WARNLIST ---
+            case ".warnlist": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const warnData = getAllWarns(from);
+                const entries = Object.entries(warnData).filter(([, v]) => v > 0);
+                if (!entries.length) return reply("✅ No active warnings in this group.");
+                let wTxt = `⚠️ *Warning List*\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                entries.forEach(([jid, count]) => { wTxt += `• @${jid.split("@")[0]}: *${count}/3* warns\n`; });
+                await sock.sendMessage(from, { text: wTxt, mentions: entries.map(([j]) => j) }, { quoted: msg });
+                break;
+            }
+
+            // --- RESETWARN ---
+            case ".resetwarn": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can reset warnings.");
+                const rwTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                if (!rwTarget) return reply("Usage: .resetwarn @user");
+                resetWarns(from, rwTarget);
+                await sock.sendMessage(from, { text: `✅ Warnings cleared for @${rwTarget.split("@")[0]}!`, mentions: [rwTarget] }, { quoted: msg });
+                break;
+            }
+
+            // --- BAN ---
+            case ".ban": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can ban users.");
+                const banTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                if (!banTarget) return reply("Usage: .ban @user — Tag the person to ban from the bot.");
+                if (botJid) addBan(botJid, banTarget);
+                await sock.sendMessage(from, { text: `🔴 @${banTarget.split("@")[0]} has been *banned* from using this bot.`, mentions: [banTarget] }, { quoted: msg });
+                break;
+            }
+
+            // --- UNBAN ---
+            case ".unban": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can unban users.");
+                const unbanTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                if (!unbanTarget) return reply("Usage: .unban @user");
+                if (botJid) removeBan(botJid, unbanTarget);
+                await sock.sendMessage(from, { text: `🟢 @${unbanTarget.split("@")[0]} has been *unbanned*.`, mentions: [unbanTarget] }, { quoted: msg });
+                break;
+            }
+
+            // --- ANTIDELETE ---
+            case ".antidelete": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const adSub = parts[1]?.toLowerCase();
+                if (adSub === "on") { setGroupSetting(from, "antidelete", true); return reply("✅ Anti-delete *ON* — Deleted messages will be re-sent."); }
+                if (adSub === "off") { setGroupSetting(from, "antidelete", false); return reply("✅ Anti-delete *OFF*."); }
+                return reply(`Usage: .antidelete on/off\nCurrent: *${getGroupSetting(from, "antidelete") ? "ON" : "OFF"}*`);
+            }
+
+            // --- ANTIBOT ---
+            case ".antibot": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const abSub = parts[1]?.toLowerCase();
+                if (abSub === "on") { setGroupSetting(from, "antibot", true); return reply("✅ Anti-bot *ON* — Bot accounts will be auto-kicked."); }
+                if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply("✅ Anti-bot *OFF*."); }
+                return reply(`Usage: .antibot on/off\nCurrent: *${getGroupSetting(from, "antibot") ? "ON" : "OFF"}*`);
+            }
+
+            // --- SCHEDULE ---
+            case ".schedule": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const schedTime = parts[1];
+                const schedMsg = parts.slice(2).join(" ").trim();
+                if (!schedTime || !schedMsg || !/^\d{2}:\d{2}$/.test(schedTime)) return reply("Usage: .schedule HH:MM <message>\nExample: .schedule 08:00 Good morning everyone!");
+                const schedData = loadSchedules();
+                if (!schedData[from]) schedData[from] = [];
+                const exists = schedData[from].find(s => s.time === schedTime);
+                if (exists) { exists.message = schedMsg; } else { schedData[from].push({ time: schedTime, message: schedMsg }); }
+                saveSchedules(schedData);
+                await reply(`✅ Scheduled *${schedTime}* daily:\n_"${schedMsg}"_`);
+                break;
+            }
+
+            case ".unschedule": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const uTime = parts[1];
+                if (!uTime) return reply("Usage: .unschedule HH:MM");
+                const ud = loadSchedules();
+                if (ud[from]) { ud[from] = ud[from].filter(s => s.time !== uTime); saveSchedules(ud); }
+                await reply(`✅ Schedule at *${uTime}* removed.`);
+                break;
+            }
+
+            case ".schedules": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const sd = loadSchedules();
+                const entries = sd[from] || [];
+                if (!entries.length) return reply("📅 No active schedules for this group.");
+                let sTxt = "📅 *Active Schedules*\n━━━━━━━━━━━━━━━━━━━\n\n";
+                entries.forEach(s => { sTxt += `⏰ *${s.time}* — _"${s.message}"_\n`; });
+                await reply(sTxt);
+                break;
+            }
+
             default:
                 if (isSelfChat && body) {
                     await reply(`👋 I'm active! Type *.menu* to see all commands.`);
@@ -1920,6 +2575,39 @@ telBot.launch();
 process.once("SIGINT", () => telBot.stop("SIGINT"));
 process.once("SIGTERM", () => telBot.stop("SIGTERM"));
 
+// --- KEEP-ALIVE HTTP SERVER (for UptimeRobot / cron-job.org pings) ---
+const PING_PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("👻 Phantom X is alive!\n");
+}).listen(PING_PORT, () => {
+    console.log(`[Ping] Keep-alive server running on port ${PING_PORT}`);
+});
+
+// --- SCHEDULE TIMER (check every minute, fire scheduled messages) ---
+setInterval(async () => {
+    const now = new Date();
+    const HH = String(now.getHours()).padStart(2, "0");
+    const MM = String(now.getMinutes()).padStart(2, "0");
+    const currentTime = `${HH}:${MM}`;
+    const sd = loadSchedules();
+    for (const [groupJid, entries] of Object.entries(sd)) {
+        for (const entry of (entries || [])) {
+            if (entry.time === currentTime) {
+                // Find an active socket to use (any connected user's socket)
+                const sockEntry = Object.values(activeSockets)[0];
+                if (sockEntry) {
+                    try {
+                        await sockEntry.sendMessage(groupJid, { text: entry.message });
+                    } catch (e) {
+                        console.error(`[Schedule] Failed to send to ${groupJid}:`, e?.message);
+                    }
+                }
+            }
+        }
+    }
+}, 60000);
+
 // --- AUTO-RECONNECT SAVED SESSIONS ON STARTUP ---
 (async () => {
     const sessions = loadSessions();
@@ -1986,6 +2674,57 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             // Process "notify" (normal incoming) OR any fromMe message (owner commands in self-chat/groups)
             if (type !== "notify" && !msg.key.fromMe) continue;
             await handleMessage(sock, msg);
+        }
+    });
+
+    // Store messages for antidelete lookup
+    const msgCache = {};
+    sock.ev.on("messages.upsert", ({ messages }) => {
+        for (const m of messages) {
+            if (m.key?.id && m.message) msgCache[m.key.id] = m;
+        }
+    });
+
+    sock.ev.on("messages.delete", async (item) => {
+        try {
+            const keys = item.keys || (item.key ? [item.key] : []);
+            for (const key of keys) {
+                const groupJid = key.remoteJid;
+                if (!groupJid?.endsWith("@g.us")) continue;
+                if (!getGroupSetting(groupJid, "antidelete")) continue;
+                const cached = msgCache[key.id];
+                if (!cached?.message) continue;
+                const type = getContentType(cached.message);
+                const who = key.participant || cached.key?.participant;
+                const whoNum = who ? `@${who.split("@")[0]}` : "Someone";
+                try {
+                    if (type === "conversation" || type === "extendedTextMessage") {
+                        const txt = cached.message?.conversation || cached.message?.extendedTextMessage?.text || "";
+                        if (txt) {
+                            await sock.sendMessage(groupJid, {
+                                text: `🗑️ *Deleted Message Caught!*\n👤 *From:* ${whoNum}\n\n📝 *Message:*\n${txt}`,
+                                mentions: who ? [who] : [],
+                            });
+                        }
+                    } else if (type === "imageMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(groupJid, {
+                            image: buf,
+                            caption: `🗑️ *Deleted image caught!* (Sent by ${whoNum})`,
+                            mentions: who ? [who] : [],
+                        });
+                    } else if (type === "videoMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(groupJid, {
+                            video: buf,
+                            caption: `🗑️ *Deleted video caught!* (Sent by ${whoNum})`,
+                            mentions: who ? [who] : [],
+                        });
+                    }
+                } catch (_) {}
+            }
+        } catch (e) {
+            console.error("[Antidelete]", e?.message);
         }
     });
 
