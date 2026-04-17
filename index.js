@@ -29,6 +29,7 @@ const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 const MODE_FILE = path.join(__dirname, "bot_mode.json");
 const MENU_BANNER_FILE = path.join(__dirname, "menu_banner.jpg");
 const THEME_FILE = path.join(__dirname, "menu_theme.json");
+const BOT_SECURITY_FILE = path.join(__dirname, "bot_security.json");
 
 // Per-user state
 const activeSockets = {};
@@ -341,6 +342,37 @@ function setGroupSetting(groupJid, key, value) {
     saveSettings(s);
 }
 
+function loadBotSecurity() {
+    if (!fs.existsSync(BOT_SECURITY_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(BOT_SECURITY_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveBotSecurity(data) {
+    fs.writeFileSync(BOT_SECURITY_FILE, JSON.stringify(data, null, 2));
+}
+
+function getBotSecurity(botJid, key, def = false) {
+    const data = loadBotSecurity();
+    const id = botJid || "global";
+    return data[id]?.[key] ?? def;
+}
+
+function setBotSecurity(botJid, key, value) {
+    const data = loadBotSecurity();
+    const id = botJid || "global";
+    if (!data[id]) data[id] = {};
+    data[id][key] = value;
+    saveBotSecurity(data);
+}
+
+function isSuspiciousBugPayload(text) {
+    if (!text) return false;
+    const zeroWidthMatches = text.match(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]/g) || [];
+    const combiningMatches = text.match(/[\u0300-\u036f\u0489\u0c00-\u0c7f\u0c80-\u0cff\u0b80-\u0bff\u0600-\u06ff\ufdfb-\ufdfd]/g) || [];
+    const invisibleRatio = zeroWidthMatches.length / Math.max(text.length, 1);
+    return text.length > 8000 || zeroWidthMatches.length > 500 || combiningMatches.length > 1200 || invisibleRatio > 0.45;
+}
+
 // --- BOT MODE (public / owner) ---
 function loadModes() {
     if (!fs.existsSync(MODE_FILE)) return {};
@@ -644,6 +676,7 @@ function getMenuSections() {
         { emoji: '📋', title: 'GENERAL', items: [
             ['.menu / .phantom'], ['.info'], ['.help'], ['.ping'],
             ['.setpp'], ['.menudesign 1-20'], ['.mode public/owner'],
+            ['.list'], ['.list group menu'], ['.help bug menu'],
         ]},
         { emoji: '⚠️', title: 'MODERATION', items: [
             ['.warn @user'], ['.warnlist'], ['.resetwarn @user'],
@@ -697,7 +730,7 @@ function getMenuSections() {
         ]},
         { emoji: '🛡️', title: 'GROUP PROTECTION', items: [
             ['.antilink on/off'], ['.antispam on/off'],
-            ['.antidemote on/off'],
+            ['.antidemote on/off'], ['.antibug on/off/status'],
         ]},
         { emoji: '📣', title: 'NOTIFICATIONS', items: [
             ['.welcome on/off'], ['.goodbye on/off'],
@@ -713,6 +746,7 @@ function getMenuSections() {
             ['.invisfreeze ‹number›'], ['.unbug ‹number›'],
             ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
             ['.ungroupcrash ‹groupId›'],
+            ['.antibug on/off/status'],
             ['.lockedbypass ‹text›'],
             ['.emojibomb @user'], ['.textbomb @user ‹text› ‹times›'],
             ['.spamatk @user ‹times›'], ['.ghostping @user'],
@@ -728,6 +762,192 @@ function getMenuSections() {
             ['.chat ‹message›'], ['.autojoin on/off'],
         ]},
     ];
+}
+
+function buildGroupMenuList() {
+    return `👥 *GROUP MENU LIST*
+━━━━━━━━━━━━━━━━━━━━
+
+*Admin Actions*
+• *.add <number>* — Add member
+• *.kick @user* — Remove member
+• *.promote @user* — Make admin
+• *.demote @user* — Remove admin
+• *.mute* — Admin-only messages
+• *.unmute* — Open chat
+
+*Group Info*
+• *.link* — Get invite link
+• *.revoke* — Reset invite link
+• *.groupinfo* — Group details
+• *.adminlist* — List admins
+• *.membercount* — Count members
+• *.groupid* — Show group ID
+
+*Tag & Broadcast*
+• *.everyone <msg>* — Tag everyone
+• *.tagall* — Visible tag all
+• *.hidetag* — Silent tag all
+• *.broadcast <mins> <msg>* — Group broadcast
+• *.stopbroadcast* — Stop broadcast
+
+*Protection*
+• *.antilink on/off*
+• *.antispam on/off*
+• *.antidemote on/off*
+• *.antidelete on/off*
+• *.antibot on/off*
+• *.antibug on/off/status*
+
+_Most group actions need the linked WhatsApp number to be admin._`;
+}
+
+function buildListMenu() {
+    return `📋 *PHANTOM X LIST MENUS*
+━━━━━━━━━━━━━━━━━━━━
+
+• *.list group menu* — All group commands
+• *.list bug menu* — Bug commands by section
+• *.list protection menu* — Protection commands
+• *.list fun menu* — Fun commands
+• *.list game menu* — Game commands
+
+You can also use:
+• *.help bug menu*
+• *.help group menu*
+• *.bugmenu android*
+• *.bugmenu ios*
+• *.bugmenu group*`;
+}
+
+function buildSimpleSectionList(section) {
+    const sections = {
+        "protection": `🛡️ *PROTECTION MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.antilink on/off*
+• *.antispam on/off*
+• *.antidemote on/off*
+• *.antidelete on/off*
+• *.antibot on/off*
+• *.antibug on/off/status*
+
+*.antibug on* protects the linked bot number by deleting/ignoring suspicious bug payloads.`,
+        "fun": `😂 *FUN MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.joke*
+• *.fact*
+• *.quote*
+• *.roast @user*
+• *.compliment @user*
+• *.ship @user1 @user2*
+• *.rate @user*
+• *.vibe @user*
+• *.horoscope <sign>*`,
+        "game": `🎮 *GAME MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.ttt @p1 @p2*
+• *.truth*
+• *.dare*
+• *.wordchain <word>*
+• *.flip*
+• *.dice*
+• *.8ball <question>*
+• *.rps rock/paper/scissors*
+• *.slots*
+• *.trivia*
+• *.hangman <guess>*
+• *.numguess*
+• *.riddle*
+• *.mathquiz*
+• *.wouldurather*
+• *.scramble*`,
+    };
+    return sections[section] || buildListMenu();
+}
+
+function buildBugMenuText(section = "") {
+    const androidHelp = `🤖 *ANDROID BUGS*
+━━━━━━━━━━━━━━━━━━━━
+• *.androidbug <number>*
+  Example: *.androidbug 2348012345678*
+
+Related:
+• *.forceclose <number>*
+• *.freeze <number>*
+• *.unbug <number>*`;
+
+    const iosHelp = `🍎 *iOS BUGS*
+━━━━━━━━━━━━━━━━━━━━
+• *.iosbug <number>*
+  Example: *.iosbug 2348012345678*
+• *.invisfreeze <number>*
+• *.forceclose <number>*
+• *.unbug <number>*`;
+
+    const freezeHelp = `❄️ *FREEZE / FORCE CLOSE*
+━━━━━━━━━━━━━━━━━━━━
+• *.forceclose <number>*
+• *.fc <number>*
+• *.freeze <number>*
+• *.invisfreeze <number>*
+• *.if <number>*
+• *.unbug <number>*`;
+
+    const groupHelp = `🏘️ *GROUP BUGS*
+━━━━━━━━━━━━━━━━━━━━
+• *.groupcrash* — Run inside group
+• *.groupcrash <groupId/link>*
+• *.ungroupcrash <groupId>*
+
+Useful:
+• *.groupid* — Get group ID`;
+
+    const extraHelp = `🧨 *OTHER BUG / STRESS CMDS*
+━━━━━━━━━━━━━━━━━━━━
+• *.emojibomb @user*
+• *.textbomb @user <text> <times>*
+• *.spamatk @user <times>*
+• *.ghostping @user*
+• *.lockedbypass <text>*`;
+
+    const defenseHelp = `🛡️ *ANTI BUG DEFENSE*
+━━━━━━━━━━━━━━━━━━━━
+• *.antibug on* — Protect linked bot number
+• *.antibug off* — Disable protection
+• *.antibug status* — Check current state
+
+When ON, the bot deletes/ignores suspicious oversized, invisible, RTL, and Unicode-flood payloads sent to the linked number.`;
+
+    if (section === "android") return androidHelp;
+    if (section === "ios") return iosHelp;
+    if (section === "freeze" || section === "forceclose") return freezeHelp;
+    if (section === "group") return groupHelp;
+    if (section === "extra" || section === "other") return extraHelp;
+    if (section === "defense" || section === "protect" || section === "antibug") return defenseHelp;
+
+    return `💥 *PHANTOM X BUG MENU*
+━━━━━━━━━━━━━━━━━━━━
+
+${androidHelp}
+
+${iosHelp}
+
+${freezeHelp}
+
+${groupHelp}
+
+${extraHelp}
+
+${defenseHelp}
+
+━━━━━━━━━━━━━━━━━━━━
+Help:
+• *.bugmenu android*
+• *.bugmenu ios*
+• *.bugmenu freeze*
+• *.bugmenu group*
+• *.bugmenu antibug*
+• *.help bug menu*`;
 }
 
 // ─── THEME 1: GHOST ───
@@ -955,6 +1175,15 @@ async function handleMessage(sock, msg) {
             await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
         };
 
+        const botJid = sock.user?.id || null;
+        const currentMode = getBotMode(botJid);
+
+        if (getBotSecurity(botJid, "antibug") && !msg.key.fromMe && isSuspiciousBugPayload(rawBody)) {
+            try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+            console.log(`[AntiBug] Blocked suspicious payload from ${senderJid} in ${from}`);
+            return;
+        }
+
         // --- AUTO-REACT (runs on every group message before filtering) ---
         if (isGroup && !msg.key.fromMe) {
             const reactGroups = loadAutoReact();
@@ -1037,8 +1266,6 @@ async function handleMessage(sock, msg) {
         if (!isGroup && !isSelfChat && !msg.key.fromMe) return;
 
         // --- BOT MODE ENFORCEMENT ---
-        const botJid = sock.user?.id || null;
-        const currentMode = getBotMode(botJid);
         // In owner mode, only process commands sent by the bot owner themselves (fromMe)
         if (currentMode === "owner" && !msg.key.fromMe && !isSelfChat) return;
 
@@ -1311,7 +1538,21 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            case ".list": {
+                const listTopic = parts.slice(1).join(" ").toLowerCase().trim();
+                if (listTopic === "group menu" || listTopic === "group" || listTopic === "groups") return reply(buildGroupMenuList());
+                if (listTopic === "bug menu" || listTopic === "bug" || listTopic === "bugs") return reply(buildBugMenuText());
+                if (listTopic === "protection menu" || listTopic === "protection") return reply(buildSimpleSectionList("protection"));
+                if (listTopic === "fun menu" || listTopic === "fun") return reply(buildSimpleSectionList("fun"));
+                if (listTopic === "game menu" || listTopic === "games" || listTopic === "game") return reply(buildSimpleSectionList("game"));
+                return reply(buildListMenu());
+            }
+
             case ".help": {
+                const helpTopic = parts.slice(1).join(" ").toLowerCase().trim();
+                if (helpTopic === "bug menu" || helpTopic === "bugmenu" || helpTopic === "bug" || helpTopic === "bugs") return reply(buildBugMenuText());
+                if (helpTopic === "group menu" || helpTopic === "group" || helpTopic === "groups") return reply(buildGroupMenuList());
+                if (helpTopic === "protection menu" || helpTopic === "protection" || helpTopic === "antibug") return reply(buildSimpleSectionList("protection"));
                 await reply(
 `📖 *Phantom X — Full Command Guide*
 ━━━━━━━━━━━━━━━━━━━━
@@ -1535,6 +1776,20 @@ async function handleMessage(sock, msg) {
                 if (!["on", "off"].includes(val)) return reply("Usage: .antidemote on/off");
                 setGroupSetting(from, "antidemote", val === "on");
                 await reply(`🛡️ Anti-demote is now *${val.toUpperCase()}* in this group.`);
+                break;
+            }
+
+            case ".antibug":
+            case ".bugshield": {
+                if (!msg.key.fromMe && !isSelfChat) return reply("❌ Owner only.");
+                const val = parts[1]?.toLowerCase();
+                const current = getBotSecurity(botJid, "antibug");
+                if (!val || val === "status") {
+                    return reply(`🛡️ *Anti-Bug Shield*\n\nStatus: *${current ? "ON" : "OFF"}*\n\nUsage:\n• *.antibug on* — protect the linked bot number\n• *.antibug off* — disable protection\n• *.antibug status* — check state\n\nWhen ON, suspicious oversized, invisible, RTL, and Unicode-flood payloads sent to the linked number are deleted/ignored by the bot.`);
+                }
+                if (!["on", "off"].includes(val)) return reply("Usage: .antibug on/off/status");
+                setBotSecurity(botJid, "antibug", val === "on");
+                await reply(`🛡️ Anti-Bug Shield is now *${val.toUpperCase()}* for this linked WhatsApp number.`);
                 break;
             }
 
@@ -2743,130 +2998,7 @@ async function handleMessage(sock, msg) {
 
             case ".bugmenu": {
                 const section = parts[1]?.toLowerCase();
-
-                // ── Android section ──
-                const androidHelp =
-                    `🤖━━━━━━━━━━━━━━━━━━━━━━━━━━🤖\n` +
-                    `   📱 *ANDROID BUGS — Phantom X*\n` +
-                    `🤖━━━━━━━━━━━━━━━━━━━━━━━━━━🤖\n\n` +
-                    `⚠️ *Works on Android WhatsApp only*\n\n` +
-                    `📌 *Usage:* *.androidbug <number>*\n` +
-                    `   Example: *.androidbug 2348012345678*\n\n` +
-                    `💥 *How it works:*\n` +
-                    `   Sends a payload of Telugu/Kannada/Tamil\n` +
-                    `   combining characters that overload the\n` +
-                    `   Android text renderer — WhatsApp freezes\n` +
-                    `   or force-closes *immediately when the\n` +
-                    `   message arrives*, even without opening it.\n\n` +
-                    `🔧 *Undo:* *.unbug <number>*\n\n` +
-                    `🛡️ _Dev number is permanently protected._`;
-
-                // ── iOS section ──
-                const iosHelp =
-                    `🍎━━━━━━━━━━━━━━━━━━━━━━━━━━🍎\n` +
-                    `   📱 *iOS BUGS — Phantom X*\n` +
-                    `🍎━━━━━━━━━━━━━━━━━━━━━━━━━━🍎\n\n` +
-                    `⚠️ *Works on iPhone WhatsApp only*\n\n` +
-                    `📌 *Usage:* *.iosbug <number>*\n` +
-                    `   Example: *.iosbug 2348012345678*\n\n` +
-                    `💥 *How it works:*\n` +
-                    `   Sends a Sindhi/Arabic Unicode + BiDi\n` +
-                    `   override payload that triggers an iOS\n` +
-                    `   text layout engine crash — WhatsApp\n` +
-                    `   closes *as soon as the notification is\n` +
-                    `   processed* or the chat is opened.\n\n` +
-                    `🔧 *Undo:* *.unbug <number>*\n\n` +
-                    `🛡️ _Dev number is permanently protected._`;
-
-                // ── Freeze/Force-close section ──
-                const freezeHelp =
-                    `💀━━━━━━━━━━━━━━━━━━━━━━━━━━💀\n` +
-                    `   ❄️ *FREEZE & FORCE CLOSE — Phantom X*\n` +
-                    `💀━━━━━━━━━━━━━━━━━━━━━━━━━━💀\n\n` +
-                    `⚠️ *Works on ALL devices (Android + iOS)*\n\n` +
-                    `💀 *.forceclose <number>*\n` +
-                    `   Strongest bug. ZWJ chain + RTL stack +\n` +
-                    `   Arabic isolation overload. Forces WA to\n` +
-                    `   fully close *immediately on message delivery*.\n` +
-                    `   Undo: *.unbug <number>*\n\n` +
-                    `🧊 *.freeze <number>*\n` +
-                    `   Zero-width character flood. Freezes the\n` +
-                    `   target's chat — can't scroll or type.\n` +
-                    `   Undo: *.unbug <number>*\n\n` +
-                    `👁️ *.invisfreeze <number>*\n` +
-                    `   Sends an *invisible* message (no text visible).\n` +
-                    `   Target doesn't see anything arrive, but WA\n` +
-                    `   silently processes thousands of hidden chars,\n` +
-                    `   causing freeze/lag. Hardest to detect.\n` +
-                    `   Undo: *.unbug <number>*\n\n` +
-                    `🛡️ _Dev number is permanently protected._`;
-
-                // ── Group section ──
-                const groupHelp =
-                    `🏘️━━━━━━━━━━━━━━━━━━━━━━━━━━🏘️\n` +
-                    `   💣 *GROUP BUGS — Phantom X*\n` +
-                    `🏘️━━━━━━━━━━━━━━━━━━━━━━━━━━🏘️\n\n` +
-                    `⚠️ *Affects everyone who opens the group*\n\n` +
-                    `💣 *.groupcrash*\n` +
-                    `   Run inside the target group.\n` +
-                    `   Anyone who taps/opens that group → WA crashes.\n` +
-                    `   Swipe away = WA returns. Open again = crash. ♻️\n` +
-                    `   Only the group is affected — not their WA elsewhere.\n\n` +
-                    `💣 *.groupcrash <invite link>*\n` +
-                    `   Example: *.groupcrash https://chat.whatsapp.com/XYZ*\n\n` +
-                    `💣 *.groupcrash <groupId>*\n` +
-                    `   Example: *.groupcrash 120363XXXXXX@g.us*\n` +
-                    `   _(get ID from *.groupid* inside the group)_\n\n` +
-                    `🔧 *.ungroupcrash <groupId>*\n` +
-                    `   Removes the crash — group returns to normal.\n\n` +
-                    `🛡️ _Dev's groups are not protected — use responsibly._`;
-
-                // ── Full menu ──
-                const bugMenu =
-                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
-                    `   ☠️  *P H A N T O M  X*  ☠️\n` +
-                    `      _B U G  A R S E N A L_\n` +
-                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n\n` +
-                    `⚠️ _OWNER ONLY — Dev number is protected_ ⚠️\n` +
-                    `📌 _All bugs use phone number, not @tag_\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `🤖 *ANDROID BUGS*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  *.androidbug <number>* — Overloads Android renderer\n` +
-                    `  _Triggers even from notification, no interaction needed_\n` +
-                    `  🔧 Undo: *.unbug <number>*\n` +
-                    `  ℹ️ Help: *.bugmenu android*\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `🍎 *iOS BUGS*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  *.iosbug <number>* — Sindhi/Arabic crash for iPhone\n` +
-                    `  _Triggers on notification processing or chat open_\n` +
-                    `  🔧 Undo: *.unbug <number>*\n` +
-                    `  ℹ️ Help: *.bugmenu ios*\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `💀 *FORCE CLOSE & FREEZE* (any device)\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  *.forceclose <number>* — Strongest. Forces WA to close\n` +
-                    `  *.freeze <number>* — Freezes their chat completely\n` +
-                    `  *.invisfreeze <number>* — Silent invisible overload\n` +
-                    `  🔧 Undo all: *.unbug <number>*\n` +
-                    `  ℹ️ Help: *.bugmenu freeze*\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `🏘️ *GROUP BUGS*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  *.groupcrash* — Loop crash (run inside group)\n` +
-                    `  *.groupcrash <link/groupId>* — Target from outside\n` +
-                    `  🔧 Undo: *.ungroupcrash <groupId>*\n` +
-                    `  ℹ️ Help: *.bugmenu group*\n\n` +
-                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
-                    `  ☠️ _Phantom X — Bug Division Active_ 💀\n` +
-                    `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥`;
-
-                if (section === "android") return reply(androidHelp);
-                if (section === "ios") return reply(iosHelp);
-                if (section === "freeze" || section === "forceclose") return reply(freezeHelp);
-                if (section === "group") return reply(groupHelp);
-                await reply(bugMenu);
+                await reply(buildBugMenuText(section));
                 break;
             }
 

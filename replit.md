@@ -64,15 +64,18 @@ A Node.js bot bridging Telegram and WhatsApp via Baileys. Users link their Whats
 - `.autoreact / .autoreply / .setalias` — Group automation
 - `.antidelete on/off` — Re-post deleted messages
 - `.antibot on/off` — Auto-kick bot accounts
+- `.antibug on/off/status` — Defensive shield for the linked bot number; deletes/ignores suspicious oversized, invisible, RTL, and Unicode-flood payloads
 - `.schedule HH:MM <msg>` — Daily timed messages
 - `.antilink / .antispam / .antidemote` — All integrated with 3-strike warn system
 
 ### Menus
 - 20 unique themes: Ghost, Matrix, Royal, Inferno, Minimal, Void, Vaporwave, Gothic, Cursive, Cosmos, Soft, Diamond, Thunder, Warrior, Neon, Spy, Pirate, Shadow, BoldTech, Echo
 - Switch with `.menudesign 1-20`
+- Focused lists: `.list`, `.list group menu`, `.list bug menu`, `.help bug menu`, `.help group menu`
 
 ### Bug Tools (Owner Only)
 - `.bugmenu` — Show all bug/hack tools
+- `.bugmenu android / ios / freeze / group / antibug` — Show section-specific bug menus
 - `.crash @user` — Send a multi-layer lag bomb (zero-width chars + RTL override + Arabic flood)
 - `.freeze @user` — Flood with 10,000+ invisible zero-width characters
 - `.zalgo <text>` — Corrupt text with demonic combining characters
