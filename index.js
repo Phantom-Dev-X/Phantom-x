@@ -389,7 +389,7 @@ function getMenuSections() {
         { emoji: '📋', title: 'GENERAL', items: [
             ['.menu / .phantom', 'Show this menu'],
             ['.setpp', 'Set menu banner image (reply to image)'],
-            ['.menudesign 1-5', 'Switch menu style'],
+            ['.menudesign 1-20', 'Switch menu style (20 designs)'],
             ['.info', 'Bot info & uptime'],
             ['.help', 'Full command guide'],
             ['.mode public/owner', 'Switch access mode'],
@@ -464,123 +464,149 @@ function getMenuSections() {
     ];
 }
 
-// ─── THEME 1: GHOST (spaced, 〔〕 headers) ───
-function buildThemeGhost(modeLabel, time, uptime, sections) {
-    let out = `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
-   ☠️  *P H A N T O M  ✘*  ☠️
-   _The Ghost in Your Machine_ 👻
-╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
-
-◈ ◈ ◈  *S Y S T E M  S T A T U S*  ◈ ◈ ◈
-
-  🤖  *Bot*      ›  Phantom X
-  📌  *Version*  ›  v${BOT_VERSION}
-  🌐  *Mode*     ›  ${modeLabel}
-  ⏱️  *Uptime*   ›  ${uptime}
-  🕐  *Time*     ›  ${time}
-`;
-    for (const sec of sections) {
-        out += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${sec.emoji} *${sec.title}* 〕\n\n`;
-        for (const [cmd, desc] of sec.items) {
-            out += `  ✦  *${cmd}*  —  ${desc}\n`;
-        }
-    }
-    out += `\n╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n  💀 _Phantom X — Built Different. Built Cold._ 🖤\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`;
-    return out.trim();
+// ─── THEME 1: GHOST ───
+function buildThemeGhost(ml, time, up, S) {
+    let o = `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n   ☠️  *P H A N T O M  ✘*  ☠️\n   _The Ghost in Your Machine_ 👻\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n◈ ◈ ◈  *S Y S T E M  S T A T U S*  ◈ ◈ ◈\n\n  🤖  *Bot*     ›  Phantom X\n  📌  *Ver*     ›  v${BOT_VERSION}\n  🌐  *Mode*    ›  ${ml}\n  ⏱️  *Uptime*  ›  ${up}\n  🕐  *Time*    ›  ${time}\n`;
+    for (const s of S) { o += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${s.emoji} *${s.title}* 〕\n\n`; for (const [c,d] of s.items) o += `  ✦  *${c}*  —  ${d}\n`; }
+    return (o + `\n╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n  💀 _Phantom X — Built Different. Built Cold._ 🖤\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`).trim();
 }
 
-// ─── THEME 2: MATRIX (hacker / terminal) ───
-function buildThemeMatrix(modeLabel, time, uptime, sections) {
-    let out = `█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█
-█   💻  *PHANTOM_X  v${BOT_VERSION}*  💻   █
-█   _> SYSTEM ONLINE ✓_         █
-█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█
-
-*[ SYS_INFO ]*
-  »  *Bot*    :  Phantom X
-  »  *Mode*   :  ${modeLabel}
-  »  *Uptime* :  ${uptime}
-  »  *Time*   :  ${time}
-`;
-    for (const sec of sections) {
-        out += `\n══════════════════════════════\n*[ MODULE :: ${sec.title} ]*  ${sec.emoji}\n`;
-        for (const [cmd, desc] of sec.items) {
-            out += `  *>*  \`${cmd}\`   //  ${desc}\n`;
-        }
-    }
-    out += `\n══════════════════════════════\n_> PHANTOM_X — Ghost Protocol Active._ 👻`;
-    return out.trim();
+// ─── THEME 2: MATRIX ───
+function buildThemeMatrix(ml, time, up, S) {
+    let o = `█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█\n█   💻  *PHANTOM_X  v${BOT_VERSION}*   💻   █\n█   _> SYSTEM ONLINE ✓_         █\n█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█\n\n*[ SYS_INFO ]*\n  »  *Bot*    :  Phantom X\n  »  *Mode*   :  ${ml}\n  »  *Uptime* :  ${up}\n  »  *Time*   :  ${time}\n`;
+    for (const s of S) { o += `\n══════════════════════════════\n*[ MODULE :: ${s.title} ]*  ${s.emoji}\n`; for (const [c,d] of s.items) o += `  *>*  \`${c}\`   //  ${d}\n`; }
+    return (o + `\n══════════════════════════════\n_> PHANTOM_X — Ghost Protocol Active._ 👻`).trim();
 }
 
-// ─── THEME 3: ROYAL (elegant crown style) ───
-function buildThemeRoyal(modeLabel, time, uptime, sections) {
-    let out = `♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛
-         👑  *PHANTOM X*  👑
-    _ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ. ᴅɪɢɪᴛᴀʟ._
-♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛
-
-✦ *ROYAL STATUS* ✦
-
-   ◆  *Bot*     ∷  Phantom X
-   ◆  *Version* ∷  v${BOT_VERSION}
-   ◆  *Mode*    ∷  ${modeLabel}
-   ◆  *Uptime*  ∷  ${uptime}
-   ◆  *Time*    ∷  ${time}
-`;
-    for (const sec of sections) {
-        out += `\n═══════════════════════════════\n❖  *${sec.emoji} ${sec.title}*  ❖\n\n`;
-        for (const [cmd, desc] of sec.items) {
-            out += `   ◆  *${cmd}*  ▸  ${desc}\n`;
-        }
-    }
-    out += `\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n  👑 _Phantom X — The Digital Monarch_ 🖤\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛`;
-    return out.trim();
+// ─── THEME 3: ROYAL ───
+function buildThemeRoyal(ml, time, up, S) {
+    let o = `♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n         👑  *PHANTOM X*  👑\n    _ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ. ᴅɪɢɪᴛᴀʟ._\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n\n✦ *ROYAL STATUS* ✦\n\n   ◆  *Bot*     ∷  Phantom X\n   ◆  *Version* ∷  v${BOT_VERSION}\n   ◆  *Mode*    ∷  ${ml}\n   ◆  *Uptime*  ∷  ${up}\n   ◆  *Time*    ∷  ${time}\n`;
+    for (const s of S) { o += `\n═══════════════════════════════\n❖  *${s.emoji} ${s.title}*  ❖\n\n`; for (const [c,d] of s.items) o += `   ◆  *${c}*  ▸  ${d}\n`; }
+    return (o + `\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n  👑 _Phantom X — The Digital Monarch_ 🖤\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛`).trim();
 }
 
-// ─── THEME 4: INFERNO (fire / savage energy) ───
-function buildThemeInferno(modeLabel, time, uptime, sections) {
-    let out = `🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥
-   💥  *P H A N T O M  X*  💥
-   _No Cap. No Mercy. Built Cold._ 🥶
-🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥
-
-⚡ *SYSTEM STATUS* ⚡
-
-  🔸  *Bot*     »  Phantom X
-  🔸  *Version* »  v${BOT_VERSION}
-  🔸  *Mode*    »  ${modeLabel}
-  🔸  *Uptime*  »  ${uptime}
-  🔸  *Time*    »  ${time}
-`;
-    for (const sec of sections) {
-        out += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${sec.emoji} ${sec.title}* 💀\n\n`;
-        for (const [cmd, desc] of sec.items) {
-            out += `  ⚡  *${cmd}*  ⟶  ${desc}\n`;
-        }
-    }
-    out += `\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n  💀 _Phantom X — Straight Savage. No Filter._ 🔥\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥`;
-    return out.trim();
+// ─── THEME 4: INFERNO ───
+function buildThemeInferno(ml, time, up, S) {
+    let o = `🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n   💥  *P H A N T O M  X*  💥\n   _No Cap. No Mercy. Built Cold._ 🥶\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n\n⚡ *SYSTEM STATUS* ⚡\n\n  🔸  *Bot*     »  Phantom X\n  🔸  *Version* »  v${BOT_VERSION}\n  🔸  *Mode*    »  ${ml}\n  🔸  *Uptime*  »  ${up}\n  🔸  *Time*    »  ${time}\n`;
+    for (const s of S) { o += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${s.emoji} ${s.title}* 💀\n\n`; for (const [c,d] of s.items) o += `  ⚡  *${c}*  ⟶  ${d}\n`; }
+    return (o + `\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n  💀 _Phantom X — Straight Savage. No Filter._ 🔥\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥`).trim();
 }
 
-// ─── THEME 5: MINIMAL (clean, airy) ───
-function buildThemeMinimal(modeLabel, time, uptime, sections) {
-    let out = `─────────────────────────────
-   ✧  *PHANTOM X*  ·  v${BOT_VERSION}  ✧
-─────────────────────────────
+// ─── THEME 5: MINIMAL ───
+function buildThemeMinimal(ml, time, up, S) {
+    let o = `─────────────────────────────\n   ✧  *PHANTOM X*  ·  v${BOT_VERSION}  ✧\n─────────────────────────────\n\n  Bot    ·  Phantom X\n  Mode   ·  ${ml}\n  Uptime ·  ${up}\n  Time   ·  ${time}\n`;
+    for (const s of S) { o += `\n─────────────────────────────\n  *${s.emoji} ${s.title}*\n─────────────────────────────\n`; for (const [c,d] of s.items) o += `  ›  *${c}*\n     ${d}\n`; }
+    return (o + `\n─────────────────────────────\n  _Phantom X — Built Different_ 🖤\n─────────────────────────────`).trim();
+}
 
-  Bot    ·  Phantom X
-  Mode   ·  ${modeLabel}
-  Uptime ·  ${uptime}
-  Time   ·  ${time}
-`;
-    for (const sec of sections) {
-        out += `\n─────────────────────────────\n  *${sec.emoji} ${sec.title}*\n─────────────────────────────\n`;
-        for (const [cmd, desc] of sec.items) {
-            out += `  ›  *${cmd}*\n     ${desc}\n`;
-        }
+// ─── THEME 6: VOID (Ultimate Hacker · Echo Protocol) ───
+function buildThemeVoid(ml, time, up, S) {
+    let o = `▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n\n        𝚅  𝙾  𝙸  𝙳\n   𝙿𝙷𝙰𝙽𝚃𝙾𝙼_𝚇 :: 𝙴𝙲𝙷𝙾_𝙿𝚁𝙾𝚃𝙾𝙲𝙾𝙻\n\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n\n> initializing ghost_shell...\n> loading kernel............. ✓\n> bypassing firewall......... ✓\n> identity_mask: ONLINE ✓\n> threat_level: MAXIMUM 🔴\n\n╔══════════════════════════╗\n║  *0x01*  BOT    →  𝙿𝚑𝚊𝚗𝚝𝚘𝚖 𝚇  ║\n║  *0x02*  VER    →  v${BOT_VERSION}         ║\n║  *0x03*  MODE   →  ${ml}  ║\n║  *0x04*  UPTIME →  ${up}  ║\n╚══════════════════════════╝\n`;
+    let i = 0;
+    for (const s of S) {
+        o += `\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n:: ${s.emoji} ${s.title} ::\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n`;
+        for (const [c,d] of s.items) { i++; o += `  [*${String(i).padStart(2,'0')}*]  *${c}*\n         └─ ${d}\n`; }
     }
-    out += `\n─────────────────────────────\n  _Phantom X — Built Different_ 🖤\n─────────────────────────────`;
-    return out.trim();
+    return (o + `\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n> 𝚃𝚁𝙰𝙽𝚂𝙼𝙸𝚂𝚂𝙸𝙾𝙽_𝙴𝙽𝙳 ◆ 𝙶𝙷𝙾𝚂𝚃_𝙿𝚁𝙾𝚃𝙾𝙲𝙾𝙻_𝙰𝙲𝚃𝙸𝚅𝙴\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓`).trim();
+}
+
+// ─── THEME 7: VAPORWAVE ───
+function buildThemeVaporwave(ml, time, up, S) {
+    let o = `░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  Ｐ Ｈ Ａ Ｎ Ｔ Ｏ Ｍ  Ｘ\n  ａ ｅ ｓ ｔ ｈ ｅ ｔ ｉ ｃ\n\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  ♡  Ｂｏｔ      ：  Ｐｈａｎｔｏｍ Ｘ\n  ♡  Ｖｅｒｓｉｏｎ  ：  ｖ${BOT_VERSION}\n  ♡  Ｍｏｄｅ     ：  ${ml}\n  ♡  Ｕｐｔｉｍｅ   ：  ${up}\n  ♡  Ｔｉｍｅ     ：  ${time}\n`;
+    for (const s of S) { o += `\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n  ${s.emoji}  ｛  *${s.title}*  ｝\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n`; for (const [c,d] of s.items) o += `  ✦ ｜  *${c}*\n       ${d}\n`; }
+    return (o + `\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n  ｐｈａｎｔｏｍ ｘ  ♡  ｂｕｉｌｔ ｄｉｆｆｅｒｅｎｔ\n░░░░░░░░░░░░░░░░░░░░░░░░░░░`).trim();
+}
+
+// ─── THEME 8: GOTHIC ───
+function buildThemeGothic(ml, time, up, S) {
+    let o = `✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n   𝔓 𝔥 𝔞 𝔫 𝔱 𝔬 𝔪  𝔛\n  _𝔗𝔥𝔢 𝔇𝔞𝔯𝔨 𝔒𝔯𝔡𝔢𝔯 𝔄𝔴𝔞𝔨𝔢𝔫𝔰_\n\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n  ☩  𝔅𝔬𝔱      ∶  𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛\n  ☩  𝔙𝔢𝔯𝔰𝔦𝔬𝔫  ∶  ｖ${BOT_VERSION}\n  ☩  𝔐𝔬𝔡𝔢     ∶  ${ml}\n  ☩  𝔘𝔭𝔱𝔦𝔪𝔢   ∶  ${up}\n  ☩  𝔗𝔦𝔪𝔢     ∶  ${time}\n`;
+    for (const s of S) { o += `\n✠═══════════════════════════✠\n  ☩  *${s.emoji} ${s.title}*\n✠═══════════════════════════✠\n`; for (const [c,d] of s.items) o += `  ✝  *${c}*  ·  ${d}\n`; }
+    return (o + `\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n  ☩ _𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛 — 𝔅𝔲𝔦𝔩𝔱 𝔬𝔣 𝔇𝔞𝔯𝔨𝔫𝔢𝔰𝔰_ 🖤\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠`).trim();
+}
+
+// ─── THEME 9: CURSIVE ───
+function buildThemeCursive(ml, time, up, S) {
+    let o = `❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n   𝒫 𝒽 𝒶 𝓃 𝓉 ℴ 𝓂  𝒳\n  _𝒢𝒽ℴ𝓈𝓉 𝒾𝓃 𝓉𝒽ℯ 𝒮𝒽ℯ𝓁𝓁_ ✨\n\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n  ❧  𝐵ℴ𝓉      ·  𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳\n  ❧  𝒱ℯ𝓇𝓈𝒾ℴ𝓃  ·  v${BOT_VERSION}\n  ❧  𝑀ℴ𝒹ℯ     ·  ${ml}\n  ❧  𝒰𝓅𝓉𝒾𝓂ℯ   ·  ${up}\n  ❧  𝒯𝒾𝓂ℯ     ·  ${time}\n`;
+    for (const s of S) { o += `\n❦───────────────────────────❦\n  ❧ *${s.emoji} ${s.title}*\n❦───────────────────────────❦\n`; for (const [c,d] of s.items) o += `  ❧  *${c}*\n     _${d}_\n`; }
+    return (o + `\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n  ❧ _𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳 — 𝐵𝓊𝒾𝓁𝓉 𝒟𝒾𝒻𝒻ℯ𝓇ℯ𝓃𝓉_ 🖤\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦`).trim();
+}
+
+// ─── THEME 10: COSMOS ───
+function buildThemeCosmos(ml, time, up, S) {
+    let o = `🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n   🛸  *P H A N T O M  X*  🛸\n   _Drifting Through the Digital Void_\n\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n  🌟  *Bot*     ⟶  Phantom X\n  🪐  *Version* ⟶  v${BOT_VERSION}\n  🛰️  *Mode*    ⟶  ${ml}\n  ☄️  *Uptime*  ⟶  ${up}\n  🌙  *Time*    ⟶  ${time}\n`;
+    for (const s of S) { o += `\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n🌌 *${s.emoji} ${s.title}* 🌌\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n`; for (const [c,d] of s.items) o += `  🌠  *${c}*\n       ${d}\n`; }
+    return (o + `\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n  🛸 _Phantom X — Lost in the Stars_ ✨\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌`).trim();
+}
+
+// ─── THEME 11: SOFT ───
+function buildThemeSoft(ml, time, up, S) {
+    let o = `˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n   ℙ ℍ 𝔸 ℕ 𝕋 𝕆 𝕄  𝕏\n  _ꜱᴏꜰᴛ. ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ._ 🌸\n\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n  ˚✦  *ᴮᵒᵗ*       ⌇  Phantom X\n  ˚✦  *ᵛᵉʳˢⁱᵒⁿ*   ⌇  v${BOT_VERSION}\n  ˚✦  *ᴹᵒᵈᵉ*      ⌇  ${ml}\n  ˚✦  *ᵁᵖᵗⁱᵐᵉ*    ⌇  ${up}\n  ˚✦  *ᵀⁱᵐᵉ*      ⌇  ${time}\n`;
+    for (const s of S) { o += `\n˚ · . ꒰ ${s.emoji} *${s.title}* ꒱ . · ˚\n`; for (const [c,d] of s.items) o += `  ♡  *${c}*  ˚  ${d}\n`; }
+    return (o + `\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n  🌸 _Phantom X — Soft but Deadly_ 💫\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚`).trim();
+}
+
+// ─── THEME 12: DIAMOND ───
+function buildThemeDiamond(ml, time, up, S) {
+    let o = `◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n   💎  *𝐏 𝐇 𝐀 𝐍 𝐓 𝐎 𝐌  𝐗*  💎\n   _𝐄𝐥𝐢𝐭𝐞. 𝐏𝐨𝐥𝐢𝐬𝐡𝐞𝐝. 𝐋𝐞𝐠𝐞𝐧𝐝𝐚𝐫𝐲._\n\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n  💠  *𝐁𝐨𝐭*      ⬩  𝐏𝐡𝐚𝐧𝐭𝐨𝐦 𝐗\n  💠  *𝐕𝐞𝐫𝐬𝐢𝐨𝐧* ⬩  v${BOT_VERSION}\n  💠  *𝐌𝐨𝐝𝐞*     ⬩  ${ml}\n  💠  *𝐔𝐩𝐭𝐢𝐦𝐞*   ⬩  ${up}\n  💠  *𝐓𝐢𝐦𝐞*     ⬩  ${time}\n`;
+    for (const s of S) { o += `\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n💎 *${s.emoji} ${s.title}* 💎\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n`; for (const [c,d] of s.items) o += `  ◆  *${c}*  ⬩  ${d}\n`; }
+    return (o + `\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n  💎 _Phantom X — Rare. Refined. Relentless._ 💎\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇`).trim();
+}
+
+// ─── THEME 13: THUNDER ───
+function buildThemeThunder(ml, time, up, S) {
+    let o = `⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗣 𝗛 𝗔 𝗡 𝗧 𝗢 𝗠  𝗫*  ⚡\n  _𝗦𝘁𝗿𝗶𝗸𝗲𝘀 𝗟𝗶𝗸𝗲 𝗟𝗶𝗴𝗵𝘁𝗻𝗶𝗻𝗴. 𝗡𝗼 𝗪𝗮𝗿𝗻𝗶𝗻𝗴._\n\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗕𝗼𝘁*      ⟹  Phantom X\n  ⚡  *𝗩𝗲𝗿𝘀𝗶𝗼𝗻* ⟹  v${BOT_VERSION}\n  ⚡  *𝗠𝗼𝗱𝗲*     ⟹  ${ml}\n  ⚡  *𝗨𝗽𝘁𝗶𝗺𝗲*  ⟹  ${up}\n  ⚡  *𝗧𝗶𝗺𝗲*     ⟹  ${time}\n`;
+    for (const s of S) { o += `\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n  *${s.emoji} ${s.title}*\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n`; for (const [c,d] of s.items) o += `  ⚡  *${c}*  ⟹  ${d}\n`; }
+    return (o + `\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n  ⚡ _Phantom X — 𝗨𝗻𝘀𝘁𝗼𝗽𝗽𝗮𝗯𝗹𝗲. 𝗨𝗻𝘁𝗿𝗮𝗰𝗲𝗮𝗯𝗹𝗲._ ⚡\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡`).trim();
+}
+
+// ─── THEME 14: WARRIOR ───
+function buildThemeWarrior(ml, time, up, S) {
+    let o = `⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n   🛡️  *ᴘʜᴀɴᴛᴏᴍ  x*  🛡️\n   _ꜰᴏʀɢᴇᴅ ɪɴ ᴛʜᴇ ᴅɪɢɪᴛᴀʟ ꜰɪʀᴇ_\n\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n  🗡️  *ʙᴏᴛ*      ⟫  Phantom X\n  🗡️  *ᴠᴇʀꜱɪᴏɴ*  ⟫  v${BOT_VERSION}\n  🗡️  *ᴍᴏᴅᴇ*     ⟫  ${ml}\n  🗡️  *ᴜᴘᴛɪᴍᴇ*   ⟫  ${up}\n  🗡️  *ᴛɪᴍᴇ*     ⟫  ${time}\n`;
+    for (const s of S) { o += `\n⚔️ ──────────────────────── ⚔️\n  🛡️ *${s.emoji} ${s.title}*\n⚔️ ──────────────────────── ⚔️\n`; for (const [c,d] of s.items) o += `  🗡️  *${c}*  ⟫  ${d}\n`; }
+    return (o + `\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n  🛡️ _ᴘʜᴀɴᴛᴏᴍ x — ɴᴏ ᴍᴇʀᴄʏ. ɴᴏ ʀᴇᴛʀᴇᴀᴛ._ ⚔️\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️`).trim();
+}
+
+// ─── THEME 15: NEON ───
+function buildThemeNeon(ml, time, up, S) {
+    let o = `🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🌈  *Ⓟ Ⓗ Ⓐ Ⓝ Ⓣ Ⓞ Ⓜ  ✘*  🌈\n  _Ⓛⓘⓣ  ⓤⓟ.  Ⓑⓤⓘⓛⓣ  ⓓⓘⓕⓕⓔⓡⓔⓝⓣ._\n\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🟣  *Bot*      ⇒  Phantom X\n  🔵  *Version*  ⇒  v${BOT_VERSION}\n  🟢  *Mode*     ⇒  ${ml}\n  🟡  *Uptime*   ⇒  ${up}\n  🟠  *Time*     ⇒  ${time}\n`;
+    const neonDots = ['🟣','🔵','🟢','🟡','🟠','🔴']; let ni = 0;
+    for (const s of S) { o += `\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n${neonDots[ni%6]}  *${s.emoji} ${s.title}*\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n`; ni++; for (const [c,d] of s.items) o += `  ${neonDots[ni%6]}  *${c}*  ⇒  ${d}\n`; }
+    return (o + `\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n  🌈 _Phantom X — Neon. Bold. Unstoppable._ 🌈\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣`).trim();
+}
+
+// ─── THEME 16: SPY ───
+function buildThemeSpy(ml, time, up, S) {
+    let o = `🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  ██  *[CLASSIFIED]*  ██\n  *PHANTOM X* — OPERATION: GHOST\n  _CLEARANCE LEVEL: ULTRA_ 🔐\n\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  🔐  *AGENT*    :  PHANTOM X\n  🔐  *VERSION*  :  v${BOT_VERSION} [REDACTED]\n  🔐  *ACCESS*   :  ${ml}\n  🔐  *RUNTIME*  :  ${up}\n  🔐  *LOCAL_T*  :  ${time}\n`;
+    for (const s of S) { o += `\n██████████████████████████\n🔐 *[MODULE :: ${s.title}]* ${s.emoji}\n██████████████████████████\n`; for (const [c,d] of s.items) o += `  ⬛  *${c}*\n       ${d}\n`; }
+    return (o + `\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n  🔐 _[END OF FILE] — PHANTOM X // EYES ONLY_ 🕵️\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️`).trim();
+}
+
+// ─── THEME 17: PIRATE ───
+function buildThemePirate(ml, time, up, S) {
+    let o = `🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n   ☠️  *P H A N T O M  X*  ☠️\n   _Sail the Digital Seas. Fear No Code._\n\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n  ⚓  *Ship*    »  Phantom X\n  ⚓  *Ver*     »  v${BOT_VERSION}\n  ⚓  *Crew*    »  ${ml}\n  ⚓  *Voyage*  »  ${up}\n  ⚓  *Waters*  »  ${time}\n`;
+    for (const s of S) { o += `\n☠️ ─────────────────────────☠️\n  ⚓ *${s.emoji} ${s.title}*\n☠️ ─────────────────────────☠️\n`; for (const [c,d] of s.items) o += `  🗺️  *${c}*  ⟶  ${d}\n`; }
+    return (o + `\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n  ⚓ _Phantom X — Plunder the Net. Leave No Trace._ ☠️\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️`).trim();
+}
+
+// ─── THEME 18: SHADOW ───
+function buildThemeShadow(ml, time, up, S) {
+    let o = `◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n   🌑  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*  🌑\n   _𝘈𝘭𝘸𝘢𝘺𝘴 𝘞𝘢𝘵𝘤𝘩𝘪𝘯𝘨. 𝘕𝘦𝘷𝘦𝘳 𝘚𝘦𝘦𝘯._\n\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n  🌑  *Bot*      ⌁  Phantom X\n  🌑  *Version*  ⌁  v${BOT_VERSION}\n  🌑  *Mode*     ⌁  ${ml}\n  🌑  *Uptime*   ⌁  ${up}\n  🌑  *Time*     ⌁  ${time}\n`;
+    for (const s of S) { o += `\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n  🌑 *${s.emoji} ${s.title}*\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n`; for (const [c,d] of s.items) o += `  🌑  *${c}*\n       _${d}_\n`; }
+    return (o + `\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n  🌑 _Phantom X — The Shadow Never Sleeps_ 🖤\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼`).trim();
+}
+
+// ─── THEME 19: BOLD TECH ───
+function buildThemeBoldTech(ml, time, up, S) {
+    let o = `▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  🔲  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*\n  _𝑷𝒓𝒐𝒈𝒓𝒂𝒎𝒎𝒆𝒅 𝒕𝒐 𝑫𝒐𝒎𝒊𝒏𝒂𝒕𝒆._\n\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  ▣  *Bot*      →  Phantom X\n  ▣  *Version*  →  v${BOT_VERSION}\n  ▣  *Mode*     →  ${ml}\n  ▣  *Uptime*   →  ${up}\n  ▣  *Time*     →  ${time}\n`;
+    for (const s of S) { o += `\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n  ▣ *${s.emoji} ${s.title}*\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n`; for (const [c,d] of s.items) o += `  ▣  *${c}*  →  ${d}\n`; }
+    return (o + `\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n  ▣ _Phantom X — 𝑷𝒓𝒆𝒄𝒊𝒔𝒊𝒐𝒏. 𝑷𝒐𝒘𝒆𝒓. 𝑷𝒉𝒂𝒏𝒕𝒐𝒎._ 🔲\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰`).trim();
+}
+
+// ─── THEME 20: ECHO ───
+function buildThemeEcho(ml, time, up, S) {
+    let o = `· · · · · · · · · · · · · · ·\n   ·   *P H A N T O M  X*   ·\n  · ·  _E · C · H · O_  · ·\n · · ·  )))  signal lost  · · ·\n· · · · · · · · · · · · · · ·\n\n  )))  Bot      ~  Phantom X\n  )))  Version  ~  v${BOT_VERSION}\n  )))  Mode     ~  ${ml}\n  )))  Uptime   ~  ${up}\n  )))  Time     ~  ${time}\n`;
+    for (const s of S) { o += `\n· · · · · · · · · · · · · · ·\n  ))) *${s.emoji} ${s.title}* (\n· · · · · · · · · · · · · · ·\n`; for (const [c,d] of s.items) o += `  ·))  *${c}*\n        ~ ${d}\n`; }
+    return (o + `\n· · · · · · · · · · · · · · ·\n  ))) _Phantom X — Echo fades. Ghost remains._ ·\n· · · · · · · · · · · · · · ·`).trim();
 }
 
 // --- MENU ---
@@ -589,12 +615,29 @@ function buildMenuText(mode, themeNum) {
     const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
     const uptime = formatUptime();
     const n = Number(themeNum) || 1;
-    const sections = getMenuSections();
-    if (n === 2) return buildThemeMatrix(modeLabel, time, uptime, sections);
-    if (n === 3) return buildThemeRoyal(modeLabel, time, uptime, sections);
-    if (n === 4) return buildThemeInferno(modeLabel, time, uptime, sections);
-    if (n === 5) return buildThemeMinimal(modeLabel, time, uptime, sections);
-    return buildThemeGhost(modeLabel, time, uptime, sections);
+    const S = getMenuSections();
+    const ml = modeLabel;
+    const up = uptime;
+    if (n === 2)  return buildThemeMatrix(ml, time, up, S);
+    if (n === 3)  return buildThemeRoyal(ml, time, up, S);
+    if (n === 4)  return buildThemeInferno(ml, time, up, S);
+    if (n === 5)  return buildThemeMinimal(ml, time, up, S);
+    if (n === 6)  return buildThemeVoid(ml, time, up, S);
+    if (n === 7)  return buildThemeVaporwave(ml, time, up, S);
+    if (n === 8)  return buildThemeGothic(ml, time, up, S);
+    if (n === 9)  return buildThemeCursive(ml, time, up, S);
+    if (n === 10) return buildThemeCosmos(ml, time, up, S);
+    if (n === 11) return buildThemeSoft(ml, time, up, S);
+    if (n === 12) return buildThemeDiamond(ml, time, up, S);
+    if (n === 13) return buildThemeThunder(ml, time, up, S);
+    if (n === 14) return buildThemeWarrior(ml, time, up, S);
+    if (n === 15) return buildThemeNeon(ml, time, up, S);
+    if (n === 16) return buildThemeSpy(ml, time, up, S);
+    if (n === 17) return buildThemePirate(ml, time, up, S);
+    if (n === 18) return buildThemeShadow(ml, time, up, S);
+    if (n === 19) return buildThemeBoldTech(ml, time, up, S);
+    if (n === 20) return buildThemeEcho(ml, time, up, S);
+    return buildThemeGhost(ml, time, up, S);
 }
 
 // --- ANTI-SPAM CHECK ---
@@ -868,20 +911,35 @@ async function handleMessage(sock, msg) {
 
             case ".menudesign": {
                 const themeNames = {
-                    1: "👻 Ghost — Spaced & Stylish",
-                    2: "💻 Matrix — Hacker Terminal",
-                    3: "👑 Royal — Elegant Crown",
-                    4: "🔥 Inferno — Fire & Savage",
-                    5: "✧ Minimal — Clean & Simple",
+                    1:  "👻 Ghost       — Spaced & Stylish",
+                    2:  "💻 Matrix      — Hacker Terminal",
+                    3:  "👑 Royal       — Elegant Crown",
+                    4:  "🔥 Inferno     — Fire & Savage",
+                    5:  "✧  Minimal     — Clean & Simple",
+                    6:  "🕳️ VOID        — Ultimate Hacker Echo",
+                    7:  "🌊 Vaporwave   — Fullwidth Aesthetic",
+                    8:  "𝔊  Gothic      — Fraktur Blackletter",
+                    9:  "𝒞  Cursive     — Script Handwriting",
+                    10: "🌌 Cosmos      — Space & Galaxy",
+                    11: "🌸 Soft        — Double-Struck Cute",
+                    12: "💎 Diamond     — Bold Luxury Elite",
+                    13: "⚡ Thunder     — Bold Sans Electric",
+                    14: "⚔️ Warrior     — Small Caps Battle",
+                    15: "🌈 Neon        — Circled Colour Pop",
+                    16: "🕵️ Spy         — Classified Redacted",
+                    17: "🏴‍☠️ Pirate     — Sail the Digital Sea",
+                    18: "🌑 Shadow      — Dark & Mysterious",
+                    19: "🔲 Bold Tech   — Math Bold Italic",
+                    20: "·)) Echo       — Signal Lost Ripple",
                 };
                 const n = parseInt(parts[1]);
-                if (!n || n < 1 || n > 5) {
+                if (!n || n < 1 || n > 20) {
                     const current = getMenuTheme(botJid);
-                    let list = `🎨 *Choose a Menu Design*\n\nCurrent: *${themeNames[current]}*\n\n`;
+                    let list = `🎨 *Menu Designs — Choose 1 to 20*\n\nCurrent: *${themeNames[current] || themeNames[1]}*\n\n`;
                     for (const [num, name] of Object.entries(themeNames)) {
                         list += `  *${num}.* ${name}\n`;
                     }
-                    list += `\n_Usage: .menudesign 1  (or 2, 3, 4, 5)_`;
+                    list += `\n_Usage: .menudesign 6  (try the VOID!)_`;
                     return reply(list);
                 }
                 setMenuTheme(botJid, n);
