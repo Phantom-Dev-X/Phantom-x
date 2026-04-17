@@ -513,9 +513,18 @@ function formatUptime() {
     return `${h}h ${m}m ${sec}s`;
 }
 
-function fetchBuffer(url) {
+function fetchBuffer(url, redirectCount = 0) {
     return new Promise((resolve, reject) => {
-        https.get(url, (res) => {
+        if (redirectCount > 5) return reject(new Error("Too many redirects"));
+        const mod = url.startsWith("https") ? https : http;
+        mod.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            // Follow redirects (301, 302, 303, 307, 308)
+            if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+                return fetchBuffer(res.headers.location, redirectCount + 1).then(resolve).catch(reject);
+            }
+            if (res.statusCode && res.statusCode >= 400) {
+                return reject(new Error(`HTTP ${res.statusCode}`));
+            }
             const chunks = [];
             res.on("data", (c) => chunks.push(c));
             res.on("end", () => resolve(Buffer.concat(chunks)));
@@ -680,10 +689,21 @@ async function searchSongs(query) {
     return data.results || [];
 }
 
-// --- LYRICS (lyrics.ovh, free, no key) ---
+// --- LYRICS (lrclib.net — free, no key, reliable) ---
 async function getLyrics(artist, title) {
-    const data = await fetchJSON(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
-    return data.lyrics || null;
+    // Try lrclib.net first (most reliable free lyrics API)
+    try {
+        const data = await fetchJSON(`https://lrclib.net/api/search?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`);
+        const results = Array.isArray(data) ? data : [];
+        const match = results.find(r => r.plainLyrics) || results[0];
+        if (match?.plainLyrics) return match.plainLyrics;
+    } catch (_) {}
+    // Fallback to lyrics.ovh
+    try {
+        const data = await fetchJSON(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
+        if (data.lyrics) return data.lyrics;
+    } catch (_) {}
+    return null;
 }
 
 // --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
@@ -2547,14 +2567,14 @@ _Can be started from any chat, but source members require source group access an
                 const question = parts.slice(1).join(" ").trim();
                 if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
                 const GEMINI_KEY = process.env.GEMINI_API_KEY;
-                if (!GEMINI_KEY) return reply("⚠️ AI chat needs a Gemini API key.\n\nGet a FREE key at: https://aistudio.google.com/app/apikey\n\nThen add it as GEMINI_API_KEY in your Replit secrets.");
+                if (!GEMINI_KEY) return reply("⚠️ AI chat needs a free Gemini API key.\n\n1️⃣ Go to: https://aistudio.google.com/app/apikey\n2️⃣ Create a free key\n3️⃣ Add it as GEMINI_API_KEY in your hosting platform's environment variables (or in your .env file)");
                 await reply("🤖 Thinking...");
                 try {
                     const reqBody = JSON.stringify({ contents: [{ parts: [{ text: question }] }] });
                     const aiReply = await new Promise((resolve, reject) => {
                         const req = https.request({
                             hostname: "generativelanguage.googleapis.com",
-                            path: `/v1beta/models/gemini-pro:generateContent?key=${GEMINI_KEY}`,
+                            path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                         }, (res) => {
@@ -3541,7 +3561,7 @@ _Can be started from any chat, but source members require source group access an
                     try {
                         const geminiRes = await new Promise((resolve, reject) => {
                             const body = JSON.stringify({ contents: [{ parts: [{ text: `You are Phantom X, a friendly WhatsApp bot assistant. Reply conversationally and briefly. User says: ${chatInput}` }] }] });
-                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-pro:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
+                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
                             const req = https.request(options, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } }); });
                             req.on("error", reject); req.write(body); req.end();
                         });
