@@ -24,6 +24,7 @@ const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 const MODE_FILE = path.join(__dirname, "bot_mode.json");
 const MENU_BANNER_FILE = path.join(__dirname, "menu_banner.jpg");
+const THEME_FILE = path.join(__dirname, "menu_theme.json");
 
 // Per-user state
 const activeSockets = {};
@@ -36,6 +37,9 @@ const spamTracker = {};
 
 // GC Clone jobs: { groupJid: { members: [], index, interval } }
 const cloneJobs = {};
+
+// Broadcast jobs: { botJid: { intervalId, groups, index, total } }
+const broadcastJobs = {};
 
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
@@ -96,6 +100,21 @@ function setBotMode(botJid, mode) {
     const d = loadModes();
     d[botJid] = mode;
     saveModes(d);
+}
+
+// --- MENU THEME ---
+function loadThemeData() {
+    if (!fs.existsSync(THEME_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(THEME_FILE, "utf8")); } catch { return {}; }
+}
+function getMenuTheme(botJid) {
+    if (!botJid) return 1;
+    return loadThemeData()[botJid] || 1;
+}
+function setMenuTheme(botJid, n) {
+    const d = loadThemeData();
+    d[botJid] = n;
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
 }
 
 // --- HELPERS ---
@@ -364,13 +383,91 @@ async function getClubNews(teamName) {
     return text;
 }
 
-// --- MENU ---
-function buildMenuText(mode) {
-    const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
-    const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
-    return `
-╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
-   ☠️  *P  H  A  N  T  O  M  ✘*  ☠️
+// --- MENU SECTIONS DATA ---
+function getMenuSections() {
+    return [
+        { emoji: '📋', title: 'GENERAL', items: [
+            ['.menu / .phantom', 'Show this menu'],
+            ['.setpp', 'Set menu banner image (reply to image)'],
+            ['.menudesign 1-5', 'Switch menu style'],
+            ['.info', 'Bot info & uptime'],
+            ['.help', 'Full command guide'],
+            ['.mode public/owner', 'Switch access mode'],
+        ]},
+        { emoji: '📡', title: 'BROADCAST', items: [
+            ['.broadcast ‹mins› ‹message›', 'Send to all groups on schedule'],
+            ['.stopbroadcast', 'Stop active broadcast'],
+        ]},
+        { emoji: '👥', title: 'GROUP MANAGEMENT', items: [
+            ['.add ‹number›', 'Add a member'],
+            ['.kick @user', 'Remove a member'],
+            ['.promote @user', 'Make someone admin'],
+            ['.demote @user', 'Strip admin rights'],
+            ['.link', 'Get group invite link'],
+            ['.revoke', 'Reset group link'],
+            ['.mute', 'Lock group (admins only)'],
+            ['.unmute', 'Open group to everyone'],
+        ]},
+        { emoji: '🏷️', title: 'TAG & BROADCAST', items: [
+            ['.hidetag', 'Silently tag all members'],
+            ['.tagall', 'Tag all (shows @numbers)'],
+            ['.readmore', 'Hide text behind Read More'],
+        ]},
+        { emoji: '⚙️', title: 'AUTOMATION', items: [
+            ['.autoreact on/off/emoji', 'Auto-react to every message'],
+            ['.autoreply add/remove/list', 'Keyword auto-replies'],
+            ['.setalias ‹word› ‹.cmd›', 'Create command shortcut'],
+            ['.delalias ‹word›', 'Delete a shortcut'],
+            ['.aliases', 'List all shortcuts'],
+        ]},
+        { emoji: '🧠', title: 'AI & MEDIA', items: [
+            ['.ai ‹question›', 'Ask Gemini AI'],
+            ['.imagine ‹prompt›', 'Generate AI image'],
+            ['.song ‹title›', 'Search songs (iTunes)'],
+            ['.lyrics ‹artist› | ‹title›', 'Get song lyrics'],
+            ['.ss ‹url›', 'Screenshot a website'],
+            ['.viewonce', 'Reveal view-once (reply to it)'],
+            ['.ocr', 'Extract text from image'],
+        ]},
+        { emoji: '🔍', title: 'UTILITIES', items: [
+            ['.groupid', 'Get group / community ID'],
+            ['.listonline', 'Show online members'],
+            ['.listoffline', 'Show offline members'],
+        ]},
+        { emoji: '⚽', title: 'FOOTBALL', items: [
+            ['.pltable', 'Premier League standings'],
+            ['.live', 'Live PL scores'],
+            ['.fixtures ‹club›', 'Club fixtures & results'],
+            ['.fnews ‹club›', 'Club latest news'],
+            ['.football ‹club›', 'Full club overview'],
+        ]},
+        { emoji: '🎮', title: 'GAMES', items: [
+            ['.ttt @p1 @p2', 'Tic-Tac-Toe'],
+            ['.truth', 'Truth question'],
+            ['.dare', 'Dare challenge'],
+            ['.wordchain [word]', 'Start word chain game'],
+            ['.wordchain stop', 'End active game'],
+        ]},
+        { emoji: '🛡️', title: 'GROUP PROTECTION', items: [
+            ['.antilink on/off', 'Block all links in group'],
+            ['.antispam on/off', 'Block message spam'],
+            ['.antidemote on/off', 'Punish demotions instantly'],
+        ]},
+        { emoji: '📣', title: 'NOTIFICATIONS', items: [
+            ['.welcome on/off', 'Welcome new members'],
+            ['.goodbye on/off', 'Goodbye on member exit'],
+        ]},
+        { emoji: '🔄', title: 'GC CLONE', items: [
+            ['.clone ‹src› ‹dst› ‹batch› ‹mins›', 'Clone members to another group'],
+            ['.stopclone', 'Stop active clone job'],
+        ]},
+    ];
+}
+
+// ─── THEME 1: GHOST (spaced, 〔〕 headers) ───
+function buildThemeGhost(modeLabel, time, uptime, sections) {
+    let out = `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+   ☠️  *P H A N T O M  ✘*  ☠️
    _The Ghost in Your Machine_ 👻
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 
@@ -379,117 +476,125 @@ function buildMenuText(mode) {
   🤖  *Bot*      ›  Phantom X
   📌  *Version*  ›  v${BOT_VERSION}
   🌐  *Mode*     ›  ${modeLabel}
-  ⏱️  *Uptime*   ›  ${formatUptime()}
+  ⏱️  *Uptime*   ›  ${uptime}
   🕐  *Time*     ›  ${time}
+`;
+    for (const sec of sections) {
+        out += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${sec.emoji} *${sec.title}* 〕\n\n`;
+        for (const [cmd, desc] of sec.items) {
+            out += `  ✦  *${cmd}*  —  ${desc}\n`;
+        }
+    }
+    out += `\n╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n  💀 _Phantom X — Built Different. Built Cold._ 🖤\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`;
+    return out.trim();
+}
 
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+// ─── THEME 2: MATRIX (hacker / terminal) ───
+function buildThemeMatrix(modeLabel, time, uptime, sections) {
+    let out = `█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█
+█   💻  *PHANTOM_X  v${BOT_VERSION}*  💻   █
+█   _> SYSTEM ONLINE ✓_         █
+█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█
 
-〔 📋 *G E N E R A L* 〕
+*[ SYS_INFO ]*
+  »  *Bot*    :  Phantom X
+  »  *Mode*   :  ${modeLabel}
+  »  *Uptime* :  ${uptime}
+  »  *Time*   :  ${time}
+`;
+    for (const sec of sections) {
+        out += `\n══════════════════════════════\n*[ MODULE :: ${sec.title} ]*  ${sec.emoji}\n`;
+        for (const [cmd, desc] of sec.items) {
+            out += `  *>*  \`${cmd}\`   //  ${desc}\n`;
+        }
+    }
+    out += `\n══════════════════════════════\n_> PHANTOM_X — Ghost Protocol Active._ 👻`;
+    return out.trim();
+}
 
-  ✦  *.menu* / *.phantom*  —  Show this menu
-  ✦  *.setpp*  —  Set menu banner (reply to image)
-  ✦  *.info*  —  Bot info & uptime
-  ✦  *.help*  —  Full command guide
-  ✦  *.mode public/owner*  —  Switch access mode
+// ─── THEME 3: ROYAL (elegant crown style) ───
+function buildThemeRoyal(modeLabel, time, uptime, sections) {
+    let out = `♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛
+         👑  *PHANTOM X*  👑
+    _ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ. ᴅɪɢɪᴛᴀʟ._
+♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛
 
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+✦ *ROYAL STATUS* ✦
 
-〔 👥 *G R O U P  M A N A G E M E N T* 〕
+   ◆  *Bot*     ∷  Phantom X
+   ◆  *Version* ∷  v${BOT_VERSION}
+   ◆  *Mode*    ∷  ${modeLabel}
+   ◆  *Uptime*  ∷  ${uptime}
+   ◆  *Time*    ∷  ${time}
+`;
+    for (const sec of sections) {
+        out += `\n═══════════════════════════════\n❖  *${sec.emoji} ${sec.title}*  ❖\n\n`;
+        for (const [cmd, desc] of sec.items) {
+            out += `   ◆  *${cmd}*  ▸  ${desc}\n`;
+        }
+    }
+    out += `\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n  👑 _Phantom X — The Digital Monarch_ 🖤\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛`;
+    return out.trim();
+}
 
-  ✦  *.add* ‹number›  —  Add a member
-  ✦  *.kick* @user  —  Remove a member
-  ✦  *.promote* @user  —  Make someone admin
-  ✦  *.demote* @user  —  Strip admin rights
-  ✦  *.link*  —  Get group invite link
-  ✦  *.revoke*  —  Reset group link
-  ✦  *.mute*  —  Lock group (admins only)
-  ✦  *.unmute*  —  Open group to everyone
+// ─── THEME 4: INFERNO (fire / savage energy) ───
+function buildThemeInferno(modeLabel, time, uptime, sections) {
+    let out = `🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥
+   💥  *P H A N T O M  X*  💥
+   _No Cap. No Mercy. Built Cold._ 🥶
+🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥
 
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+⚡ *SYSTEM STATUS* ⚡
 
-〔 🏷️ *T A G  &  B R O A D C A S T* 〕
+  🔸  *Bot*     »  Phantom X
+  🔸  *Version* »  v${BOT_VERSION}
+  🔸  *Mode*    »  ${modeLabel}
+  🔸  *Uptime*  »  ${uptime}
+  🔸  *Time*    »  ${time}
+`;
+    for (const sec of sections) {
+        out += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${sec.emoji} ${sec.title}* 💀\n\n`;
+        for (const [cmd, desc] of sec.items) {
+            out += `  ⚡  *${cmd}*  ⟶  ${desc}\n`;
+        }
+    }
+    out += `\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n  💀 _Phantom X — Straight Savage. No Filter._ 🔥\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥`;
+    return out.trim();
+}
 
-  ✦  *.hidetag*  —  Silently tag all members
-  ✦  *.tagall*  —  Tag all (shows @numbers)
-  ✦  *.readmore*  —  Hide text behind Read More
+// ─── THEME 5: MINIMAL (clean, airy) ───
+function buildThemeMinimal(modeLabel, time, uptime, sections) {
+    let out = `─────────────────────────────
+   ✧  *PHANTOM X*  ·  v${BOT_VERSION}  ✧
+─────────────────────────────
 
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+  Bot    ·  Phantom X
+  Mode   ·  ${modeLabel}
+  Uptime ·  ${uptime}
+  Time   ·  ${time}
+`;
+    for (const sec of sections) {
+        out += `\n─────────────────────────────\n  *${sec.emoji} ${sec.title}*\n─────────────────────────────\n`;
+        for (const [cmd, desc] of sec.items) {
+            out += `  ›  *${cmd}*\n     ${desc}\n`;
+        }
+    }
+    out += `\n─────────────────────────────\n  _Phantom X — Built Different_ 🖤\n─────────────────────────────`;
+    return out.trim();
+}
 
-〔 ⚙️ *A U T O M A T I O N* 〕
-
-  ✦  *.autoreact on/off/emoji*  —  Auto-react to msgs
-  ✦  *.autoreply add/remove/list*  —  Keyword replies
-  ✦  *.setalias* ‹word› ‹.cmd›  —  Create shortcut
-  ✦  *.delalias* ‹word›  —  Delete shortcut
-  ✦  *.aliases*  —  List all shortcuts
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 🧠 *A I  &  M E D I A* 〕
-
-  ✦  *.ai* ‹question›  —  Ask Gemini AI
-  ✦  *.imagine* ‹prompt›  —  Generate AI image
-  ✦  *.song* ‹title›  —  Search songs (iTunes)
-  ✦  *.lyrics* ‹artist› | ‹title›  —  Get lyrics
-  ✦  *.ss* ‹url›  —  Screenshot a website
-  ✦  *.viewonce*  —  Reveal view-once (reply to it)
-  ✦  *.ocr*  —  Extract text from image
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 🔍 *U T I L I T I E S* 〕
-
-  ✦  *.groupid*  —  Get group / community ID
-  ✦  *.listonline*  —  Show online members
-  ✦  *.listoffline*  —  Show offline members
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 ⚽ *F O O T B A L L* 〕
-
-  ✦  *.pltable*  —  Premier League standings
-  ✦  *.live*  —  Live PL scores
-  ✦  *.fixtures* ‹club›  —  Club fixtures & results
-  ✦  *.fnews* ‹club›  —  Club latest news
-  ✦  *.football* ‹club›  —  Full club overview
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 🎮 *G A M E S* 〕
-
-  ✦  *.ttt* @p1 @p2  —  Tic-Tac-Toe
-  ✦  *.truth*  —  Truth question
-  ✦  *.dare*  —  Dare challenge
-  ✦  *.wordchain* [word]  —  Start word chain
-  ✦  *.wordchain stop*  —  End active game
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 🛡️ *G R O U P  P R O T E C T I O N* 〕
-
-  ✦  *.antilink on/off*  —  Block all links
-  ✦  *.antispam on/off*  —  Block message spam
-  ✦  *.antidemote on/off*  —  Punish demotions
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 📣 *N O T I F I C A T I O N S* 〕
-
-  ✦  *.welcome on/off*  —  Welcome new members
-  ✦  *.goodbye on/off*  —  Goodbye on exit
-
-┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-
-〔 🔄 *G C  C L O N E* 〕
-
-  ✦  *.clone* ‹src› ‹dst› ‹batch› ‹mins›
-     _Add members from one group to another_
-  ✦  *.stopclone*  —  Stop active clone job
-
-╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
-  💀 _Phantom X — Built Different. Built Cold._ 🖤
-╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
-`.trim();
+// --- MENU ---
+function buildMenuText(mode, themeNum) {
+    const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
+    const uptime = formatUptime();
+    const n = Number(themeNum) || 1;
+    const sections = getMenuSections();
+    if (n === 2) return buildThemeMatrix(modeLabel, time, uptime, sections);
+    if (n === 3) return buildThemeRoyal(modeLabel, time, uptime, sections);
+    if (n === 4) return buildThemeInferno(modeLabel, time, uptime, sections);
+    if (n === 5) return buildThemeMinimal(modeLabel, time, uptime, sections);
+    return buildThemeGhost(modeLabel, time, uptime, sections);
 }
 
 // --- ANTI-SPAM CHECK ---
@@ -657,7 +762,7 @@ async function handleMessage(sock, msg) {
                 const lowerBody = rawBody.toLowerCase();
                 // Phantom → send menu
                 if (lowerBody.includes("phantom")) {
-                    await sock.sendMessage(from, { text: buildMenuText(currentMode) }, { quoted: msg });
+                    await sock.sendMessage(from, { text: buildMenuText(currentMode, getMenuTheme(botJid)) }, { quoted: msg });
                     return;
                 }
                 // Custom keywords
@@ -712,7 +817,7 @@ async function handleMessage(sock, msg) {
         switch (cmd) {
             case ".menu":
             case ".phantom": {
-                const menuText = buildMenuText(currentMode);
+                const menuText = buildMenuText(currentMode, getMenuTheme(botJid));
                 if (fs.existsSync(MENU_BANNER_FILE)) {
                     try {
                         const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
@@ -758,6 +863,93 @@ async function handleMessage(sock, msg) {
                 setBotMode(botJid, val);
                 const label = val === "owner" ? "👤 Owner Only" : "🌍 Public";
                 await reply(`✅ Bot mode set to *${label}*\n\n${val === "owner" ? "Only you can now trigger commands." : "Everyone in groups can now use commands."}`);
+                break;
+            }
+
+            case ".menudesign": {
+                const themeNames = {
+                    1: "👻 Ghost — Spaced & Stylish",
+                    2: "💻 Matrix — Hacker Terminal",
+                    3: "👑 Royal — Elegant Crown",
+                    4: "🔥 Inferno — Fire & Savage",
+                    5: "✧ Minimal — Clean & Simple",
+                };
+                const n = parseInt(parts[1]);
+                if (!n || n < 1 || n > 5) {
+                    const current = getMenuTheme(botJid);
+                    let list = `🎨 *Choose a Menu Design*\n\nCurrent: *${themeNames[current]}*\n\n`;
+                    for (const [num, name] of Object.entries(themeNames)) {
+                        list += `  *${num}.* ${name}\n`;
+                    }
+                    list += `\n_Usage: .menudesign 1  (or 2, 3, 4, 5)_`;
+                    return reply(list);
+                }
+                setMenuTheme(botJid, n);
+                await reply(`✅ Menu design changed to *${themeNames[n]}*\n\nType *.menu* to see it! 🔥`);
+                break;
+            }
+
+            case ".broadcast": {
+                const intervalMins = parseInt(parts[1]);
+                const broadcastMsg = parts.slice(2).join(" ").trim();
+                if (!intervalMins || intervalMins < 1 || !broadcastMsg) {
+                    return reply(
+                        `📡 *Broadcast Usage:*\n\n` +
+                        `*.broadcast* ‹interval-mins› ‹your message›\n\n` +
+                        `*Example:*\n` +
+                        `_.broadcast 10 Hey everyone! Check this out 🔥_\n\n` +
+                        `This will send your message to all groups you're in, one group every 10 minutes.\n\n` +
+                        `Use *.stopbroadcast* to cancel.`
+                    );
+                }
+                if (broadcastJobs[botJid]) {
+                    return reply("⚠️ A broadcast is already running.\n\nUse *.stopbroadcast* to stop it first.");
+                }
+                await reply("⏳ Fetching your groups...");
+                try {
+                    const allGroups = await sock.groupFetchAllParticipating();
+                    const groupIds = Object.keys(allGroups);
+                    if (!groupIds.length) return reply("❌ You're not in any groups.");
+                    const intervalMs = intervalMins * 60 * 1000;
+                    const totalGroups = groupIds.length;
+                    const estMins = totalGroups * intervalMins;
+                    await reply(
+                        `📡 *Broadcast started!*\n\n` +
+                        `📨 Message: _${broadcastMsg}_\n` +
+                        `👥 Groups found: *${totalGroups}*\n` +
+                        `⏱️ Interval: *every ${intervalMins} min(s)*\n` +
+                        `🕐 Est. time: *~${estMins} min(s)*\n\n` +
+                        `Use *.stopbroadcast* to cancel anytime.`
+                    );
+                    let idx = 0;
+                    const intervalId = setInterval(async () => {
+                        if (idx >= groupIds.length) {
+                            clearInterval(intervalId);
+                            delete broadcastJobs[botJid];
+                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nMessage sent to all *${totalGroups}* groups successfully.` }); } catch (_) {}
+                            return;
+                        }
+                        const gid = groupIds[idx];
+                        idx++;
+                        try {
+                            await sock.sendMessage(gid, { text: broadcastMsg });
+                            await sock.sendMessage(from, { text: `📤 Sent (${idx}/${totalGroups}): ${allGroups[gid]?.subject || gid}` });
+                        } catch (e) {
+                            await sock.sendMessage(from, { text: `⚠️ Failed (${idx}/${totalGroups}): ${allGroups[gid]?.subject || gid} — ${e?.message || "error"}` });
+                        }
+                    }, intervalMs);
+                    broadcastJobs[botJid] = { intervalId, total: totalGroups };
+                } catch (e) {
+                    await reply(`❌ Broadcast failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".stopbroadcast": {
+                if (!broadcastJobs[botJid]) return reply("⚠️ No active broadcast to stop.");
+                clearInterval(broadcastJobs[botJid].intervalId);
+                delete broadcastJobs[botJid];
+                await reply("🛑 *Broadcast stopped.* No more messages will be sent.");
                 break;
             }
 
