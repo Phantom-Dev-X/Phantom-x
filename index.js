@@ -20,19 +20,23 @@ const http = require("http");
 try { require("dotenv").config(); } catch (_) {}
 
 // --- OWNER & WELCOME CONFIG ---
-const OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID ? process.env.OWNER_TELEGRAM_ID.toString() : null;
+// Primary owner — always has full access, cannot be removed
+const PRIMARY_OWNER_ID = "8277426999";
 
 const WELCOME_CONFIG_FILE = path.join(__dirname, "welcome_config.json");
 let welcomeConfig = {
     text: "Welcome to *Phantom-X Bot!* 🤖\n\nTo link your WhatsApp, use:\n`/pair 2348102756072`\n\n_Replace the number with your own WhatsApp number (with country code)._",
     photoFileId: null,
+    extraOwners: [], // additional owner IDs added via /addowner
 };
 
 function loadWelcomeConfig() {
     try {
         if (fs.existsSync(WELCOME_CONFIG_FILE)) {
             const raw = fs.readFileSync(WELCOME_CONFIG_FILE, "utf8");
-            welcomeConfig = { ...welcomeConfig, ...JSON.parse(raw) };
+            const saved = JSON.parse(raw);
+            welcomeConfig = { ...welcomeConfig, ...saved };
+            if (!Array.isArray(welcomeConfig.extraOwners)) welcomeConfig.extraOwners = [];
         }
     } catch (_) {}
 }
@@ -44,8 +48,13 @@ function saveWelcomeConfig() {
 }
 
 function isOwner(ctx) {
-    if (!OWNER_TELEGRAM_ID) return false;
-    return ctx.from?.id?.toString() === OWNER_TELEGRAM_ID;
+    const id = ctx.from?.id?.toString();
+    if (!id) return false;
+    return id === PRIMARY_OWNER_ID || welcomeConfig.extraOwners.includes(id);
+}
+
+function isPrimaryOwner(ctx) {
+    return ctx.from?.id?.toString() === PRIMARY_OWNER_ID;
 }
 
 loadWelcomeConfig();
@@ -4022,8 +4031,53 @@ telBot.command("previewwelcome", async (ctx) => {
         "• /setwelcome <text> — change the welcome text\n" +
         "• /setwelcomepic — reply to a photo to set welcome image\n" +
         "• /clearwelcomepic — remove the welcome photo\n" +
-        "• /previewwelcome — see this preview again"
+        "• /previewwelcome — see this preview again\n" +
+        "• /addowner <telegram_id> — grant owner access to someone\n" +
+        "• /removeowner <telegram_id> — revoke their owner access\n" +
+        "• /listowners — see all current owners"
     );
+});
+
+// --- OWNER-ONLY: Add another owner (primary owner only) ---
+telBot.command("addowner", async (ctx) => {
+    if (!isPrimaryOwner(ctx)) return ctx.reply("⛔ Only the primary owner can add new owners.");
+    const newId = ctx.message.text.replace(/^\/addowner\s*/i, "").trim();
+    if (!newId || !/^\d+$/.test(newId)) return ctx.reply(
+        "Usage: /addowner <telegram_id>\n\n" +
+        "Example: /addowner 123456789\n\n" +
+        "To get someone's Telegram ID, ask them to message @userinfobot on Telegram."
+    );
+    if (newId === PRIMARY_OWNER_ID) return ctx.reply("That's already you — the primary owner! 😄");
+    if (welcomeConfig.extraOwners.includes(newId)) return ctx.reply(`⚠️ ID ${newId} is already an owner.`);
+    welcomeConfig.extraOwners.push(newId);
+    saveWelcomeConfig();
+    await ctx.reply(`✅ Done! ID *${newId}* has been added as an owner.\n\nThey can now use all owner commands.`, { parse_mode: "Markdown" });
+});
+
+// --- OWNER-ONLY: Remove an owner (primary owner only) ---
+telBot.command("removeowner", async (ctx) => {
+    if (!isPrimaryOwner(ctx)) return ctx.reply("⛔ Only the primary owner can remove owners.");
+    const targetId = ctx.message.text.replace(/^\/removeowner\s*/i, "").trim();
+    if (!targetId || !/^\d+$/.test(targetId)) return ctx.reply("Usage: /removeowner <telegram_id>\n\nExample: /removeowner 123456789");
+    if (targetId === PRIMARY_OWNER_ID) return ctx.reply("❌ You can't remove yourself as the primary owner.");
+    if (!welcomeConfig.extraOwners.includes(targetId)) return ctx.reply(`⚠️ ID ${targetId} is not in the owners list.`);
+    welcomeConfig.extraOwners = welcomeConfig.extraOwners.filter(id => id !== targetId);
+    saveWelcomeConfig();
+    await ctx.reply(`✅ ID *${targetId}* has been removed from owners.`, { parse_mode: "Markdown" });
+});
+
+// --- OWNER-ONLY: List all owners ---
+telBot.command("listowners", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const lines = [`👑 *Primary Owner (you):* ${PRIMARY_OWNER_ID}`];
+    if (welcomeConfig.extraOwners.length === 0) {
+        lines.push("\n_No extra owners added yet._");
+    } else {
+        lines.push("\n👥 *Extra Owners:*");
+        welcomeConfig.extraOwners.forEach((id, i) => lines.push(`${i + 1}. ${id}`));
+    }
+    lines.push("\n\nUse /addowner <id> or /removeowner <id> to manage.");
+    await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
 });
 
 telBot.command("pair", async (ctx) => {
