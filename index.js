@@ -232,15 +232,36 @@ function savePremium(d) { fs.writeFileSync(PREMIUM_FILE, JSON.stringify(d, null,
 function hasPremiumAccess(senderJid, cmd) {
     const data = loadPremium();
     const num = (senderJid || "").replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0];
+    const cmdKey = (cmd || "").toLowerCase();
+    // locked_for check comes FIRST — overrides any premium grant
+    const lockedFor = data.locked_for || {};
+    const isLockedForNum = (entry) => entry === "all" || (Array.isArray(entry) && (entry.includes("all") || entry.includes(num)));
+    if (isLockedForNum(lockedFor["allcmds"])) return false;
+    if (isLockedForNum(lockedFor[cmdKey])) return false;
+    // Grant checks
     if (data.global_unlock) return true;
     const premNums = data.premium_numbers || [];
     if (premNums.includes(num)) return true;
     const unlocked = data.unlocked_cmds || {};
     const isUnlocked = (entry) => entry === "all" || (Array.isArray(entry) && (entry.includes("all") || entry.includes(num)));
     if (isUnlocked(unlocked["allcmds"])) return true;
-    const cmdKey = (cmd || "").toLowerCase();
     if (isUnlocked(unlocked[cmdKey])) return true;
     return false;
+}
+function setLockedFor(num, cmd, lock = true) {
+    const data = loadPremium();
+    if (!data.locked_for) data.locked_for = {};
+    const key = (cmd || "").toLowerCase();
+    if (lock) {
+        if (!Array.isArray(data.locked_for[key])) data.locked_for[key] = [];
+        if (!data.locked_for[key].includes(num)) data.locked_for[key].push(num);
+    } else {
+        if (Array.isArray(data.locked_for[key])) {
+            data.locked_for[key] = data.locked_for[key].filter(n => n !== num);
+            if (data.locked_for[key].length === 0) delete data.locked_for[key];
+        }
+    }
+    savePremium(data);
 }
 function setPremiumNumber(num, add = true) {
     const data = loadPremium();
@@ -1019,6 +1040,19 @@ function getMenuSections() {
             ['.setmenupic / .setmenupic bug / .setmenupic owner'],
             ['.delpp / .delpp bug / .delpp owner'],
             ['.list'], ['.list group menu'], ['.help bug menu'],
+        ]},
+        { emoji: '🔑', title: 'DEV ACCESS CONTROL', items: [
+            ['.unleash allcmds — open all cmds to everyone'],
+            ['.unleash allcmds ‹number› — give one number full access'],
+            ['.unleash ‹cmd› all — open one cmd to everyone'],
+            ['.unleash ‹cmd› ‹number› — open one cmd for one number'],
+            ['.lock allcmds — re-lock everything'],
+            ['.lock ‹cmd› — re-lock one cmd'],
+            ['.lockfor ‹number› ‹cmd› — block cmd for number (overrides premium)'],
+            ['.lockfor ‹number› allcmds — block ALL cmds for number'],
+            ['.unlockfor ‹number› ‹cmd› — remove a specific block'],
+            ['.premiumadd ‹number›'], ['.premiumremove ‹number›'], ['.premiumlist'],
+            ['.adddev ‹number›'], ['.removedev ‹number›'], ['.devlist'],
         ]},
         { emoji: '⚠️', title: 'MODERATION', items: [
             ['.warn @user'], ['.warnlist'], ['.resetwarn @user'],
@@ -1863,14 +1897,14 @@ async function handleMessage(sock, msg) {
                     }
                 } else {
                     menuText =
-                        `👻 *Phantom X*\n` +
+                        `👻 *Phantom X Bot*\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `🔒 This bot is *private*.\n\n` +
-                        `Commands and features are only accessible to users approved by the developer.\n\n` +
-                        `📲 *Contact developer for access:*\n` +
+                        `✨ *Commands on this bot are for premium users only.*\n\n` +
+                        `To get access, DM the developer:\n` +
                         `┌─────────────────────┐\n` +
-                        `│  wa.me/${DEV_NUMBER}\n` +
+                        `│  📲  *wa.me/${DEV_NUMBER}*\n` +
                         `└─────────────────────┘\n\n` +
+                        `_Send a message to the developer to purchase premium access._\n\n` +
                         `_💎 Powered by Phantom X_`;
                     await sock.sendMessage(from, { text: menuText }, { quoted: msg });
                 }
@@ -2332,6 +2366,44 @@ _Can be started from any chat, but source members require source group access an
                 );
                 lockCmd(lCmd);
                 return reply(`🔒 *${lCmd === "allcmds" ? "All commands re-locked." : `${lCmd} is now locked again.`}*\nOnly premium users can access it.`);
+            }
+
+            // --- LOCKFOR — block a specific cmd for a specific number, even if premium ---
+            // .lockfor <number> <cmd>       → block that cmd for that number
+            // .lockfor <number> allcmds     → block ALL cmds for that number
+            case ".lockfor": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const lfNum = (parts[1] || "").replace(/\D/g, "");
+                const lfCmd = (parts[2] || "").toLowerCase();
+                if (!lfNum || !lfCmd) return reply(
+                    `🔒 *Lock For Command*\n\n` +
+                    `Block a specific command for a specific number (overrides premium).\n\n` +
+                    `Usage:\n` +
+                    `• *.lockfor <number> <cmd>* — block one cmd for that number\n` +
+                    `• *.lockfor <number> allcmds* — block ALL cmds for that number\n\n` +
+                    `Example: *.lockfor 2348012345678 .crash*`
+                );
+                const lfKey = lfCmd.startsWith(".") ? lfCmd : (lfCmd === "allcmds" ? "allcmds" : `.${lfCmd}`);
+                setLockedFor(lfNum, lfCmd === "allcmds" ? "allcmds" : lfKey, true);
+                return reply(`🔒 *+${lfNum}* is now blocked from *${lfKey === "allcmds" ? "ALL commands" : lfKey}*.\nThis overrides their premium status.`);
+            }
+
+            // --- UNLOCKFOR — remove a per-number block ---
+            case ".unlockfor": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const ufNum = (parts[1] || "").replace(/\D/g, "");
+                const ufCmd = (parts[2] || "").toLowerCase();
+                if (!ufNum || !ufCmd) return reply(
+                    `🔓 *Unlock For Command*\n\n` +
+                    `Remove a specific block from a number.\n\n` +
+                    `Usage:\n` +
+                    `• *.unlockfor <number> <cmd>* — remove block for one cmd\n` +
+                    `• *.unlockfor <number> allcmds* — remove the allcmds block\n\n` +
+                    `Example: *.unlockfor 2348012345678 .crash*`
+                );
+                const ufKey = ufCmd.startsWith(".") ? ufCmd : (ufCmd === "allcmds" ? "allcmds" : `.${ufCmd}`);
+                setLockedFor(ufNum, ufCmd === "allcmds" ? "allcmds" : ufKey, false);
+                return reply(`✅ Block removed. *+${ufNum}* can now access *${ufKey === "allcmds" ? "all commands" : ufKey}* again (if premium).`);
             }
 
             // --- PREMIUM ADD/REMOVE individual numbers ---
@@ -4947,18 +5019,25 @@ telBot.command("pair", async (ctx) => {
     startBot(userId, input.trim(), ctx);
 });
 
-// Launch with conflict-safe retry (handles 409 when deployed + dev run simultaneously)
-(function launchTelegram(attempt) {
-    telBot.launch({ dropPendingUpdates: true }).catch(err => {
-        if (err?.message?.includes("409")) {
-            const wait = Math.min(5000 * attempt, 60000);
-            console.log(`[Telegram] 409 Conflict — another instance running. Retrying in ${wait / 1000}s... (attempt ${attempt})`);
-            setTimeout(() => launchTelegram(attempt + 1), wait);
-        } else {
-            console.error("[Telegram] Fatal launch error:", err?.message || err);
-        }
-    });
-})(1);
+// Kill any existing polling session (prevents 409 Conflict on restart)
+(function killExistingSession(cb) {
+    const killUrl = `/bot${TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true`;
+    const req = https.request({ hostname: "api.telegram.org", path: killUrl, method: "GET" }, () => { setTimeout(cb, 1500); });
+    req.on("error", () => setTimeout(cb, 1500));
+    req.end();
+})(() => {
+    (function launchTelegram(attempt) {
+        telBot.launch({ dropPendingUpdates: true }).catch(err => {
+            if (err?.message?.includes("409")) {
+                const wait = Math.min(5000 * attempt, 60000);
+                console.log(`[Telegram] 409 Conflict — retrying in ${wait / 1000}s... (attempt ${attempt})`);
+                setTimeout(() => launchTelegram(attempt + 1), wait);
+            } else {
+                console.error("[Telegram] Fatal launch error:", err?.message || err);
+            }
+        });
+    })(1);
+});
 
 process.once("SIGINT", () => telBot.stop("SIGINT"));
 process.once("SIGTERM", () => telBot.stop("SIGTERM"));
