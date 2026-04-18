@@ -712,18 +712,37 @@ function resolveTeamAlias(input) {
     return TEAM_NAME_ALIASES[lower] || lower;
 }
 
+// Simple bigram similarity for fuzzy matching (handles typos like "chealse" → "chelsea")
+function bigramSimilarity(a, b) {
+    const bigrams = s => { const bg = new Set(); for (let i = 0; i < s.length - 1; i++) bg.add(s.slice(i, i + 2)); return bg; };
+    const bgA = bigrams(a), bgB = bigrams(b);
+    let intersect = 0;
+    for (const bg of bgA) if (bgB.has(bg)) intersect++;
+    return (2 * intersect) / (bgA.size + bgB.size || 1);
+}
+
 async function findPLTeam(teamName) {
     const search = resolveTeamAlias(teamName);
     const teamsData = await fetchJSON("https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams");
     const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
-    return teams.find(t => {
+    // First try exact includes match
+    let found = teams.find(t => {
         const dn  = (t.team.displayName || "").toLowerCase();
         const sdn = (t.team.shortDisplayName || "").toLowerCase();
         const nn  = (t.team.nickname || "").toLowerCase();
         const loc = (t.team.location || "").toLowerCase();
         const abbr = (t.team.abbreviation || "").toLowerCase();
         return dn.includes(search) || sdn.includes(search) || nn.includes(search) || loc.includes(search) || abbr === search;
-    }) || null;
+    });
+    if (found) return found;
+    // Fuzzy fallback — pick highest bigram similarity if score > 0.4
+    let best = null, bestScore = 0.4;
+    for (const t of teams) {
+        const names = [t.team.displayName, t.team.shortDisplayName, t.team.location, t.team.nickname].filter(Boolean).map(n => n.toLowerCase());
+        const score = Math.max(...names.map(n => bigramSimilarity(search, n)));
+        if (score > bestScore) { bestScore = score; best = t; }
+    }
+    return best || null;
 }
 
 async function getClubFixtures(teamName) {
@@ -836,6 +855,79 @@ const DARES = [
     "Speak in rhymes for your next 3 messages.",
 ];
 
+// --- THIS WEEK'S PL MATCHES ---
+async function getPLWeekMatches() {
+    const now = new Date();
+    const weekEnd = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/scoreboard?limit=50");
+    const events = data.events || [];
+    if (!events.length) return "📅 No Premier League matches found for this week.";
+    const weekEvents = events.filter(ev => {
+        const d = new Date(ev.date);
+        return d >= now && d <= weekEnd;
+    });
+    const allEvents = weekEvents.length ? weekEvents : events.slice(0, 10);
+    let text = `📅 *Premier League — This Week's Matches*\n━━━━━━━━━━━━━━━━━━━\n`;
+    for (const ev of allEvents) {
+        const comp = ev.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(ev.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
+        const status = ev.status?.type?.state;
+        if (status === "post") {
+            text += `✅ *${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}*\n📅 ${dateStr}\n\n`;
+        } else if (status === "in") {
+            text += `🔴 *${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}* _(LIVE)_\n📅 ${dateStr}\n\n`;
+        } else {
+            text += `⚽ *${home?.team?.shortDisplayName}* vs *${away?.team?.shortDisplayName}*\n📅 ${dateStr}\n\n`;
+        }
+    }
+    if (!allEvents.length) text += "No matches found this week.";
+    return text.trim();
+}
+
+// --- HEAD TO HEAD (last match + upcoming match between two clubs) ---
+async function getH2H(teamA, teamB) {
+    const [tA, tB] = await Promise.all([findPLTeam(teamA), findPLTeam(teamB)]);
+    if (!tA) return { error: `Club "${teamA}" not found in Premier League.` };
+    if (!tB) return { error: `Club "${teamB}" not found in Premier League.` };
+    // Fetch both schedules and look for matches where both teams appear
+    const [schedA] = await Promise.all([
+        fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams/${tA.team.id}/schedule`),
+    ]);
+    const events = schedA.events || [];
+    const idB = tB.team.id;
+    // Find matches where the opponent is teamB
+    const h2hEvents = events.filter(ev => {
+        const comp = ev.competitions?.[0];
+        return comp?.competitors?.some(c => c.team?.id === idB);
+    });
+    const past = h2hEvents.filter(e => e.competitions?.[0]?.status?.type?.state === "post");
+    const upcoming = h2hEvents.filter(e => e.competitions?.[0]?.status?.type?.state === "pre");
+    const lastMatch = past[past.length - 1] || null;
+    const nextMatch = upcoming[0] || null;
+    let text = `⚽ *Head to Head: ${tA.team.displayName} vs ${tB.team.displayName}*\n━━━━━━━━━━━━━━━━━━━\n`;
+    if (lastMatch) {
+        const comp = lastMatch.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(lastMatch.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "Africa/Lagos" });
+        text += `\n🕘 *Last Meeting:*\n${home?.team?.displayName} *${home?.score}* - *${away?.score}* ${away?.team?.displayName}\n📅 ${dateStr}\n`;
+    } else {
+        text += `\n🕘 *Last Meeting:* No recent results found\n`;
+    }
+    if (nextMatch) {
+        const comp = nextMatch.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(nextMatch.date).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Africa/Lagos" });
+        text += `\n📅 *Next Meeting:*\n${home?.team?.displayName} vs ${away?.team?.displayName}\n📅 ${dateStr}\n`;
+    } else {
+        text += `\n📅 *Next Meeting:* No upcoming fixture found\n`;
+    }
+    return { text };
+}
+
 async function getClubNews(teamName) {
     const team = await findPLTeam(teamName);
     if (!team) return null;
@@ -856,7 +948,9 @@ function getMenuSections() {
     return [
         { emoji: '📋', title: 'GENERAL', items: [
             ['.menu / .phantom'], ['.info'], ['.help'], ['.ping'],
-            ['.restart'], ['.setpp'], ['.menudesign 1-20'], ['.mode public/owner'],
+            ['.restart'], ['.menudesign 1-20'], ['.mode public/owner'],
+            ['.setmenupic / .setmenupic bug / .setmenupic owner'],
+            ['.delpp / .delpp bug / .delpp owner'],
             ['.list'], ['.list group menu'], ['.help bug menu'],
         ]},
         { emoji: '⚠️', title: 'MODERATION', items: [
@@ -891,9 +985,10 @@ function getMenuSections() {
             ['.bible'], ['.quran'],
             ['.setstatus ‹text›'], ['.setname ‹name›'],
         ]},
-        { emoji: '⚽', title: 'FOOTBALL', items: [
-            ['.pltable'], ['.live'], ['.fixtures ‹club›'],
-            ['.fnews ‹club›'], ['.football ‹club›'],
+        { emoji: '⚽', title: 'FOOTBALL (PL)', items: [
+            ['.pltable'], ['.live'], ['.plweek'],
+            ['.fixtures ‹club›'], ['.fnews ‹club›'],
+            ['.football ‹club›'], ['.h2h ‹club1› vs ‹club2›'],
         ]},
         { emoji: '🎮', title: 'GAMES', items: [
             ['.ttt @p1 @p2'], ['.truth'], ['.dare'],
@@ -919,19 +1014,33 @@ function getMenuSections() {
         { emoji: '🔄', title: 'GC CLONE', items: [
             ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
-        { emoji: '💥', title: 'BUG TOOLS', items: [
-            ['.bugmenu'], ['.bugmenu android'], ['.bugmenu ios'],
-            ['.bugmenu freeze'], ['.bugmenu group'],
-            ['.androidbug ‹number›'], ['.iosbug ‹number›'],
-            ['.forceclose ‹number›'], ['.freeze ‹number›'],
-            ['.invisfreeze ‹number›'], ['.unbug ‹number›'],
-            ['.delaybug ‹number› ‹seconds›'], ['.stopdelay ‹number›'],
+        { emoji: '🤖', title: 'ANDROID BUGS', items: [
+            ['.androidbug ‹number›'], ['.crash ‹number›'],
+            ['.forceclose ‹number›'], ['.fc ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '🍎', title: 'iOS BUGS', items: [
+            ['.iosbug ‹number›'], ['.invisfreeze ‹number›'],
+            ['.if ‹number›'], ['.crash ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '❄️', title: 'FREEZE & DELAY', items: [
+            ['.freeze ‹number›'], ['.delaybug ‹number›'],
+            ['.invisfreeze ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '🏘️', title: 'GROUP BUGS', items: [
             ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
             ['.ungroupcrash ‹groupId›'],
-            ['.antibug on/off/status'],
-            ['.lockedbypass ‹text›'],
+        ]},
+        { emoji: '🧨', title: 'EXTRA BUG TOOLS', items: [
             ['.emojibomb @user'], ['.textbomb @user ‹text› ‹times›'],
             ['.spamatk @user ‹times›'], ['.ghostping @user'],
+            ['.lockedbypass ‹text›'], ['.antibug on/off/status'],
+            ['.bugmenu'], ['.bugmenu android'], ['.bugmenu ios'],
+            ['.bugmenu freeze'], ['.bugmenu group'],
+        ]},
+        { emoji: '✏️', title: 'TEXT & STYLE BUGS', items: [
             ['.zalgo ‹text›'], ['.bigtext ‹text›'],
             ['.invisible'], ['.rtl ‹text›'],
             ['.mock ‹text›'], ['.aesthetic ‹text›'],
@@ -2626,13 +2735,16 @@ _Can be started from any chat, but source members require source group access an
                 const team = parts.slice(1).join(" ").trim();
                 if (!team) {
                     return reply(
-                        `⚽ *Football Commands:*\n\n` +
-                        `• *.pltable* — Premier League standings\n` +
-                        `• *.live* — Live PL scores\n` +
-                        `• *.fixtures* <club> — Upcoming fixtures\n` +
-                        `• *.fnews* <club> — Club news\n` +
-                        `• *.football* <club> — Full club overview\n\n` +
-                        `_Example: .football Liverpool_`
+                        `⚽ *Premier League Commands:*\n\n` +
+                        `• *.pltable* — PL standings table\n` +
+                        `• *.live* — Live/today's PL scores\n` +
+                        `• *.plweek* — This week's PL matches\n` +
+                        `• *.fixtures <club>* — Club fixtures & results\n` +
+                        `• *.fnews <club>* — Club latest news\n` +
+                        `• *.football <club>* — Club full overview\n` +
+                        `• *.h2h <club1> vs <club2>* — Head-to-head history\n\n` +
+                        `_Example: .football Chelsea_\n` +
+                        `_Example: .h2h Arsenal vs Liverpool_`
                     );
                 }
                 await reply(`⏳ Fetching info for *${team}*...`);
@@ -2640,9 +2752,33 @@ _Can be started from any chat, but source members require source group access an
                     const [fixtures, news] = await Promise.allSettled([getClubFixtures(team), getClubNews(team)]);
                     const fx = fixtures.status === "fulfilled" ? fixtures.value : null;
                     const nw = news.status === "fulfilled" ? news.value : null;
-                    if (!fx && !nw) return reply(`❌ Club *${team}* not found. Check the spelling.`);
+                    if (!fx && !nw) return reply(`❌ Club *${team}* not found in Premier League. Try the full name (e.g. "Manchester United").`);
                     if (fx) await reply(fx);
                     if (nw) await reply(nw);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".plweek": {
+                await reply("⏳ Fetching this week's Premier League matches...");
+                try { await reply(await getPLWeekMatches()); }
+                catch (e) { await reply(`❌ Could not fetch matches: ${e?.message}`); }
+                break;
+            }
+
+            case ".h2h": {
+                const h2hInput = parts.slice(1).join(" ").trim();
+                const separator = h2hInput.toLowerCase().includes(" vs ") ? " vs " : h2hInput.includes("|") ? "|" : null;
+                if (!separator) return reply(
+                    `⚽ *Head to Head*\n\nUsage: *.h2h <club1> vs <club2>*\nExample: *.h2h Chelsea vs Arsenal*\n\nShows their last match result and next upcoming fixture.`
+                );
+                const [clubA, clubB] = h2hInput.split(new RegExp(separator, "i")).map(s => s.trim());
+                if (!clubA || !clubB) return reply("❌ Please provide two club names.\nExample: .h2h Chelsea vs Arsenal");
+                await reply(`⏳ Looking up *${clubA}* vs *${clubB}*...`);
+                try {
+                    const result = await getH2H(clubA, clubB);
+                    if (result.error) return reply(`❌ ${result.error}`);
+                    await reply(result.text);
                 } catch (e) { await reply(`❌ Error: ${e?.message}`); }
                 break;
             }
@@ -2845,7 +2981,9 @@ _Can be started from any chat, but source members require source group access an
             // --- PING ---
             case ".ping": {
                 const start = Date.now();
-                await reply(`🏓 Pong! *${Date.now() - start}ms*`);
+                await sock.sendMessage(from, { text: "🏓 Pinging..." }, { quoted: msg });
+                const latency = Date.now() - start;
+                await reply(`✅ *Pong!*\n\n📶 *Latency:* ${latency}ms\n⏱️ *Uptime:* ${formatUptime()}`);
                 break;
             }
 
