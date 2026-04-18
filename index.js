@@ -5161,6 +5161,10 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         },
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
+        markOnline: false,              // don't mark number as online — reduces presence traffic & lag
+        syncFullHistory: false,         // don't pull full chat history on connect
+        generateHighQualityLinkPreview: false, // skip link preview generation — reduces processing overhead
+        getMessage: async () => undefined,     // prevents retry fetching of old messages
     });
 
     activeSockets[userId] = sock;
