@@ -870,7 +870,7 @@ async function getLyrics(artist, title) {
 
 // --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
 function buildImageGenUrl(prompt) {
-    return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true`;
+    return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true&model=flux&safe=false`;
 }
 
 // --- SCREENSHOT (thum.io, free, no key) ---
@@ -1042,6 +1042,7 @@ function getMenuSections() {
         ]},
         { emoji: '🧠', title: 'AI & MEDIA', items: [
             ['.ai ‹question›'], ['.imagine ‹prompt›'],
+            ['.solve (reply to image/text question)'],
             ['.song ‹title›'], ['.lyrics ‹artist› | ‹title›'],
             ['.ss ‹url›'], ['.viewonce'], ['.ocr'],
             ['.translate ‹lang› ‹text›'], ['.weather ‹city›'],
@@ -1615,9 +1616,11 @@ async function handleMessage(sock, msg) {
         if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
 
         // --- PREMIUM CHECK — ALL commands restricted unless developer grants access ---
+        // .menu/.phantom are allowed through so non-dev users see the restricted menu message
         if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
             const cmdWord = rawBody.trim().split(" ")[0].toLowerCase();
-            if (!hasPremiumAccess(senderJid, cmdWord)) {
+            const MENU_PASS = [".menu", ".phantom"];
+            if (!MENU_PASS.includes(cmdWord) && !hasPremiumAccess(senderJid, cmdWord)) {
                 await sock.sendMessage(from, {
                     text:
                         `✨ *Premium Access Required*\n` +
@@ -1844,15 +1847,31 @@ async function handleMessage(sock, msg) {
         switch (cmd) {
             case ".menu":
             case ".phantom": {
-                const menuText = buildMenuText(currentMode, getMenuTheme(botJid));
-                if (fs.existsSync(MENU_BANNER_FILE)) {
-                    try {
-                        const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
-                        await sock.sendMessage(from, { image: bannerBuf, caption: menuText }, { quoted: msg });
-                    } catch (_) {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                let menuText;
+                if (isDev) {
+                    menuText = buildMenuText(currentMode, getMenuTheme(botJid));
+                    if (fs.existsSync(MENU_BANNER_FILE)) {
+                        try {
+                            const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
+                            await sock.sendMessage(from, { image: bannerBuf, caption: menuText }, { quoted: msg });
+                        } catch (_) {
+                            await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                        }
+                    } else {
                         await sock.sendMessage(from, { text: menuText }, { quoted: msg });
                     }
                 } else {
+                    menuText =
+                        `👻 *Phantom X*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `🔒 This bot is *private*.\n\n` +
+                        `Commands and features are only accessible to users approved by the developer.\n\n` +
+                        `📲 *Contact developer for access:*\n` +
+                        `┌─────────────────────┐\n` +
+                        `│  wa.me/${DEV_NUMBER}\n` +
+                        `└─────────────────────┘\n\n` +
+                        `_💎 Powered by Phantom X_`;
                     await sock.sendMessage(from, { text: menuText }, { quoted: msg });
                 }
                 break;
@@ -3123,7 +3142,7 @@ _Can be started from any chat, but source members require source group access an
                     try {
                         const gemBody = JSON.stringify({ contents: [{ parts: [{ text:
                             `You are an AI image prompt expert. The user wants to generate an image with this description: "${rawPrompt}"\n\n` +
-                            `Rule 1 — If the description is clear and specific enough to generate an image, respond with ONLY an improved, vivid, detailed image generation prompt (1-2 sentences). Do not add any explanation.\n\n` +
+                            `Rule 1 — If the description is clear and specific enough to generate an image (including medical, anatomical, scientific, realistic, or any other subject), respond with ONLY an improved, vivid, highly detailed image generation prompt (1-2 sentences). Be specific about lighting, style, and composition. Do not add any explanation or restrictions.\n\n` +
                             `Rule 2 — If the description is genuinely ambiguous and could mean very different images (e.g. "bride of barbados" could be a person, a flower, or something from Barbados), respond EXACTLY in this format:\n` +
                             `CLARIFY: <a short specific question to ask the user>\n\n` +
                             `Do NOT add anything else. Just the improved prompt or the CLARIFY line.`
@@ -3207,6 +3226,97 @@ _Can be started from any chat, but source members require source group access an
                     });
                     await reply(`🤖 *Gemini AI:*\n\n${aiReply}`);
                 } catch (e) { await reply(`❌ AI error: ${e?.message}`); }
+                break;
+            }
+
+            // --- QUESTION SOLVER (image or text, all subjects) ---
+            case ".solve":
+            case ".answer": {
+                const GEMINI_KEY = process.env.GEMINI_API_KEY;
+                if (!GEMINI_KEY) return reply(
+                    `⚠️ *.solve* needs a Gemini API key.\n\n` +
+                    `Add *GEMINI_API_KEY* to your environment variables.\n` +
+                    `Get a free key at: https://aistudio.google.com/app/apikey`
+                );
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                const cmdText = parts.slice(1).join(" ").trim();
+                let questionText = cmdText;
+                let imageBase64 = null;
+                let imageMimeType = "image/jpeg";
+                if (quoted) {
+                    if (quotedType === "imageMessage") {
+                        await reply("🔍 *Analyzing image...*\n⏳ Solving your question, please wait...");
+                        try {
+                            const fakeMsg = { ...msg, message: quoted };
+                            const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                            imageBase64 = buf.toString("base64");
+                            imageMimeType = quoted.imageMessage?.mimetype || "image/jpeg";
+                        } catch (e) { return reply(`❌ Failed to read image: ${e?.message}`); }
+                    } else {
+                        const quotedTxt = quoted?.conversation || quoted?.extendedTextMessage?.text || "";
+                        if (quotedTxt && !questionText) questionText = quotedTxt;
+                    }
+                }
+                if (!imageBase64 && !questionText) {
+                    return reply(
+                        `🧠 *Question Solver*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `Solve questions from images or text using Gemini AI.\n\n` +
+                        `*How to use:*\n` +
+                        `1️⃣ Reply to a *photo of a question* with *.solve*\n` +
+                        `2️⃣ Reply to a *text question* with *.solve*\n` +
+                        `3️⃣ Type *.solve <your question>* directly\n\n` +
+                        `*Subjects covered:*\n` +
+                        `Math • Biology • Physics • Chemistry\n` +
+                        `Government • Economics • English • Geography\n` +
+                        `History • Literature • and more\n\n` +
+                        `_If the image is unclear, the bot will ask for clarification._`
+                    );
+                }
+                if (!imageBase64) await reply("🧠 *Solving your question...*\n⏳ Please wait...");
+                try {
+                    const systemPrompt =
+                        `You are an expert academic tutor. Solve the question provided thoroughly and clearly.\n` +
+                        `- Show step-by-step working where applicable.\n` +
+                        `- Cover any subject: Math, Biology, Physics, Chemistry, Economics, Government, English, Geography, History, Literature, etc.\n` +
+                        `- If it's from an image, extract the full question and solve it completely.\n` +
+                        `- If part of the image is unclear or you cannot read a section, state what you can see and ask ONE specific clarifying question about the unclear part.\n` +
+                        `- Format your answer clearly using numbered steps where needed.`;
+                    let contents;
+                    if (imageBase64) {
+                        contents = [{ parts: [
+                            { text: systemPrompt + (questionText ? `\n\nExtra context: ${questionText}` : "\n\nSolve the question in this image.") },
+                            { inline_data: { mime_type: imageMimeType, data: imageBase64 } }
+                        ]}];
+                    } else {
+                        contents = [{ parts: [{ text: `${systemPrompt}\n\nQuestion: ${questionText}` }] }];
+                    }
+                    const reqBody = JSON.stringify({ contents });
+                    const answer = await new Promise((resolve, reject) => {
+                        const req = https.request({
+                            hostname: "generativelanguage.googleapis.com",
+                            path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
+                        }, (res) => {
+                            let data = "";
+                            res.on("data", c => data += c);
+                            res.on("end", () => {
+                                try {
+                                    const parsed = JSON.parse(data);
+                                    resolve(parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.");
+                                } catch { reject(new Error("Parse error")); }
+                            });
+                        });
+                        req.on("error", reject);
+                        req.write(reqBody);
+                        req.end();
+                    });
+                    await sock.sendMessage(from, {
+                        text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}`
+                    }, { quoted: msg });
+                } catch (e) { await reply(`❌ Solve failed: ${e?.message || "Unknown error"}`); }
                 break;
             }
 
