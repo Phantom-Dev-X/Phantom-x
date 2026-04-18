@@ -3222,7 +3222,7 @@ _Can be started from any chat, but source members require source group access an
                         const gemRes = await new Promise((resolve, reject) => {
                             const req = https.request({
                                 hostname: "generativelanguage.googleapis.com",
-                                path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+                                path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
                                 method: "POST",
                                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(gemBody) },
                             }, res => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(); } }); });
@@ -3278,7 +3278,7 @@ _Can be started from any chat, but source members require source group access an
                     const aiReply = await new Promise((resolve, reject) => {
                         const req = https.request({
                             hostname: "generativelanguage.googleapis.com",
-                            path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+                            path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                         }, (res) => {
@@ -3368,7 +3368,7 @@ _Can be started from any chat, but source members require source group access an
                     const answer = await new Promise((resolve, reject) => {
                         const req = https.request({
                             hostname: "generativelanguage.googleapis.com",
-                            path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+                            path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
                             method: "POST",
                             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
                         }, (res) => {
@@ -4417,7 +4417,7 @@ _Can be started from any chat, but source members require source group access an
                     try {
                         const geminiRes = await new Promise((resolve, reject) => {
                             const body = JSON.stringify({ contents: [{ parts: [{ text: `You are Phantom X, a friendly WhatsApp bot assistant. Reply conversationally and briefly. User says: ${chatInput}` }] }] });
-                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
+                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
                             const req = https.request(options, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } }); });
                             req.on("error", reject); req.write(body); req.end();
                         });
