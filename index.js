@@ -1614,11 +1614,10 @@ async function handleMessage(sock, msg) {
         // --- SILENCE CHECK — dev can mute a number from any specific bot ---
         if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
 
-        // --- PREMIUM CHECK — all commands restricted unless unleashed ---
-        const FREE_CMDS = [".menu", ".phantom", ".info", ".help", ".ping", ".list", ".hi", ".start", ".bugmenu", ".football"];
+        // --- PREMIUM CHECK — ALL commands restricted unless developer grants access ---
         if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
             const cmdWord = rawBody.trim().split(" ")[0].toLowerCase();
-            if (!FREE_CMDS.includes(cmdWord) && !hasPremiumAccess(senderJid, cmdWord)) {
+            if (!hasPremiumAccess(senderJid, cmdWord)) {
                 await sock.sendMessage(from, {
                     text:
                         `✨ *Premium Access Required*\n` +
