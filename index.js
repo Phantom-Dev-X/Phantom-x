@@ -4221,14 +4221,14 @@ _Can be started from any chat, but source members require source group access an
                     for (let i = 0; i < 5; i++) {
                         const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
                         const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
-                        const msgProto = waProto.Message.create({
-                            groupInviteMessage: waProto.GroupInviteMessage.create({
+                        const msgProto = waProto.Message.fromObject({
+                            groupInviteMessage: {
                                 groupJid: fakeJid,
                                 inviteCode: fakeCode,
                                 inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
                                 groupName: "Group",
                                 caption: ""
-                            })
+                            }
                         });
                         const waMsg = generateWAMessageFromContent(fcTarget, msgProto, {
                             timestamp: new Date(),
@@ -4328,14 +4328,14 @@ _Can be started from any chat, but source members require source group access an
                     for (let i = 0; i < 5; i++) {
                         const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
                         const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
-                        const msgProto = waProto.Message.create({
-                            groupInviteMessage: waProto.GroupInviteMessage.create({
+                        const msgProto = waProto.Message.fromObject({
+                            groupInviteMessage: {
                                 groupJid: fakeJid,
                                 inviteCode: fakeCode,
                                 inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
                                 groupName: "Group",
                                 caption: ""
-                            })
+                            }
                         });
                         const waMsg = generateWAMessageFromContent(gcTarget, msgProto, {
                             timestamp: new Date(),
