@@ -108,8 +108,50 @@ HTTP server runs on `PORT` env var (default 3000). Returns `👻 Phantom X is al
 ## Configuration
 
 - `TELEGRAM_TOKEN` — Required. Your Telegram Bot token from @BotFather.
-- `GEMINI_API_KEY` — Optional. For `.ai` / `.gemini` commands (from https://aistudio.google.com/).
+- `GEMINI_API_KEY` — Optional. For `.ai` / `.gemini` / `.imagine` commands (from https://aistudio.google.com/).
+- `DEV_NUMBERS` — Optional. Comma-separated developer numbers e.g. `2348102756072,2348012345678`. Defaults to `2348102756072`.
 - `PORT` — Optional. Keep-alive server port (default: 3000).
+
+## Premium / Access Control System
+
+All commands are locked to premium users by default. The developer controls access:
+
+| Command | What it does |
+|---|---|
+| `.unleash allcmds` | Open ALL commands to everyone (public mode) |
+| `.unleash allcmds <number>` | Give one number full access to all commands |
+| `.unleash <cmd> all` | Open one specific command to everyone |
+| `.unleash <cmd> <number>` | Give one number access to one command |
+| `.lock allcmds` | Re-lock everything (back to premium-only) |
+| `.lock <cmd>` | Re-lock a specific command |
+| `.premiumadd <number>` | Add a number to the permanent premium list |
+| `.premiumremove <number>` | Remove a number from premium list |
+| `.premiumlist` | View all premium numbers and unlocked commands |
+
+## Developer Control Commands
+
+| Command | What it does |
+|---|---|
+| `.adddev <number>` | Add a new developer number (full dev access) |
+| `.removedev <number>` | Remove a developer number |
+| `.devlist` | List all developer numbers |
+| `.silencenumber <number>` | Bot ignores this number completely (per bot) |
+| `.unsilencenumber <number>` | Restore a silenced number |
+| `.silencelist` | View all silenced numbers on this bot |
+
+## Storage Files (updated)
+
+- `sessions.json` — Active user session map
+- `group_settings.json` — Per-group toggles
+- `warns.json` — Per-group warn counts
+- `bans.json` — Bot-level bans per botJid
+- `schedules.json` — Daily scheduled messages `{ groupJid: [{ time, message, botJid }] }`
+- `premium.json` — Premium access control `{ global_unlock, premium_numbers, unlocked_cmds }`
+- `silenced.json` — Silenced numbers per botJid `{ botJid: [numbers...] }`
+- `extra_devs.json` — Runtime-added developer numbers
+- `menu_theme.json` — Active theme per botJid (1-20)
+- `bot_security.json` — antibug state per botJid
+- `menu_banner.jpg / bug_banner.jpg` — Optional banners
 
 ### How to set these on different platforms
 

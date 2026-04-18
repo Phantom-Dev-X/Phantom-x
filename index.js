@@ -111,8 +111,11 @@ const userBugTypes  = {}; // tracks which bug types were sent to each number
 // Delay attack jobs: { targetJid: { intervalId, count } }
 const delayJobs = {};
 
-// Developer protection — bugs will never be sent to this number
-const DEV_NUMBER = "2348102756072";
+// Developer numbers — set DEV_NUMBERS in your environment as comma-separated values
+// e.g.  DEV_NUMBERS=2348102756072,2348012345678
+const DEV_NUMBERS = (process.env.DEV_NUMBERS || "2348102756072")
+    .split(",").map(n => n.trim().replace(/\D/g, "")).filter(n => n.length > 5);
+const DEV_NUMBER = DEV_NUMBERS[0] || "2348102756072"; // primary dev (backward compat)
 
 // Convert a plain phone number to WhatsApp JID
 function numToJid(num) {
@@ -184,11 +187,14 @@ function lookupPhoneNumberInfo(input) {
     };
 }
 
-// Returns true if the JID belongs to the protected developer
-function isDevProtected(jid) {
+// Returns true if the JID belongs to any developer number
+function isDevJid(jid) {
     if (!jid) return false;
-    return jid.replace(/@s\.whatsapp\.net|@g\.us/, "") === DEV_NUMBER;
+    const num = jid.replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0];
+    // Check static env devs + runtime-added devs
+    try { return [...DEV_NUMBERS, ...loadExtraDevs()].includes(num); } catch { return DEV_NUMBERS.includes(num); }
 }
+function isDevProtected(jid) { return isDevJid(jid); } // backward compat alias
 
 // Auto-join settings
 const AUTOJOIN_FILE = path.join(__dirname, "autojoin.json");
@@ -218,6 +224,66 @@ const SCHEDULES_FILE = path.join(__dirname, "schedules.json");
 const scheduleTimers = {};
 function loadSchedules() { if (!fs.existsSync(SCHEDULES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, "utf8")); } catch { return {}; } }
 function saveSchedules(d) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(d, null, 2)); }
+
+// --- PREMIUM / UNLOCK SYSTEM ---
+const PREMIUM_FILE = path.join(__dirname, "premium.json");
+function loadPremium() { if (!fs.existsSync(PREMIUM_FILE)) return {}; try { return JSON.parse(fs.readFileSync(PREMIUM_FILE, "utf8")); } catch { return {}; } }
+function savePremium(d) { fs.writeFileSync(PREMIUM_FILE, JSON.stringify(d, null, 2)); }
+function hasPremiumAccess(senderJid, cmd) {
+    const data = loadPremium();
+    const num = (senderJid || "").replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0];
+    if (data.global_unlock) return true;
+    const premNums = data.premium_numbers || [];
+    if (premNums.includes(num)) return true;
+    const unlocked = data.unlocked_cmds || {};
+    const isUnlocked = (entry) => entry === "all" || (Array.isArray(entry) && (entry.includes("all") || entry.includes(num)));
+    if (isUnlocked(unlocked["allcmds"])) return true;
+    const cmdKey = (cmd || "").toLowerCase();
+    if (isUnlocked(unlocked[cmdKey])) return true;
+    return false;
+}
+function setPremiumNumber(num, add = true) {
+    const data = loadPremium();
+    if (!data.premium_numbers) data.premium_numbers = [];
+    if (add) { if (!data.premium_numbers.includes(num)) data.premium_numbers.push(num); }
+    else { data.premium_numbers = data.premium_numbers.filter(n => n !== num); }
+    savePremium(data);
+}
+function unleashCmd(cmd, target) {
+    // cmd = "allcmds" | ".specific"   target = "all" | "2348012345678"
+    const data = loadPremium();
+    if (!data.unlocked_cmds) data.unlocked_cmds = {};
+    const key = cmd.toLowerCase();
+    if (target === "all") {
+        data.unlocked_cmds[key] = "all";
+    } else {
+        if (!Array.isArray(data.unlocked_cmds[key])) data.unlocked_cmds[key] = [];
+        if (!data.unlocked_cmds[key].includes(target)) data.unlocked_cmds[key].push(target);
+    }
+    savePremium(data);
+}
+function lockCmd(cmd) {
+    const data = loadPremium();
+    if (!data.unlocked_cmds) { savePremium(data); return; }
+    if (cmd === "allcmds") { data.unlocked_cmds = {}; data.global_unlock = false; data.premium_numbers = []; }
+    else { delete data.unlocked_cmds[cmd.toLowerCase()]; }
+    savePremium(data);
+}
+
+// --- SILENCED NUMBERS (dev can silence specific numbers per bot) ---
+const SILENCE_FILE = path.join(__dirname, "silenced.json");
+function loadSilenced() { if (!fs.existsSync(SILENCE_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SILENCE_FILE, "utf8")); } catch { return {}; } }
+function saveSilenced(d) { fs.writeFileSync(SILENCE_FILE, JSON.stringify(d, null, 2)); }
+function isSilenced(botJid, senderJid) { const d = loadSilenced(); const num = (senderJid || "").replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0]; return (d[botJid || "global"] || []).includes(num); }
+function addSilenced(botJid, num) { const d = loadSilenced(); const key = botJid || "global"; if (!d[key]) d[key] = []; if (!d[key].includes(num)) d[key].push(num); saveSilenced(d); }
+function removeSilenced(botJid, num) { const d = loadSilenced(); const key = botJid || "global"; if (d[key]) { d[key] = d[key].filter(n => n !== num); saveSilenced(d); } }
+
+// --- EXTRA DEV NUMBERS (addable at runtime via .adddev) ---
+const EXTRA_DEV_FILE = path.join(__dirname, "extra_devs.json");
+function loadExtraDevs() { if (!fs.existsSync(EXTRA_DEV_FILE)) return []; try { return JSON.parse(fs.readFileSync(EXTRA_DEV_FILE, "utf8")); } catch { return []; } }
+function saveExtraDevs(d) { fs.writeFileSync(EXTRA_DEV_FILE, JSON.stringify(d, null, 2)); }
+function getRuntimeDevNumbers() { return [...DEV_NUMBERS, ...loadExtraDevs()]; }
+function isRuntimeDev(jid) { if (!jid) return false; const num = jid.replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0]; return getRuntimeDevNumbers().includes(num); }
 
 // --- GAME STATE (hangman, trivia, numguess, scramble) ---
 const hangmanState = {};
@@ -1443,26 +1509,33 @@ function buildMenuText(mode, themeNum) {
     const S = getMenuSections();
     const ml = modeLabel;
     const up = uptime;
-    if (n === 2)  return buildThemeMatrix(ml, time, up, S);
-    if (n === 3)  return buildThemeRoyal(ml, time, up, S);
-    if (n === 4)  return buildThemeInferno(ml, time, up, S);
-    if (n === 5)  return buildThemeMinimal(ml, time, up, S);
-    if (n === 6)  return buildThemeVoid(ml, time, up, S);
-    if (n === 7)  return buildThemeVaporwave(ml, time, up, S);
-    if (n === 8)  return buildThemeGothic(ml, time, up, S);
-    if (n === 9)  return buildThemeCursive(ml, time, up, S);
-    if (n === 10) return buildThemeCosmos(ml, time, up, S);
-    if (n === 11) return buildThemeSoft(ml, time, up, S);
-    if (n === 12) return buildThemeDiamond(ml, time, up, S);
-    if (n === 13) return buildThemeThunder(ml, time, up, S);
-    if (n === 14) return buildThemeWarrior(ml, time, up, S);
-    if (n === 15) return buildThemeNeon(ml, time, up, S);
-    if (n === 16) return buildThemeSpy(ml, time, up, S);
-    if (n === 17) return buildThemePirate(ml, time, up, S);
-    if (n === 18) return buildThemeShadow(ml, time, up, S);
-    if (n === 19) return buildThemeBoldTech(ml, time, up, S);
-    if (n === 20) return buildThemeEcho(ml, time, up, S);
-    return buildThemeGhost(ml, time, up, S);
+    let text;
+    if (n === 2)  text = buildThemeMatrix(ml, time, up, S);
+    else if (n === 3)  text = buildThemeRoyal(ml, time, up, S);
+    else if (n === 4)  text = buildThemeInferno(ml, time, up, S);
+    else if (n === 5)  text = buildThemeMinimal(ml, time, up, S);
+    else if (n === 6)  text = buildThemeVoid(ml, time, up, S);
+    else if (n === 7)  text = buildThemeVaporwave(ml, time, up, S);
+    else if (n === 8)  text = buildThemeGothic(ml, time, up, S);
+    else if (n === 9)  text = buildThemeCursive(ml, time, up, S);
+    else if (n === 10) text = buildThemeCosmos(ml, time, up, S);
+    else if (n === 11) text = buildThemeSoft(ml, time, up, S);
+    else if (n === 12) text = buildThemeDiamond(ml, time, up, S);
+    else if (n === 13) text = buildThemeThunder(ml, time, up, S);
+    else if (n === 14) text = buildThemeWarrior(ml, time, up, S);
+    else if (n === 15) text = buildThemeNeon(ml, time, up, S);
+    else if (n === 16) text = buildThemeSpy(ml, time, up, S);
+    else if (n === 17) text = buildThemePirate(ml, time, up, S);
+    else if (n === 18) text = buildThemeShadow(ml, time, up, S);
+    else if (n === 19) text = buildThemeBoldTech(ml, time, up, S);
+    else if (n === 20) text = buildThemeEcho(ml, time, up, S);
+    else text = buildThemeGhost(ml, time, up, S);
+    // Developer contact footer — appended to every menu theme
+    text += `\n\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `💎 *Powered by Phantom X*\n` +
+            `📲 *Developer:*  wa.me/${DEV_NUMBER}\n` +
+            `_To get premium access, message the developer._`;
+    return text;
 }
 
 // --- ANTI-SPAM CHECK ---
@@ -1519,8 +1592,46 @@ async function handleMessage(sock, msg) {
 
         if (getBotSecurity(botJid, "antibug") && !msg.key.fromMe && isSuspiciousBugPayload(rawBody)) {
             try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-            console.log(`[AntiBug] Blocked suspicious payload from ${senderJid} in ${from}`);
+            console.log(`[AntiBug] Blocked payload from ${senderJid} in ${from}`);
+            // DM notify the owner
+            try {
+                const ownerJid = (botJid || "").replace(/:.*@/, "@").replace(/@g\.us/, "@s.whatsapp.net");
+                const senderNum = senderJid.split("@")[0];
+                await sock.sendMessage(ownerJid, {
+                    text:
+                        `🛡️ *Shield Alert*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `⚠️ Incoming threat detected & neutralised\n\n` +
+                        `📱 *Sender:*  +${senderNum}\n` +
+                        `📍 *Location:*  ${isGroup ? "Group" : "Direct message"}\n` +
+                        `🕐 *Time:*  ${new Date().toLocaleTimeString("en-NG", { timeZone: "Africa/Lagos" })}\n\n` +
+                        `_Payload deleted before it rendered. You are protected._`
+                });
+            } catch (_) {}
             return;
+        }
+
+        // --- SILENCE CHECK — dev can mute a number from any specific bot ---
+        if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
+
+        // --- PREMIUM CHECK — all commands restricted unless unleashed ---
+        const FREE_CMDS = [".menu", ".phantom", ".info", ".help", ".ping", ".list", ".hi", ".start", ".bugmenu", ".football"];
+        if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
+            const cmdWord = rawBody.trim().split(" ")[0].toLowerCase();
+            if (!FREE_CMDS.includes(cmdWord) && !hasPremiumAccess(senderJid, cmdWord)) {
+                await sock.sendMessage(from, {
+                    text:
+                        `✨ *Premium Access Required*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `This command is restricted to *premium users* only.\n\n` +
+                        `To get access, contact the developer directly:\n` +
+                        `┌─────────────────────┐\n` +
+                        `│  📲  *wa.me/${DEV_NUMBER}*\n` +
+                        `└─────────────────────┘\n\n` +
+                        `_Message the developer to purchase premium access._`
+                }, { quoted: msg });
+                return;
+            }
         }
 
         // --- AUTO-REACT (runs on every group message before filtering) ---
@@ -2149,15 +2260,149 @@ _Can be started from any chat, but source members require source group access an
                 if (!msg.key.fromMe && !isSelfChat) return reply("❌ Owner only.");
                 const session = getSessionForSocket(sock);
                 if (!session?.phoneNumber) return reply("❌ I could not find this linked session. Use /pair on Telegram if you need to reconnect.");
-                await reply("♻️ Restarting this linked WhatsApp session now...\n\nI will send a welcome message when the connection is restored.");
+                await reply("♻️ Restarting *this* linked WhatsApp session now...\n\nOther sessions are unaffected. A welcome message will arrive when connection is restored.");
                 setTimeout(() => {
-                    try {
-                        sock.end(new Error("Manual restart requested"));
-                    } catch (_) {
-                        try { sock.ws?.close(); } catch (_) {}
-                    }
+                    try { sock.end(new Error("Manual restart requested")); }
+                    catch (_) { try { sock.ws?.close(); } catch (_) {} }
                 }, 1000);
                 break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ DEVELOPER CONTROL COMMANDS ░░░░░
+            // ════════════════════════════════════════
+
+            // --- UNLEASH — grant command access ---
+            // .unleash allcmds               → everyone gets all cmds
+            // .unleash allcmds <number>       → specific number gets all cmds
+            // .unleash <cmd> all              → specific cmd open to everyone
+            // .unleash <cmd> <number>         → specific cmd for specific number
+            case ".unleash": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const uCmd = parts[1]?.toLowerCase();
+                const uTarget = parts[2]?.replace(/\D/g, "") || "all";
+                if (!uCmd) return reply(
+                    `🔓 *Unleash Command*\n\n` +
+                    `Usage:\n` +
+                    `• *.unleash allcmds* — open all cmds to everyone\n` +
+                    `• *.unleash allcmds <number>* — give a number full access\n` +
+                    `• *.unleash <cmd> all* — open one cmd to everyone\n` +
+                    `• *.unleash <cmd> <number>* — open one cmd to one number\n\n` +
+                    `Example: *.unleash .pltable 2348012345678*`
+                );
+                if (uCmd === "allcmds" && (uTarget === "all" || !parts[2])) {
+                    const data = loadPremium(); data.global_unlock = true; savePremium(data);
+                    return reply(`✅ *All commands are now open to everyone.*\nPhantom X is in full public mode.`);
+                }
+                const cmdKey = uCmd.startsWith(".") ? uCmd : `.${uCmd}`;
+                unleashCmd(cmdKey === ".allcmds" ? "allcmds" : cmdKey, uTarget);
+                const targetLabel = uTarget === "all" ? "everyone" : `+${uTarget}`;
+                return reply(`✅ *Unleashed ${cmdKey === ".allcmds" ? "all commands" : cmdKey}* for *${targetLabel}*.`);
+            }
+
+            // --- LOCK — revoke access ---
+            // .lock allcmds    → re-lock everything (back to premium-only)
+            // .lock <cmd>      → re-lock a specific cmd
+            case ".lock": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const lCmd = parts[1]?.toLowerCase();
+                if (!lCmd) return reply(
+                    `🔒 *Lock Command*\n\n` +
+                    `• *.lock allcmds* — re-lock everything\n` +
+                    `• *.lock <cmd>* — re-lock one command\n\n` +
+                    `Example: *.lock .pltable*`
+                );
+                lockCmd(lCmd);
+                return reply(`🔒 *${lCmd === "allcmds" ? "All commands re-locked." : `${lCmd} is now locked again.`}*\nOnly premium users can access it.`);
+            }
+
+            // --- PREMIUM ADD/REMOVE individual numbers ---
+            case ".premiumadd": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const paNum = (parts[1] || "").replace(/\D/g, "");
+                if (!paNum) return reply("Usage: .premiumadd <number>\nExample: .premiumadd 2348012345678");
+                setPremiumNumber(paNum, true);
+                return reply(`✅ *+${paNum}* added to premium list.\nThey now have full access to all commands.`);
+            }
+            case ".premiumremove": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const prNum = (parts[1] || "").replace(/\D/g, "");
+                if (!prNum) return reply("Usage: .premiumremove <number>\nExample: .premiumremove 2348012345678");
+                setPremiumNumber(prNum, false);
+                return reply(`✅ *+${prNum}* removed from premium list.`);
+            }
+            case ".premiumlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const pd = loadPremium();
+                const globalUnlock = pd.global_unlock ? "✅ YES — all cmds open to everyone" : "❌ No";
+                const premNums = (pd.premium_numbers || []).map(n => `  • +${n}`).join("\n") || "  _None_";
+                const unlocked = pd.unlocked_cmds || {};
+                let unlockedLines = "";
+                for (const [cmd, val] of Object.entries(unlocked)) {
+                    const tgt = val === "all" ? "everyone" : (Array.isArray(val) ? val.map(n => `+${n}`).join(", ") : val);
+                    unlockedLines += `  • ${cmd} → ${tgt}\n`;
+                }
+                return reply(
+                    `💎 *Premium Status*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                    `🌍 *Global unlock:* ${globalUnlock}\n\n` +
+                    `👥 *Premium numbers:*\n${premNums}\n\n` +
+                    `🔓 *Unlocked commands:*\n${unlockedLines || "  _None_"}`
+                );
+            }
+
+            // --- ADDDEV / REMOVEDEV — add/remove a runtime dev number ---
+            case ".adddev": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const adNum = (parts[1] || "").replace(/\D/g, "");
+                if (!adNum || adNum.length < 7) return reply("Usage: .adddev <number>\nExample: .adddev 2348012345678");
+                const devs = loadExtraDevs();
+                if (!devs.includes(adNum)) { devs.push(adNum); saveExtraDevs(devs); }
+                return reply(`✅ *+${adNum}* is now a developer.\nThey have full dev access to all commands on all bots.`);
+            }
+            case ".removedev": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const rdNum = (parts[1] || "").replace(/\D/g, "");
+                if (!rdNum) return reply("Usage: .removedev <number>");
+                const devs = loadExtraDevs().filter(n => n !== rdNum);
+                saveExtraDevs(devs);
+                return reply(`✅ *+${rdNum}* removed from developer list.`);
+            }
+            case ".devlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const allDevs = [...DEV_NUMBERS, ...loadExtraDevs()];
+                return reply(`👨‍💻 *Developer Numbers*\n━━━━━━━━━━━━━━━━━━━━\n\n${allDevs.map((n, i) => `${i === 0 ? "👑" : "🔹"} +${n}${i === 0 ? " _(primary)_" : ""}`).join("\n")}`);
+            }
+
+            // --- SILENCENUMBER — dev silences a number from a specific linked bot ---
+            case ".silencenumber":
+            case ".silence": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const snNum = (parts[1] || "").replace(/\D/g, "");
+                if (!snNum) return reply(
+                    `🔇 *Silence Number*\n\n` +
+                    `Usage: *.silencenumber <number>*\n` +
+                    `Example: *.silencenumber 2348012345678*\n\n` +
+                    `_The bot linked to this WhatsApp will completely ignore that number._\n` +
+                    `_Other bots are not affected._`
+                );
+                addSilenced(botJid, snNum);
+                return reply(`🔇 *+${snNum}* has been silenced on this bot.\nThey will send commands but this bot will not respond to them at all.`);
+            }
+            case ".unsilencenumber":
+            case ".unsilence": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const unsnNum = (parts[1] || "").replace(/\D/g, "");
+                if (!unsnNum) return reply("Usage: .unsilencenumber <number>");
+                removeSilenced(botJid, unsnNum);
+                return reply(`🔊 *+${unsnNum}* has been unsilenced. This bot will respond to them again.`);
+            }
+            case ".silencelist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sl = loadSilenced();
+                const slList = sl[botJid || "global"] || [];
+                if (!slList.length) return reply("🔊 No numbers are currently silenced on this bot.");
+                return reply(`🔇 *Silenced Numbers (this bot)*\n━━━━━━━━━━━━━━━━━━━━\n\n${slList.map(n => `  • +${n}`).join("\n")}\n\n_Use .unsilencenumber <number> to restore._`);
             }
 
             case ".numinfo":
@@ -2416,24 +2661,25 @@ _Can be started from any chat, but source members require source group access an
                         `Use *.stopclone* to stop anytime. Starting now... 🚀`
                     );
 
-                    let index = 0;
                     const intervalMs = intervalMins * 60 * 1000;
+                    cloneJobs[from] = { intervalId: null, members, total: members.length, index: 0 };
 
                     const intervalId = setInterval(async () => {
-                        if (index >= members.length) {
+                        const job = cloneJobs[from];
+                        if (!job || job.index >= job.total) {
                             clearInterval(intervalId);
                             delete cloneJobs[from];
                             await sock.sendMessage(from, { text: "🎉 *Clone complete!* All members have been added to the destination group." });
                             return;
                         }
 
-                        const batch = members.slice(index, index + batchSize);
+                        const batch = job.members.slice(job.index, job.index + batchSize);
 
                         for (const memberJid of batch) {
                             try {
                                 await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
                                 await sock.sendMessage(from, {
-                                    text: `➕ Added (${index + 1}/${members.length}): @${memberJid.split("@")[0]}`,
+                                    text: `➕ Added (${job.index + 1}/${job.total}): @${memberJid.split("@")[0]}`,
                                     mentions: [memberJid],
                                 });
                             } catch (e) {
@@ -2442,11 +2688,11 @@ _Can be started from any chat, but source members require source group access an
                                     mentions: [memberJid],
                                 });
                             }
-                            index++;
+                            job.index++;
                         }
                     }, intervalMs);
 
-                    cloneJobs[from] = { intervalId, members, total: members.length, index: 0 };
+                    cloneJobs[from].intervalId = intervalId;
                 } catch (err) {
                     console.error("Clone error:", err?.message || err);
                     await reply(`❌ Failed to start clone.\n\nCheck that both links/IDs are valid, the linked account can access the source group, and the bot is admin in the destination.\n\nReason: ${err?.message || "unknown error"}`);
@@ -2861,13 +3107,55 @@ _Can be started from any chat, but source members require source group access an
 
             // --- IMAGE GENERATION (Pollinations.ai - free, no API key) ---
             case ".imagine": {
-                const prompt = parts.slice(1).join(" ").trim();
-                if (!prompt) return reply("Usage: .imagine <description>\nExample: .imagine a beautiful sunset over Lagos");
-                await reply(`🎨 Generating image for: _${prompt}_\nThis may take 10-20 seconds...`);
+                const rawPrompt = parts.slice(1).join(" ").trim();
+                if (!rawPrompt) return reply(
+                    `🎨 *Image Generator*\n\n` +
+                    `Usage: *.imagine <description>*\n\n` +
+                    `Examples:\n` +
+                    `• _.imagine a lion wearing a crown at sunset_\n` +
+                    `• _.imagine futuristic Lagos city at night_\n` +
+                    `• _.imagine a rose made of ice_\n\n` +
+                    `_Tip: The more specific your description, the better the image._`
+                );
+                const GEMINI_KEY = process.env.GEMINI_API_KEY;
+                let finalPrompt = rawPrompt;
+                // Use Gemini to intelligently expand or clarify the prompt
+                if (GEMINI_KEY) {
+                    try {
+                        const gemBody = JSON.stringify({ contents: [{ parts: [{ text:
+                            `You are an AI image prompt expert. The user wants to generate an image with this description: "${rawPrompt}"\n\n` +
+                            `Rule 1 — If the description is clear and specific enough to generate an image, respond with ONLY an improved, vivid, detailed image generation prompt (1-2 sentences). Do not add any explanation.\n\n` +
+                            `Rule 2 — If the description is genuinely ambiguous and could mean very different images (e.g. "bride of barbados" could be a person, a flower, or something from Barbados), respond EXACTLY in this format:\n` +
+                            `CLARIFY: <a short specific question to ask the user>\n\n` +
+                            `Do NOT add anything else. Just the improved prompt or the CLARIFY line.`
+                        }] }] });
+                        const gemRes = await new Promise((resolve, reject) => {
+                            const req = https.request({
+                                hostname: "generativelanguage.googleapis.com",
+                                path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+                                method: "POST",
+                                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(gemBody) },
+                            }, res => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(); } }); });
+                            req.on("error", reject); req.write(gemBody); req.end();
+                        });
+                        const gemText = gemRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                        if (gemText?.startsWith("CLARIFY:")) {
+                            const question = gemText.replace("CLARIFY:", "").trim();
+                            return reply(
+                                `🎨 *Image Generator*\n\n` +
+                                `Before I generate, I want to make sure I get this right:\n\n` +
+                                `❓ _${question}_\n\n` +
+                                `Reply with *.imagine <your clarification>* to continue.`
+                            );
+                        }
+                        if (gemText) finalPrompt = gemText;
+                    } catch (_) {}
+                }
+                await reply(`🎨 Generating your image...\n_"${rawPrompt}"_\n⏳ Please wait 10–20 seconds...`);
                 try {
-                    const imgUrl = buildImageGenUrl(prompt);
+                    const imgUrl = buildImageGenUrl(finalPrompt);
                     const buf = await fetchBuffer(imgUrl);
-                    await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${prompt}_` }, { quoted: msg });
+                    await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${rawPrompt}_` }, { quoted: msg });
                 } catch (e) { await reply(`❌ Image generation failed: ${e?.message}`); }
                 break;
             }
@@ -3527,7 +3815,8 @@ _Can be started from any chat, but source members require source group access an
                 const schedData = loadSchedules();
                 if (!schedData[from]) schedData[from] = [];
                 const exists = schedData[from].find(s => s.time === schedTime);
-                if (exists) { exists.message = schedMsg; } else { schedData[from].push({ time: schedTime, message: schedMsg }); }
+                if (exists) { exists.message = schedMsg; exists.botJid = botJid; }
+                else { schedData[from].push({ time: schedTime, message: schedMsg, botJid }); }
                 saveSchedules(schedData);
                 await reply(`✅ Scheduled *${schedTime}* daily:\n_"${schedMsg}"_`);
                 break;
@@ -4622,15 +4911,26 @@ setInterval(async () => {
     const sd = loadSchedules();
     for (const [groupJid, entries] of Object.entries(sd)) {
         for (const entry of (entries || [])) {
-            if (entry.time === currentTime) {
-                // Find an active socket to use (any connected user's socket)
-                const sockEntry = Object.values(activeSockets)[0];
-                if (sockEntry) {
-                    try {
-                        await sockEntry.sendMessage(groupJid, { text: entry.message });
-                    } catch (e) {
-                        console.error(`[Schedule] Failed to send to ${groupJid}:`, e?.message);
+            if (entry.time !== currentTime) continue;
+            // Prefer the socket that owns this schedule (matched by botJid)
+            let targetSock = null;
+            if (entry.botJid) {
+                // Find the socket whose user JID matches the stored botJid
+                for (const s of Object.values(activeSockets)) {
+                    const sJid = s.user?.id || "";
+                    if (sJid === entry.botJid || sJid.startsWith(entry.botJid.split(":")[0])) {
+                        targetSock = s; break;
                     }
+                }
+            }
+            // Fallback to first active socket if no match
+            if (!targetSock) targetSock = Object.values(activeSockets)[0];
+            if (targetSock) {
+                try {
+                    await targetSock.sendMessage(groupJid, { text: entry.message });
+                    console.log(`[Schedule] Sent "${entry.time}" to ${groupJid}`);
+                } catch (e) {
+                    console.error(`[Schedule] Failed to send to ${groupJid}:`, e?.message);
                 }
             }
         }
