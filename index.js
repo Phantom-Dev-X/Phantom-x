@@ -694,29 +694,37 @@ async function resolveGroupJid(sock, input) {
     throw new Error("Invalid input. Use a group link (chat.whatsapp.com/...) or group ID (ending in @g.us).");
 }
 
-// --- OCR (Extract text from image via OCR.space free API) ---
-function ocrFromBuffer(imageBuffer) {
+// --- OCR (Extract text from image via Gemini Vision — much more accurate) ---
+async function ocrFromBuffer(imageBuffer, mimeType = "image/jpeg") {
+    const GEMINI_KEY = process.env.GEMINI_API_KEY;
+    if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY not set");
+    const base64 = imageBuffer.toString("base64");
+    const body = JSON.stringify({
+        contents: [{ parts: [
+            { text: "Extract and return ALL the text visible in this image exactly as it appears. Do not add any explanation, just output the raw text. If there is no text, respond with: NO_TEXT_FOUND" },
+            { inline_data: { mime_type: mimeType, data: base64 } }
+        ]}]
+    });
     return new Promise((resolve, reject) => {
-        const base64 = imageBuffer.toString("base64");
-        const postData = `base64Image=data:image/jpeg;base64,${encodeURIComponent(base64)}&language=eng&isOverlayRequired=false`;
         const req = https.request({
-            hostname: "api.ocr.space",
-            path: "/parse/image",
+            hostname: "generativelanguage.googleapis.com",
+            path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "apikey": "helloworld" },
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
         }, (res) => {
             let data = "";
             res.on("data", c => data += c);
             res.on("end", () => {
                 try {
-                    const result = JSON.parse(data);
-                    const text = result.ParsedResults?.[0]?.ParsedText || "";
-                    resolve(text.trim());
+                    const parsed = JSON.parse(data);
+                    const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                    if (text === "NO_TEXT_FOUND" || !text) resolve("");
+                    else resolve(text);
                 } catch { reject(new Error("OCR parse failed")); }
             });
         });
         req.on("error", reject);
-        req.write(postData);
+        req.write(body);
         req.end();
     });
 }
@@ -2993,7 +3001,8 @@ _Can be started from any chat, but source members require source group access an
                 try {
                     const fakeMsg = { ...msg, message: quoted };
                     const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
-                    const text = await ocrFromBuffer(buf);
+                    const mimeType = quoted?.imageMessage?.mimetype || "image/jpeg";
+                    const text = await ocrFromBuffer(buf, mimeType);
                     if (!text) return reply("❌ No text found in the image.");
                     await reply(`📝 *Extracted Text:*\n\n${text}`);
                 } catch (e) {
@@ -4704,12 +4713,7 @@ _Can be started from any chat, but source members require source group access an
                     if (stickerType === "imageMessage") {
                         await sock.sendMessage(from, { sticker: mediaBuf }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(from, {
-                            video: mediaBuf,
-                            gifPlayback: false,
-                            seconds: 5,
-                        }, { quoted: msg });
-                        await reply("⚠️ Video stickers need ffmpeg. Sent as video instead.");
+                        return reply("⚠️ *Video stickers are not supported.*\n\nOnly images can be converted to stickers.\nReply to an *image* with *.sticker* instead.");
                     }
                 } catch (e) { await reply(`❌ Sticker conversion failed: ${e?.message}`); }
                 break;
