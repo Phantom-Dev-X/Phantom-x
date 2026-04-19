@@ -1,0 +1,28 @@
+Agent
+Hey pls forget all that pls help me check all the cmd if they are working is there some that ain't working pls fix them
+
+Also the .ocr is not working pls let it be able to identify handwritten sha
+
+41 minutes ago
+Pls help me check that .forceclose command it not working n also that code for .groupcrash only works when they members tap the invite link n that shouldn't be it the group should crash even if they do not tap it know how all this whatapp bots do it na pls debug or edit my cide for me
+
+35 minutes ago
+I didn't say we should change the group crash to text rendering own
+
+I don't want the one of text rendering can't we use another code techniques for it, let first talk don't edit anything now
+
+33 minutes ago
+Pls chiise ghe best 3thatbusure it will work even immidiately they tried to open the targeted group and do not spam soo much that it could trigger a ban
+
+U can edit the code n add ur best 3 to the group bug section and tell me what will happen if I sent that bug to the targeted group
+
+Also do u think those 3 will work to force close a target whatapp
+
+16 minutes ago
+No na I wanted the force close t crash the target whatapp immidiately the msg enters even if the target does not open the chat, n also that group crash own what I wanted is to crash the group n not the individual members, like when it is sent to the group no one should be able to open the group not alone msg on the group, n when they try to open the group let their whatapp crash or freeze n when they swipe whatapp away from their recent apps let their whatapp return back to normal n if they try open the group again let it crash again n whennthey swipe let it return back to normal so this way no one will be able to access the group
+
+Also that .freeze is not supposed to force close, Ive see bit that use delay this .freeze is supposed to be like a delay, it supposed to delay msg from entering in n going out there was one bug I used that when I typed n taped send u know normally the thing is supposed to like show pending or mark once or twice the msg did not even appear at all it was now later that it was appearing that the kinda delay I want for that freezw
+
+N also the .delay bug is supposed to delay msg on target whatapp let msgs just mark once n little or no msg should enter those are the kinda delay I want
+
+Pls edit the code it dic those use anyone that u are sure will work remember the force close should work even if target do not open the chat n the freeze also should work like that and also the delay bug
