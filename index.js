@@ -704,9 +704,21 @@ async function ocrFromBuffer(imageBuffer, mimeType = "image/jpeg") {
     const base64 = imageBuffer.toString("base64");
     const body = JSON.stringify({
         contents: [{ parts: [
-            { text: "Extract and return ALL the text visible in this image exactly as it appears. Do not add any explanation, just output the raw text. If there is no text, respond with: NO_TEXT_FOUND" },
+            {
+                text: "You are an expert OCR engine. Extract and return ALL text from this image exactly as it appears.\n" +
+                      "This includes:\n" +
+                      "- Printed/typed text\n" +
+                      "- Handwritten text (cursive, block letters, messy, stylized, or informal handwriting)\n" +
+                      "- Notes, captions, watermarks, labels, or any other characters\n\n" +
+                      "Rules:\n" +
+                      "1. Preserve original line breaks and layout as much as possible.\n" +
+                      "2. If a word is unclear, make your best guess and mark it with [?] after the word.\n" +
+                      "3. Do NOT add any explanation, commentary, or preamble — output ONLY the raw text.\n" +
+                      "4. If there is absolutely no text in the image, respond with exactly: NO_TEXT_FOUND"
+            },
             { inline_data: { mime_type: mimeType, data: base64 } }
-        ]}]
+        ]}],
+        generationConfig: { temperature: 0.1 }
     });
     return new Promise((resolve, reject) => {
         const req = https.request({
@@ -2261,7 +2273,7 @@ async function handleMessage(sock, msg) {
 • *.lyrics <artist> | <title>* — Get song lyrics
 • *.ss / .screenshot <url>* — Screenshot a website
 • *.viewonce* — Reveal a view-once image/video (reply to it)
-• *.ocr* — Extract text from an image (reply to it)
+• *.ocr* — Extract text from an image (printed & handwritten ✍️)
 
 ━━━━━━━━━━━━━━━━━━━━
 🔍 *UTILITIES*
@@ -2998,9 +3010,9 @@ _Can be started from any chat, but source members require source group access an
                 const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 const quotedType = quoted ? getContentType(quoted) : null;
                 if (!quoted || quotedType !== "imageMessage") {
-                    return reply("📸 Reply to an image with *.ocr* to extract the text from it.");
+                    return reply("📸 Reply to an image with *.ocr* to extract the text from it.\n\n✍️ Supports printed *and* handwritten text!");
                 }
-                await reply("🔍 Extracting text from image...");
+                await reply("🔍 Extracting text from image... (supports handwriting ✍️)");
                 try {
                     const fakeMsg = { ...msg, message: quoted };
                     const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
@@ -3292,7 +3304,7 @@ _Can be started from any chat, but source members require source group access an
                             hostname: "generativelanguage.googleapis.com",
                             path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
                             method: "POST",
-                            headers: { "Content-Type": "application/json" },
+                            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
                         }, (res) => {
                             let data = "";
                             res.on("data", c => data += c);
@@ -3751,8 +3763,16 @@ _Can be started from any chat, but source members require source group access an
             case ".translate":
             case ".tr": {
                 const trParts = parts.slice(1);
-                if (trParts.length < 2) return reply("Usage: .translate <lang> <text>\nExample: .translate yoruba Good morning everyone\nLanguage codes: yo (Yoruba), ig (Igbo), ha (Hausa), fr (French), es (Spanish), de (German), zh (Chinese)");
-                const toLang = trParts[0];
+                if (trParts.length < 2) return reply(
+                    "Usage: .translate <lang_code> <text>\n\n" +
+                    "Example: .translate fr Good morning everyone\n\n" +
+                    "Common language codes:\n" +
+                    "• fr — French\n• es — Spanish\n• de — German\n• ar — Arabic\n" +
+                    "• zh — Chinese\n• pt — Portuguese\n• ru — Russian\n• ja — Japanese\n" +
+                    "• yo — Yoruba\n• ha — Hausa\n• sw — Swahili\n• ig — Igbo\n\n" +
+                    "_Tip: You can also use full language names like 'french'_"
+                );
+                const toLang = trParts[0].toLowerCase();
                 const trText = trParts.slice(1).join(" ");
                 await reply(`🌐 Translating to *${toLang}*...`);
                 try {
@@ -3760,7 +3780,15 @@ _Can be started from any chat, but source members require source group access an
                     const trResult = await new Promise((resolve, reject) => {
                         https.get(`https://api.mymemory.translated.net/get?q=${encoded}&langpair=en|${toLang}`, (res) => {
                             let data = ""; res.on("data", c => data += c); res.on("end", () => {
-                                try { const p = JSON.parse(data); resolve(p.responseData?.translatedText || "No translation"); } catch { reject(new Error("Parse error")); }
+                                try {
+                                    const p = JSON.parse(data);
+                                    const translated = p.responseData?.translatedText || "";
+                                    if (!translated || p.responseStatus === 400 || translated.toLowerCase().includes("invalid")) {
+                                        reject(new Error(`Language code '${toLang}' not recognized. Use a valid ISO code like fr, es, ar, yo, ha.`));
+                                    } else {
+                                        resolve(translated);
+                                    }
+                                } catch { reject(new Error("Parse error")); }
                             });
                         }).on("error", reject);
                     });
