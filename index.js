@@ -1936,17 +1936,25 @@ async function handleMessage(sock, msg) {
         let body = rawBody;
         if (!body) return;
 
-        // Handle .readmore appearing ANYWHERE in the message (e.g. "Everyone send acc .readmore link here")
-        // This must run before the switch so it works mid-sentence
+        // Handle .readmore appearing ANYWHERE in the message
         if (body.toLowerCase().includes('.readmore')) {
-            const rmIdx = body.toLowerCase().indexOf('.readmore');
-            const beforeText = body.slice(0, rmIdx).trim();
-            const afterText  = body.slice(rmIdx + '.readmore'.length).trim();
-            if (beforeText || afterText) {
-                // WhatsApp collapses long text behind a "Read more" tap after ~700 newlines
+            const lines = body.split('\n');
+            const out = [];
+            let changed = false;
+            for (const line of lines) {
+                const idx = line.toLowerCase().indexOf('.readmore');
+                if (idx === -1) {
+                    out.push(line);
+                    continue;
+                }
+                changed = true;
+                const beforeText = line.slice(0, idx).trim();
+                const afterText = line.slice(idx + '.readmore'.length).trim();
                 const hiddenPadding = '\n'.repeat(700);
-                const formattedMsg = `${beforeText || ''}${hiddenPadding}${afterText}`;
-                await sock.sendMessage(from, { text: formattedMsg }, { quoted: msg });
+                out.push(`${beforeText || ''}${hiddenPadding}${afterText || ''}`);
+            }
+            if (changed) {
+                await sock.sendMessage(from, { text: out.join('\n') }, { quoted: msg });
                 return;
             }
         }
