@@ -3326,7 +3326,6 @@ _Can be started from any chat, but source members require source group access an
                 );
                 const GEMINI_KEY = process.env.GEMINI_API_KEY;
                 let finalPrompt = rawPrompt;
-                // Use Gemini to intelligently expand or clarify the prompt
                 if (GEMINI_KEY) {
                     try {
                         const gemBody = JSON.stringify({ contents: [{ parts: [{ text:
@@ -3358,12 +3357,20 @@ _Can be started from any chat, but source members require source group access an
                         if (gemText) finalPrompt = gemText;
                     } catch (_) {}
                 }
-                await reply(`🎨 Generating your image...\n_"${rawPrompt}"_\n⏳ Please wait 10–20 seconds...`);
+                await reply(`🎨 Generating your image...\n_"${rawPrompt}"_\n⏳ Please wait...`);
                 try {
                     const imgUrl = buildImageGenUrl(finalPrompt);
                     const buf = await fetchBuffer(imgUrl);
                     await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${rawPrompt}_` }, { quoted: msg });
-                } catch (e) { await reply(`❌ Image generation failed: ${e?.message}`); }
+                } catch (e) {
+                    try {
+                        const fallbackUrl = buildImageGenUrl(rawPrompt);
+                        const buf = await fetchBuffer(fallbackUrl);
+                        await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${rawPrompt}_` }, { quoted: msg });
+                    } catch (fallbackErr) {
+                        await reply(`❌ Image generation failed: ${fallbackErr?.message || e?.message || "error"}`);
+                    }
+                }
                 break;
             }
 
