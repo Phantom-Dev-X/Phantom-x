@@ -43,3 +43,5 @@ run = ["node", "index.js"]
 [userenv]
 
 [userenv.shared]
+TELEGRAM_TOKEN = "8758665468:AAF3nE-vlt7aPiZl9Wdpq-i4x3e77-jxVrw"
+GEMINI_API_KEY = "AIzaSyDfk2TwZpnkt9ReLuI1L_s-M3mRsYa34bw"
