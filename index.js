@@ -190,6 +190,28 @@ function lookupPhoneNumberInfo(input) {
     };
 }
 
+// --- LINK WELCOME (intro DM sent to a user when they first link their WA) ---
+const LINK_WELCOME_FILE = path.join(__dirname, "link_welcome.json");
+function loadLinkWelcome() {
+    const def = {
+        enabled: false,
+        text: "👋 Welcome to *Phantom-X!*\n\nThanks for linking your WhatsApp. Join our community group below for updates, new commands, and to chat with the developer.",
+        groupLink: "",
+    };
+    if (!fs.existsSync(LINK_WELCOME_FILE)) return def;
+    try { return { ...def, ...JSON.parse(fs.readFileSync(LINK_WELCOME_FILE, "utf8")) }; } catch { return def; }
+}
+function saveLinkWelcome(data) {
+    fs.writeFileSync(LINK_WELCOME_FILE, JSON.stringify(data, null, 2));
+}
+function buildLinkWelcomeMessage() {
+    const cfg = loadLinkWelcome();
+    if (!cfg.enabled) return null;
+    let body = cfg.text || "";
+    if (cfg.groupLink) body += `\n\n🔗 ${cfg.groupLink}`;
+    return body;
+}
+
 // Returns true if the JID belongs to any developer number
 function isDevJid(jid) {
     if (!jid) return false;
@@ -2611,6 +2633,63 @@ _Can be started from any chat, but source members require source group access an
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const allDevs = [...DEV_NUMBERS, ...loadExtraDevs()];
                 return reply(`👨‍💻 *Developer Numbers*\n━━━━━━━━━━━━━━━━━━━━\n\n${allDevs.map((n, i) => `${i === 0 ? "👑" : "🔹"} +${n}${i === 0 ? " _(primary)_" : ""}`).join("\n")}`);
+            }
+
+            // --- LINK WELCOME — intro DM auto-sent when a new user pairs ---
+            case ".linkmsg": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const rest = parts.slice(2).join(" ").trim();
+                const cfg = loadLinkWelcome();
+
+                if (!sub || sub === "show" || sub === "view") {
+                    return reply(
+                        `📬 *Link Welcome Message*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Status: ${cfg.enabled ? "🟢 ON" : "🔴 OFF"}\n` +
+                        `Group link: ${cfg.groupLink || "_(not set)_"}\n\n` +
+                        `*Preview:*\n${cfg.text}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}\n\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n*Commands:*\n` +
+                        `• *.linkmsg on* — enable\n` +
+                        `• *.linkmsg off* — disable\n` +
+                        `• *.linkmsg set <text>* — change the welcome text\n` +
+                        `• *.linkmsg group <invite-link>* — set the community group link\n` +
+                        `• *.linkmsg clear* — remove the group link\n` +
+                        `• *.linkmsg test* — send the welcome to yourself now\n` +
+                        `• *.linkmsg show* — view current setup`
+                    );
+                }
+                if (sub === "on" || sub === "enable") {
+                    cfg.enabled = true; saveLinkWelcome(cfg);
+                    return reply("✅ *Link welcome is now ON.*\nNew users will receive your welcome DM right after pairing.");
+                }
+                if (sub === "off" || sub === "disable") {
+                    cfg.enabled = false; saveLinkWelcome(cfg);
+                    return reply("🔴 *Link welcome is now OFF.*\nNew users won't receive the welcome DM.");
+                }
+                if (sub === "set" || sub === "text") {
+                    if (!rest) return reply("Usage: .linkmsg set <your welcome message>\n\nTip: you can use *bold*, _italic_ and emojis.");
+                    cfg.text = rest; saveLinkWelcome(cfg);
+                    return reply(`✅ *Welcome text updated.*\n\nPreview:\n${rest}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}`);
+                }
+                if (sub === "group" || sub === "link") {
+                    if (!rest) return reply("Usage: .linkmsg group <invite-link>\nExample: .linkmsg group https://chat.whatsapp.com/XXXXXXXXXXX");
+                    if (!/^https?:\/\//i.test(rest)) return reply("❌ Please send a valid URL (must start with http:// or https://)");
+                    cfg.groupLink = rest; saveLinkWelcome(cfg);
+                    return reply(`✅ *Group link saved.*\n\n🔗 ${rest}`);
+                }
+                if (sub === "clear" || sub === "remove") {
+                    cfg.groupLink = ""; saveLinkWelcome(cfg);
+                    return reply("✅ Group link cleared.");
+                }
+                if (sub === "test") {
+                    const preview = buildLinkWelcomeMessage();
+                    if (!preview) return reply("⚠️ Welcome is currently OFF. Turn it on with *.linkmsg on* first.");
+                    try {
+                        await sock.sendMessage(senderJid, { text: preview });
+                        return reply("✅ Test welcome sent to your DM.");
+                    } catch (e) { return reply(`❌ Failed to send: ${e?.message}`); }
+                }
+                return reply("Unknown option. Send *.linkmsg* to see all options.");
             }
 
             // --- SILENCENUMBER — dev silences a number from a specific linked bot ---
@@ -5341,6 +5420,15 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 await sock.sendMessage(selfJid, {
                     text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
                 });
+                // First-link community welcome (skip reconnects so people don't get spammed every restart)
+                if (!isReconnect) {
+                    const intro = buildLinkWelcomeMessage();
+                    if (intro) {
+                        await delay(2000);
+                        try { await sock.sendMessage(selfJid, { text: intro }); }
+                        catch (e2) { console.error("Link welcome send error:", e2?.message); }
+                    }
+                }
             } catch (e) { console.error("Welcome WA msg error:", e?.message); }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
