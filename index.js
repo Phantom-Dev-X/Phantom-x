@@ -7,6 +7,7 @@ const {
     fetchLatestBaileysVersion,
     getContentType,
     downloadMediaMessage,
+    downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
 } = require("@whiskeysockets/baileys");
@@ -671,6 +672,53 @@ function formatUptime() {
     return `${h}h ${m}m ${sec}s`;
 }
 
+// --- TARGET RESOLVER (reply-or-number for any cmd that needs a target user) ---
+// Returns a JID or null. Accepts: replied message, @mention, or raw phone number.
+function resolveTargetJid(msg, parts) {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    if (ctx?.participant) return ctx.participant;
+    if (Array.isArray(ctx?.mentionedJid) && ctx.mentionedJid.length) return ctx.mentionedJid[0];
+    for (const tok of parts.slice(1)) {
+        const digits = tok.replace(/\D/g, "");
+        if (digits.length >= 7) return `${digits}@s.whatsapp.net`;
+    }
+    return null;
+}
+
+// --- GROUP ADMIN HELPERS ---
+async function getGroupRoles(sock, groupJid) {
+    try {
+        const meta = await sock.groupMetadata(groupJid);
+        const admins = new Set(meta.participants.filter(p => p.admin).map(p => p.id));
+        const botJid = (sock.user?.id || "").split(":")[0].split("@")[0] + "@s.whatsapp.net";
+        const altBotJid = sock.user?.id;
+        return { admins, botIsAdmin: admins.has(botJid) || admins.has(altBotJid), meta };
+    } catch { return { admins: new Set(), botIsAdmin: false, meta: null }; }
+}
+
+// --- AFK store ---
+function loadAfk() { try { return JSON.parse(fs.readFileSync("afk.json", "utf8")); } catch { return {}; } }
+function saveAfk(d) { try { fs.writeFileSync("afk.json", JSON.stringify(d, null, 2)); } catch {} }
+function setAfk(jid, reason) { const d = loadAfk(); d[jid] = { reason: reason || "AFK", since: Date.now() }; saveAfk(d); }
+function clearAfk(jid) { const d = loadAfk(); delete d[jid]; saveAfk(d); }
+function getAfk(jid) { return loadAfk()[jid] || null; }
+
+// --- Profile stats store ---
+function loadStats() { try { return JSON.parse(fs.readFileSync("profile_stats.json", "utf8")); } catch { return {}; } }
+function saveStats(d) { try { fs.writeFileSync("profile_stats.json", JSON.stringify(d, null, 2)); } catch {} }
+function bumpStat(groupJid, userJid) {
+    const d = loadStats();
+    if (!d[groupJid]) d[groupJid] = {};
+    d[groupJid][userJid] = (d[groupJid][userJid] || 0) + 1;
+    saveStats(d);
+}
+
+// --- COMMAND RECEIPT REACTION ---
+async function reactToCmd(sock, msg, status = "received") {
+    const map = { received: "⚡", ok: "✅", fail: "❌", working: "⏳" };
+    try { await sock.sendMessage(msg.key.remoteJid, { react: { text: map[status] || "⚡", key: msg.key } }); } catch (_) {}
+}
+
 function fetchBuffer(url, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         if (redirectCount > 5) return reject(new Error("Too many redirects"));
@@ -692,7 +740,26 @@ function fetchBuffer(url, redirectCount = 0) {
 }
 
 function containsLink(text) {
-    return /https?:\/\/|wa\.me\/|chat\.whatsapp\.com\/|bit\.ly\/|t\.me\//i.test(text);
+    if (!text) return false;
+    // Catch http(s)://, www., wa.me, t.me, bit.ly, discord, common shorteners,
+    // plus bare domains like youtube.com, instagram.com, example.org, etc.
+    const patterns = [
+        /https?:\/\/\S+/i,
+        /\bwww\.[\w-]+\.[a-z]{2,}/i,
+        /\bwa\.me\/\S+/i,
+        /\bchat\.whatsapp\.com\/\S+/i,
+        /\bt\.me\/\S+/i,
+        /\bdiscord\.(gg|com)\/\S+/i,
+        /\b(?:bit\.ly|tinyurl\.com|goo\.gl|cutt\.ly|ow\.ly|is\.gd|shorturl\.at|rb\.gy|t\.co)\/\S+/i,
+        /\b[\w-]+\.(?:com|net|org|io|co|me|info|tv|gg|app|dev|xyz|site|store|online|live|link|page|cc|us|uk|ng|ke|za|in)\b\S*/i,
+    ];
+    return patterns.some(re => re.test(text));
+}
+
+function containsMassMention(msg) {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    const m = Array.isArray(ctx?.mentionedJid) ? ctx.mentionedJid : [];
+    return m.length >= 5; // 5+ mentions in one message = mass mention
 }
 
 // --- FETCH JSON (for APIs) ---
@@ -1330,6 +1397,63 @@ function getMenuSections() {
     ];
 }
 
+// --- T12/T13: section banners + section list helpers ---
+function loadSectionBanners() { try { return JSON.parse(fs.readFileSync("menu_banners.json", "utf8")); } catch { return {}; } }
+function saveSectionBanners(d) { try { fs.writeFileSync("menu_banners.json", JSON.stringify(d, null, 2)); } catch {} }
+function getSectionBanner(idx) { return loadSectionBanners()[String(idx)] || null; }
+function setSectionBanner(idx, b64) { const d = loadSectionBanners(); d[String(idx)] = b64; saveSectionBanners(d); }
+function delSectionBanner(idx) { const d = loadSectionBanners(); delete d[String(idx)]; saveSectionBanners(d); }
+
+// Section indices that are dev-only. By title match.
+const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "ANDROID BUGS", "iOS BUGS", "FREEZE & DELAY", "GROUP BUGS", "EXTRA BUG TOOLS", "TEXT & STYLE BUGS"];
+function isDevSection(title) { return DEV_ONLY_SECTIONS.includes(title); }
+
+function getVisibleSections(isDev) {
+    const all = getMenuSections();
+    return isDev ? all : all.filter(s => !isDevSection(s.title));
+}
+
+function buildSectionPicker(isDev, styleNum) {
+    const sections = getVisibleSections(isDev);
+    const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const isStyle2 = Number(styleNum) === 2;
+    if (isStyle2) {
+        // Boxed/diamond style
+        let out = `╔══════════════════════╗\n`;
+        out += `║  💎  P H A N T O M - X  💎  ║\n`;
+        out += `╚══════════════════════╝\n`;
+        out += `🕓  ${time}\n`;
+        out += `📚  Pick a section: *.menu <number>*\n`;
+        out += `━━━━━━━━━━━━━━━━━━━\n`;
+        sections.forEach((s, i) => { out += `  *${String(i + 1).padStart(2, "0")}*  ${s.emoji}  *${s.title}*\n`; });
+        out += `━━━━━━━━━━━━━━━━━━━\n`;
+        out += `_Tap any: e.g._  *.menu 3*\n`;
+        out += `_Full menu:_  *.menu all*  •  _Style:_  *.menu style 1/2*`;
+        return out;
+    }
+    // Style 1 — sleek minimal
+    let out = `┏━━━━━━━━━━━━━━━━━━━┓\n`;
+    out += `   👻  *PHANTOM-X MENU*  👻\n`;
+    out += `┗━━━━━━━━━━━━━━━━━━━┛\n`;
+    out += `🕓 ${time}\n\n`;
+    out += `📂 *Sections* — reply *.menu <num>*\n`;
+    out += `─────────────────────\n`;
+    sections.forEach((s, i) => { out += `▸ *${i + 1}.* ${s.emoji} ${s.title}\n`; });
+    out += `─────────────────────\n`;
+    out += `_e.g._ *.menu 5*  •  *.menu all*  •  *.menu style 2*`;
+    return out;
+}
+
+function buildOneSectionText(sec, idx, styleNum) {
+    const isStyle2 = Number(styleNum) === 2;
+    let out = isStyle2
+        ? `╔══════════════════════╗\n║  ${sec.emoji}  *${sec.title}*\n╚══════════════════════╝\n`
+        : `┏━━━━━━━━━━━━━━━━━━━┓\n   ${sec.emoji}  *${sec.title}*\n┗━━━━━━━━━━━━━━━━━━━┛\n`;
+    sec.items.forEach(it => { out += `• ${it[0]}\n`; });
+    out += `\n_Section ${idx + 1}_  •  _.menu = back to picker_`;
+    return out;
+}
+
 function buildGroupMenuList() {
     return `👥 *GROUP MENU LIST*
 ━━━━━━━━━━━━━━━━━━━━
@@ -1812,22 +1936,19 @@ async function handleMessage(sock, msg) {
         // --- SILENCE CHECK — dev can mute a number from any specific bot ---
         if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
 
-        // --- PREMIUM CHECK — ALL commands restricted unless developer grants access ---
-        // .menu/.phantom are allowed through so non-dev users see the restricted menu message
+        // --- PREMIUM CHECK — only blocks if dev has explicitly .lock'd a command ---
+        // Otherwise everyone gets every command. Premium system stays available via .lock/.unleash.
         if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
             const cmdWord = rawBody.trim().split(" ")[0].toLowerCase();
-            const MENU_PASS = [".menu", ".phantom"];
-            if (!MENU_PASS.includes(cmdWord) && !hasPremiumAccess(senderJid, cmdWord)) {
+            const premData = loadPremium();
+            const lockedCmds = Object.keys(premData.unlocked_cmds || {})
+                .concat(Object.keys(premData.locked_for || {}));
+            const isCmdGated = lockedCmds.includes(cmdWord);
+            if (isCmdGated && !hasPremiumAccess(senderJid, cmdWord)) {
                 await sock.sendMessage(from, {
                     text:
-                        `✨ *Premium Access Required*\n` +
-                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `This command is restricted to *premium users* only.\n\n` +
-                        `To get access, contact the developer directly:\n` +
-                        `┌─────────────────────┐\n` +
-                        `│  📲  *wa.me/${DEV_NUMBER}*\n` +
-                        `└─────────────────────┘\n\n` +
-                        `_Message the developer to purchase premium access._`
+                        `🔒 *${cmdWord}* is currently restricted.\n` +
+                        `Please contact the developer for access.`
                 }, { quoted: msg });
                 return;
             }
@@ -1923,35 +2044,32 @@ async function handleMessage(sock, msg) {
 
         // --- GROUP PROTECTION (runs on every group message) ---
         if (isGroup) {
-            // Anti-link
-            if (getGroupSetting(from, "antilink") && rawBody && containsLink(rawBody)) {
-                try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                const alWarnCount = addWarn(from, senderJid);
-                if (alWarnCount >= 3) {
-                    resetWarns(from, senderJid);
-                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
-                    await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antilink warnings!`, mentions: [senderJid] });
-                } else {
-                    await sock.sendMessage(from, {
-                        text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
-                        mentions: [senderJid],
-                    });
-                }
-                return;
-            }
+            const anyAntiOn =
+                getGroupSetting(from, "antilink") ||
+                getGroupSetting(from, "antispam") ||
+                getGroupSetting(from, "antibot") ||
+                getGroupSetting(from, "antimention");
 
-            // Anti-spam
-            if (getGroupSetting(from, "antispam") && rawBody) {
-                if (isSpamming(senderJid)) {
+            let roles = { admins: new Set(), botIsAdmin: false };
+            if (anyAntiOn) roles = await getGroupRoles(sock, from);
+            const senderIsAdmin = roles.admins.has(senderJid);
+            const skipForSender = msg.key.fromMe || senderIsAdmin || isDevJid(senderJid);
+
+            // Anti-link
+            if (getGroupSetting(from, "antilink") && rawBody && containsLink(rawBody) && !skipForSender) {
+                if (!roles.botIsAdmin) {
+                    // Bot can't moderate — silently log and skip to avoid useless warning spam
+                    console.log(`[antilink] cannot enforce in ${from} — bot is not admin`);
+                } else {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                    const asWarnCount = addWarn(from, senderJid);
-                    if (asWarnCount >= 3) {
+                    const alWarnCount = addWarn(from, senderJid);
+                    if (alWarnCount >= 3) {
                         resetWarns(from, senderJid);
                         try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
-                        await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antispam warnings!`, mentions: [senderJid] });
+                        await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antilink warnings!`, mentions: [senderJid] });
                     } else {
                         await sock.sendMessage(from, {
-                            text: `🚫 @${senderJid.split("@")[0]}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
+                            text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
                             mentions: [senderJid],
                         });
                     }
@@ -1959,14 +2077,103 @@ async function handleMessage(sock, msg) {
                 }
             }
 
-            // Anti-bot (kick any JID that looks like a bot: @lid or contains "bot")
-            if (getGroupSetting(from, "antibot") && !msg.key.fromMe) {
-                const isLikelyBot = senderJid.endsWith("@lid") || senderJid.toLowerCase().includes("bot");
-                if (isLikelyBot) {
-                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
-                    await sock.sendMessage(from, { text: `🤖 @${senderJid.split("@")[0]} was removed — anti-bot protection active.`, mentions: [senderJid] });
+            // Anti-spam
+            if (getGroupSetting(from, "antispam") && rawBody && !skipForSender) {
+                if (isSpamming(senderJid)) {
+                    if (!roles.botIsAdmin) {
+                        console.log(`[antispam] cannot enforce in ${from} — bot is not admin`);
+                    } else {
+                        try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                        const asWarnCount = addWarn(from, senderJid);
+                        if (asWarnCount >= 3) {
+                            resetWarns(from, senderJid);
+                            try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                            await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antispam warnings!`, mentions: [senderJid] });
+                        } else {
+                            await sock.sendMessage(from, {
+                                text: `🚫 @${senderJid.split("@")[0]}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
+                                mentions: [senderJid],
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Anti-mention (5+ mentions in one message = warn / kick)
+            if (getGroupSetting(from, "antimention") && containsMassMention(msg) && !skipForSender) {
+                if (!roles.botIsAdmin) {
+                    console.log(`[antimention] cannot enforce in ${from} — bot is not admin`);
+                } else {
+                    try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                    const amWarnCount = addWarn(from, senderJid);
+                    if (amWarnCount >= 3) {
+                        resetWarns(from, senderJid);
+                        try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                        await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antimention warnings!`, mentions: [senderJid] });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: `📢 @${senderJid.split("@")[0]}, mass-mentions are not allowed!\n⚠️ Warning *${amWarnCount}/3* — 3 = kick.`,
+                            mentions: [senderJid],
+                        });
+                    }
                     return;
                 }
+            }
+
+            // Anti-bot — only kicks if the participant is clearly an automated newsletter / channel JID,
+            // never on @lid (which is now used for many normal users).
+            if (getGroupSetting(from, "antibot") && !msg.key.fromMe && !senderIsAdmin) {
+                const looksAutomated = senderJid.endsWith("@newsletter") || senderJid.endsWith("@broadcast");
+                if (looksAutomated && roles.botIsAdmin) {
+                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, { text: `🤖 Automated account removed — anti-bot protection active.` });
+                    return;
+                }
+            }
+
+            // T11: bump message-count stats per group (non-bot messages with text)
+            if (!msg.key.fromMe && rawBody) bumpStat(from, senderJid);
+
+            // T10: AFK auto-clear when AFK user talks
+            if (!msg.key.fromMe && getAfk(senderJid) && rawBody && !rawBody.toLowerCase().startsWith(".afk")) {
+                const a = getAfk(senderJid);
+                clearAfk(senderJid);
+                const dur = Math.round((Date.now() - a.since) / 60000);
+                await sock.sendMessage(from, { text: `👋 Welcome back @${senderJid.split("@")[0]} — you were AFK for ${dur} min.`, mentions: [senderJid] }, { quoted: msg });
+            }
+
+            // T10: notify if someone mentioned an AFK user
+            if (!msg.key.fromMe) {
+                const ctx = msg.message?.extendedTextMessage?.contextInfo;
+                const mentioned = (Array.isArray(ctx?.mentionedJid) ? ctx.mentionedJid : [])
+                    .concat(ctx?.participant ? [ctx.participant] : []);
+                const seen = new Set();
+                for (const m of mentioned) {
+                    if (seen.has(m)) continue; seen.add(m);
+                    const a = getAfk(m);
+                    if (a) {
+                        const dur = Math.round((Date.now() - a.since) / 60000);
+                        await sock.sendMessage(from, { text: `💤 @${m.split("@")[0]} is AFK (${dur}m ago)\nReason: ${a.reason}`, mentions: [m] }, { quoted: msg });
+                    }
+                }
+            }
+
+            // Slowmode enforcement
+            const slowSecs = getGroupSetting(from, "slowmode_seconds") || 0;
+            if (slowSecs > 0 && !msg.key.fromMe && rawBody && !isDevJid(senderJid)) {
+                if (!global.__slowMap) global.__slowMap = {};
+                const key = `${from}|${senderJid}`;
+                const last = global.__slowMap[key] || 0;
+                const now = Date.now();
+                if (now - last < slowSecs * 1000) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (r2.botIsAdmin && !r2.admins.has(senderJid)) {
+                        try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                        return;
+                    }
+                }
+                global.__slowMap[key] = now;
             }
 
             // Auto-reply keywords + "phantom" trigger (for incoming group messages)
@@ -2049,36 +2256,91 @@ async function handleMessage(sock, msg) {
             cmd = reParts[0].toLowerCase();
         }
 
+        // T08: command receipt reaction (fires for every recognized cmd start)
+        if (cmd && cmd.startsWith(".")) reactToCmd(sock, msg, "received");
+
         switch (cmd) {
             case ".menu":
             case ".phantom": {
                 const isDev = msg.key.fromMe || isDevJid(senderJid);
-                let menuText;
-                if (isDev) {
-                    menuText = buildMenuText(currentMode, getMenuTheme(botJid));
+                const arg = (parts[1] || "").toLowerCase();
+                const arg2 = (parts[2] || "").toLowerCase();
+
+                // .menu style 1/2  → set per-user style
+                if (arg === "style" && (arg2 === "1" || arg2 === "2")) {
+                    if (!global.__menuStyle) global.__menuStyle = {};
+                    global.__menuStyle[senderJid] = Number(arg2);
+                    return reply(`🎨 Menu style set to *${arg2}*. Send *.menu* to see it.`);
+                }
+
+                const styleNum = (global.__menuStyle && global.__menuStyle[senderJid]) || 1;
+
+                // .menu all → original full menu
+                if (arg === "all") {
+                    const fullText = buildMenuText(currentMode, getMenuTheme(botJid));
                     if (fs.existsSync(MENU_BANNER_FILE)) {
                         try {
                             const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
-                            await sock.sendMessage(from, { image: bannerBuf, caption: menuText }, { quoted: msg });
-                        } catch (_) {
-                            await sock.sendMessage(from, { text: menuText }, { quoted: msg });
-                        }
-                    } else {
-                        await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                            return await sock.sendMessage(from, { image: bannerBuf, caption: fullText }, { quoted: msg });
+                        } catch {}
                     }
-                } else {
-                    menuText =
-                        `👻 *Phantom X Bot*\n` +
-                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `✨ *Commands on this bot are for premium users only.*\n\n` +
-                        `To get access, DM the developer:\n` +
-                        `┌─────────────────────┐\n` +
-                        `│  📲  *wa.me/${DEV_NUMBER}*\n` +
-                        `└─────────────────────┘\n\n` +
-                        `_Send a message to the developer to purchase premium access._\n\n` +
-                        `_💎 Powered by Phantom X_`;
-                    await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                    return await sock.sendMessage(from, { text: fullText }, { quoted: msg });
                 }
+
+                // .menu <number> → show one section
+                const sections = getVisibleSections(isDev);
+                const sectionNum = parseInt(arg, 10);
+                if (sectionNum && sectionNum >= 1 && sectionNum <= sections.length) {
+                    const sec = sections[sectionNum - 1];
+                    const allSections = getMenuSections();
+                    const realIdx = allSections.findIndex(s => s.title === sec.title);
+                    const text = buildOneSectionText(sec, sectionNum - 1, styleNum);
+                    const banner = getSectionBanner(realIdx);
+                    if (banner) {
+                        try {
+                            const buf = Buffer.from(banner, "base64");
+                            return await sock.sendMessage(from, { image: buf, caption: text }, { quoted: msg });
+                        } catch {}
+                    }
+                    return await sock.sendMessage(from, { text }, { quoted: msg });
+                }
+
+                // default → section picker
+                const pickerText = buildSectionPicker(isDev, styleNum);
+                if (fs.existsSync(MENU_BANNER_FILE)) {
+                    try {
+                        const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
+                        return await sock.sendMessage(from, { image: bannerBuf, caption: pickerText }, { quoted: msg });
+                    } catch {}
+                }
+                await sock.sendMessage(from, { text: pickerText }, { quoted: msg });
+                break;
+            }
+
+            // .setsectionpic <num>  (reply to image) — set per-section banner
+            case ".setsectionpic": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                const idx = parseInt(parts[1], 10);
+                const allSections = getMenuSections();
+                if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .setsectionpic <1-${allSections.length}>  (reply to an image)`);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const qtype = quoted ? getContentType(quoted) : null;
+                if (!quoted || qtype !== "imageMessage") return reply("Reply to an image with this command.");
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    setSectionBanner(idx - 1, buf.toString("base64"));
+                    await reply(`✅ Banner set for section *${idx}* — ${allSections[idx - 1].title}`);
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+            case ".delsectionpic": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                const idx = parseInt(parts[1], 10);
+                const allSections = getMenuSections();
+                if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .delsectionpic <1-${allSections.length}>`);
+                delSectionBanner(idx - 1);
+                await reply(`🗑️ Section banner cleared for *${idx}* — ${allSections[idx - 1].title}`);
                 break;
             }
 
@@ -2819,27 +3081,48 @@ _Can be started from any chat, but source members require source group access an
             // --- PROTECTION TOGGLES ---
             case ".antilink": {
                 if (!isGroup) return reply("This command only works in groups.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
                 const val = parts[1]?.toLowerCase();
                 if (!["on", "off"].includes(val)) return reply("Usage: .antilink on/off");
                 setGroupSetting(from, "antilink", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't actually delete or kick. Please make me admin.");
                 await reply(`🔗 Anti-link is now *${val.toUpperCase()}* in this group.`);
                 break;
             }
 
             case ".antispam": {
                 if (!isGroup) return reply("This command only works in groups.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
                 const val = parts[1]?.toLowerCase();
                 if (!["on", "off"].includes(val)) return reply("Usage: .antispam on/off");
                 setGroupSetting(from, "antispam", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so enforcement won't fire. Please make me admin.");
                 await reply(`🚫 Anti-spam is now *${val.toUpperCase()}* in this group.`);
+                break;
+            }
+
+            case ".antimention": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return reply("Usage: .antimention on/off\n(Triggers on 5+ mentions in one message; 3-strike → kick.)");
+                setGroupSetting(from, "antimention", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so enforcement won't fire.");
+                await reply(`📢 Anti-mention is now *${val.toUpperCase()}* in this group.`);
                 break;
             }
 
             case ".antidemote": {
                 if (!isGroup) return reply("This command only works in groups.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
                 const val = parts[1]?.toLowerCase();
                 if (!["on", "off"].includes(val)) return reply("Usage: .antidemote on/off");
                 setGroupSetting(from, "antidemote", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't auto-repromote.");
                 await reply(`🛡️ Anti-demote is now *${val.toUpperCase()}* in this group.`);
                 break;
             }
@@ -3699,6 +3982,232 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
+            // --- T09 utilities ---
+            case ".uptime": {
+                const mu = process.memoryUsage();
+                await reply(
+                    `⏱️ *Bot Uptime*\n` +
+                    `━━━━━━━━━━━━━━\n` +
+                    `🕒 ${formatUptime()}\n` +
+                    `🧠 RSS: ${(mu.rss / 1024 / 1024).toFixed(1)} MB\n` +
+                    `📦 Heap: ${(mu.heapUsed / 1024 / 1024).toFixed(1)} / ${(mu.heapTotal / 1024 / 1024).toFixed(1)} MB\n` +
+                    `🟢 PID: ${process.pid}`
+                );
+                break;
+            }
+
+            case ".linkedlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                try {
+                    const sessions = JSON.parse(fs.readFileSync("sessions.json", "utf8"));
+                    const list = Object.keys(sessions);
+                    if (!list.length) return reply("📭 No linked numbers right now.");
+                    let out = `🔗 *Linked Numbers (${list.length})*\n━━━━━━━━━━━━━━\n`;
+                    list.forEach((j, i) => { out += `${i + 1}. ${j.split("@")[0]}\n`; });
+                    await reply(out);
+                } catch { await reply("📭 No sessions file yet."); }
+                break;
+            }
+
+            case ".slowmode": {
+                if (!isGroup) return reply("Groups only.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "off") { setGroupSetting(from, "slowmode_seconds", 0); return reply("⏱️ Slowmode *OFF*."); }
+                const secs = parseInt(sub, 10);
+                if (!secs || secs < 1 || secs > 3600) return reply("Usage: .slowmode <seconds>  |  .slowmode off\nExample: .slowmode 15");
+                setGroupSetting(from, "slowmode_seconds", secs);
+                await reply(`⏱️ Slowmode set to *${secs}s* per user.`);
+                break;
+            }
+
+            case ".warnings": {
+                if (!isGroup) return reply("Groups only.");
+                const target = resolveTargetJid(msg, parts) || senderJid;
+                let warns = {};
+                try { warns = JSON.parse(fs.readFileSync("warns.json", "utf8")); } catch {}
+                const count = warns?.[from]?.[target] || 0;
+                await reply(`⚠️ @${target.split("@")[0]} has *${count}/3* warnings.`, { mentions: [target] });
+                break;
+            }
+
+            case ".shorten": {
+                const url = parts[1];
+                if (!url || !/^https?:\/\//i.test(url)) return reply("Usage: .shorten <url>");
+                try {
+                    const short = await new Promise((res, rej) => {
+                        https.get(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(url)}`,
+                            r => { let d = ""; r.on("data", c => d += c); r.on("end", () => res(d.trim())); }
+                        ).on("error", rej);
+                    });
+                    if (short && short.startsWith("http")) await reply(`🔗 *Shortened:*\n${short}`);
+                    else await reply(`❌ Could not shorten. (${short})`);
+                } catch (e) { await reply("❌ Shorten service unreachable."); }
+                break;
+            }
+
+            case ".expand": {
+                const url = parts[1];
+                if (!url || !/^https?:\/\//i.test(url)) return reply("Usage: .expand <short-url>");
+                try {
+                    const final = await new Promise((res, rej) => {
+                        const u = new URL(url);
+                        const mod = u.protocol === "https:" ? https : http;
+                        const req = mod.request({ method: "HEAD", host: u.hostname, path: u.pathname + u.search }, r => {
+                            res(r.headers.location || url);
+                        });
+                        req.on("error", rej); req.end();
+                    });
+                    await reply(`🔍 *Resolves to:*\n${final}`);
+                } catch { await reply("❌ Could not resolve."); }
+                break;
+            }
+
+            case ".qrtext": {
+                const text = parts.slice(1).join(" ");
+                if (!text) return reply("Usage: .qrtext <text or url>");
+                try {
+                    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(text)}`;
+                    const buf = await fetchBuffer(qrUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `📲 *QR for:* ${text}` }, { quoted: msg });
+                } catch { await reply("❌ QR generator unreachable."); }
+                break;
+            }
+
+            case ".scanqr": {
+                const ctx = msg.message?.extendedTextMessage?.contextInfo;
+                const quoted = ctx?.quotedMessage;
+                const imgMsg = quoted?.imageMessage || msg.message?.imageMessage;
+                if (!imgMsg) return reply("Reply to an image of a QR code with .scanqr");
+                try {
+                    const stream = await downloadContentFromMessage(imgMsg, "image");
+                    let buf = Buffer.from([]);
+                    for await (const ch of stream) buf = Buffer.concat([buf, ch]);
+                    const tmp = `/tmp/qr_${Date.now()}.jpg`;
+                    fs.writeFileSync(tmp, buf);
+                    const result = await new Promise((res, rej) => {
+                        const form = `--bnd\r\nContent-Disposition: form-data; name="file"; filename="qr.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`;
+                        const tail = `\r\n--bnd--\r\n`;
+                        const body = Buffer.concat([Buffer.from(form), buf, Buffer.from(tail)]);
+                        const req = https.request({
+                            host: "api.qrserver.com", path: "/v1/read-qr-code/", method: "POST",
+                            headers: { "Content-Type": "multipart/form-data; boundary=bnd", "Content-Length": body.length }
+                        }, r => { let d = ""; r.on("data", c => d += c); r.on("end", () => res(d)); });
+                        req.on("error", rej); req.write(body); req.end();
+                    });
+                    fs.unlinkSync(tmp);
+                    const parsed = JSON.parse(result);
+                    const data = parsed?.[0]?.symbol?.[0]?.data;
+                    if (data) await reply(`📲 *QR contents:*\n${data}`);
+                    else await reply(`❌ Could not read QR (${parsed?.[0]?.symbol?.[0]?.error || "unknown"}).`);
+                } catch (e) { await reply(`❌ Scan failed: ${e.message}`); }
+                break;
+            }
+
+            case ".getvcf": {
+                if (!isGroup) return reply("Groups only.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                try {
+                    const meta = r.meta || await sock.groupMetadata(from);
+                    let vcf = "";
+                    meta.participants.forEach((p, i) => {
+                        const num = p.id.split("@")[0];
+                        vcf += `BEGIN:VCARD\nVERSION:3.0\nFN:${meta.subject} ${i + 1}\nTEL;type=CELL;type=VOICE;waid=${num}:+${num}\nEND:VCARD\n`;
+                    });
+                    const path = `/tmp/${meta.subject.replace(/\W+/g, "_")}.vcf`;
+                    fs.writeFileSync(path, vcf);
+                    await sock.sendMessage(from, {
+                        document: fs.readFileSync(path),
+                        mimetype: "text/x-vcard",
+                        fileName: `${meta.subject}.vcf`
+                    }, { quoted: msg });
+                    fs.unlinkSync(path);
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+
+            // --- T10: AFK ---
+            case ".afk": {
+                const reason = parts.slice(1).join(" ").trim() || "AFK";
+                setAfk(senderJid, reason);
+                await reply(`💤 @${senderJid.split("@")[0]} is now AFK.\nReason: ${reason}`, { mentions: [senderJid] });
+                break;
+            }
+            case ".unafk":
+            case ".back": {
+                if (!getAfk(senderJid)) return reply("You're not marked AFK.");
+                clearAfk(senderJid);
+                await reply(`👋 Welcome back @${senderJid.split("@")[0]}!`, { mentions: [senderJid] });
+                break;
+            }
+
+            // --- T11: profile / rank ---
+            case ".profile": {
+                if (!isGroup) return reply("Groups only.");
+                const target = resolveTargetJid(msg, parts) || senderJid;
+                const stats = loadStats()?.[from] || {};
+                const myCount = stats[target] || 0;
+                const sorted = Object.entries(stats).sort((a, b) => b[1] - a[1]);
+                const rankIdx = sorted.findIndex(([j]) => j === target);
+                const rank = rankIdx >= 0 ? rankIdx + 1 : "—";
+                const total = sorted.length;
+                const a = getAfk(target);
+                let pp = null;
+                try { pp = await sock.profilePictureUrl(target, "image"); } catch {}
+                const txt =
+                    `👤 *Profile*\n━━━━━━━━━━━━\n` +
+                    `Name: @${target.split("@")[0]}\n` +
+                    `Messages here: *${myCount}*\n` +
+                    `Rank in group: *${rank}/${total}*\n` +
+                    `Status: ${a ? `💤 AFK — ${a.reason}` : "🟢 Active"}`;
+                if (pp) {
+                    try {
+                        const buf = await fetchBuffer(pp);
+                        return await sock.sendMessage(from, { image: buf, caption: txt, mentions: [target] }, { quoted: msg });
+                    } catch {}
+                }
+                await reply(txt, { mentions: [target] });
+                break;
+            }
+
+            case ".rank":
+            case ".leaderboard": {
+                if (!isGroup) return reply("Groups only.");
+                const stats = loadStats()?.[from] || {};
+                const sorted = Object.entries(stats).sort((a, b) => b[1] - a[1]).slice(0, 10);
+                if (!sorted.length) return reply("📊 No stats yet for this group.");
+                let out = `🏆 *Top 10 Active Members*\n━━━━━━━━━━━━━━\n`;
+                const mentions = [];
+                sorted.forEach(([j, c], i) => {
+                    out += `${i + 1}. @${j.split("@")[0]} — ${c} msgs\n`;
+                    mentions.push(j);
+                });
+                await reply(out, { mentions });
+                break;
+            }
+
+            case ".geolocate": {
+                const ip = parts[1];
+                if (!ip) return reply("Usage: .geolocate <ip-or-domain>");
+                try {
+                    const data = await fetchJSON(`https://ipwho.is/${encodeURIComponent(ip)}`);
+                    if (!data.success) return reply(`❌ ${data.message || "Lookup failed"}`);
+                    await reply(
+                        `🌍 *Geolocation*\n━━━━━━━━━━\n` +
+                        `IP: ${data.ip}\n` +
+                        `Country: ${data.country} ${data.country_code}\n` +
+                        `Region: ${data.region}\n` +
+                        `City: ${data.city}\n` +
+                        `ISP: ${data.connection?.isp || "?"}\n` +
+                        `Lat/Lng: ${data.latitude}, ${data.longitude}\n` +
+                        `Timezone: ${data.timezone?.id || "?"}`
+                    );
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+
             // --- CALCULATOR ---
             case ".calc": {
                 const expr = parts.slice(1).join("").replace(/[^0-9+\-*/.%()\s]/g, "");
@@ -4231,9 +4740,14 @@ _Can be started from any chat, but source members require source group access an
             // --- ANTIBOT ---
             case ".antibot": {
                 if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
                 const abSub = parts[1]?.toLowerCase();
-                if (abSub === "on") { setGroupSetting(from, "antibot", true); return reply("✅ Anti-bot *ON* — Bot accounts will be auto-kicked."); }
+                if (abSub === "on") {
+                    setGroupSetting(from, "antibot", true);
+                    if (!r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't actually remove anyone.");
+                    return reply("✅ Anti-bot *ON* — automated accounts (newsletters/broadcasts) will be removed.");
+                }
                 if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply("✅ Anti-bot *OFF*."); }
                 return reply(`Usage: .antibot on/off\nCurrent: *${getGroupSetting(from, "antibot") ? "ON" : "OFF"}*`);
             }
