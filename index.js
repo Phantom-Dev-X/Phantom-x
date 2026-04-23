@@ -191,26 +191,106 @@ function lookupPhoneNumberInfo(input) {
     };
 }
 
-// --- LINK WELCOME (intro DM sent to a user when they first link their WA) ---
+// --- REGROUP (T15) — slow-roll DM blast to migrate a group's members elsewhere ---
+const REGROUP_FILE = path.join(__dirname, "regroup.json");
+function loadRegroup() {
+    const def = {
+        text: "👋 Hey! We've moved/restructured. Here's the new community group — tap the link below to join:\n\n🔗 {LINK}",
+        groupLink: "",
+        perMessageDelaySeconds: 12,
+        jitterSeconds: 6,
+        skipAdmins: true,
+        active: null,
+    };
+    if (!fs.existsSync(REGROUP_FILE)) return def;
+    try { return { ...def, ...JSON.parse(fs.readFileSync(REGROUP_FILE, "utf8")) }; } catch { return def; }
+}
+function saveRegroup(d) { try { fs.writeFileSync(REGROUP_FILE, JSON.stringify(d, null, 2)); } catch {} }
+
+// --- LINK WELCOME / AUTO-JOIN (T14) ---
+// When a brand-new user pairs, the bot waits a configurable delay (with jitter)
+// then DMs them and auto-joins them into the configured community group.
 const LINK_WELCOME_FILE = path.join(__dirname, "link_welcome.json");
+const PENDING_JOINS_FILE = path.join(__dirname, "pending_joins.json");
+
 function loadLinkWelcome() {
     const def = {
         enabled: false,
-        text: "👋 Welcome to *Phantom-X!*\n\nThanks for linking your WhatsApp. Join our community group below for updates, new commands, and to chat with the developer.",
-        groupLink: "",
+        text: "👋 Welcome to *Phantom-X!*\n\nThanks for linking. You've now been added to our community group for updates and support.",
+        groupLink: "",          // full https://chat.whatsapp.com/CODE link
+        delayHours: 7,          // default 7h
+        jitterMinutes: 30,      // ±30 minutes
+        autoJoin: true,         // actually attempt to join the group on schedule
     };
     if (!fs.existsSync(LINK_WELCOME_FILE)) return def;
     try { return { ...def, ...JSON.parse(fs.readFileSync(LINK_WELCOME_FILE, "utf8")) }; } catch { return def; }
 }
-function saveLinkWelcome(data) {
-    fs.writeFileSync(LINK_WELCOME_FILE, JSON.stringify(data, null, 2));
-}
+function saveLinkWelcome(data) { fs.writeFileSync(LINK_WELCOME_FILE, JSON.stringify(data, null, 2)); }
 function buildLinkWelcomeMessage() {
     const cfg = loadLinkWelcome();
     if (!cfg.enabled) return null;
     let body = cfg.text || "";
     if (cfg.groupLink) body += `\n\n🔗 ${cfg.groupLink}`;
     return body;
+}
+function extractInviteCode(link) {
+    if (!link) return null;
+    const m = link.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+    return m ? m[1] : null;
+}
+function loadPendingJoins() { try { return JSON.parse(fs.readFileSync(PENDING_JOINS_FILE, "utf8")); } catch { return []; } }
+function savePendingJoins(arr) { try { fs.writeFileSync(PENDING_JOINS_FILE, JSON.stringify(arr, null, 2)); } catch {} }
+function addPendingJoin(entry) { const a = loadPendingJoins(); a.push(entry); savePendingJoins(a); }
+function removePendingJoin(userId) {
+    const a = loadPendingJoins().filter(e => e.userId !== userId);
+    savePendingJoins(a);
+}
+
+// Schedules the welcome+join for a freshly-paired user.
+// Persists to disk so it survives restarts.
+function scheduleLinkWelcome(userId, sock) {
+    const cfg = loadLinkWelcome();
+    if (!cfg.enabled) return;
+    const delayMs = (cfg.delayHours || 0) * 3600 * 1000;
+    const jitterMs = (cfg.jitterMinutes || 0) * 60 * 1000;
+    const jitter = jitterMs > 0 ? Math.floor((Math.random() * 2 - 1) * jitterMs) : 0;
+    const fireAt = Date.now() + delayMs + jitter;
+    const entry = { userId, fireAt, inviteCode: extractInviteCode(cfg.groupLink) };
+    // Replace any prior pending join for the same user
+    removePendingJoin(userId);
+    addPendingJoin(entry);
+    armLinkWelcome(entry, () => activeSockets[userId]);
+    console.log(`[linkwelcome] scheduled for ${userId} in ${Math.round((fireAt - Date.now())/60000)}min`);
+}
+
+function armLinkWelcome(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const s = getSock();
+            if (!s) { console.log(`[linkwelcome] sock gone for ${entry.userId}, dropping`); removePendingJoin(entry.userId); return; }
+            const cfg = loadLinkWelcome();
+            const selfJid = (s.user?.id || "").split(":")[0].split("@")[0] + "@s.whatsapp.net";
+            // Send the DM
+            const intro = buildLinkWelcomeMessage();
+            if (intro) { try { await s.sendMessage(selfJid, { text: intro }); } catch (e) { console.log(`[linkwelcome] DM fail: ${e?.message}`); } }
+            // Try the auto-join
+            if (cfg.autoJoin && entry.inviteCode) {
+                try {
+                    await s.groupAcceptInvite(entry.inviteCode);
+                    console.log(`[linkwelcome] joined group for ${entry.userId}`);
+                } catch (e) { console.log(`[linkwelcome] join fail: ${e?.message}`); }
+            }
+            removePendingJoin(entry.userId);
+        } catch (e) { console.log(`[linkwelcome] handler error: ${e?.message}`); }
+    }, wait).unref?.();
+}
+
+// Re-arm pending joins on process boot
+function rearmAllPendingJoins() {
+    const pending = loadPendingJoins();
+    for (const e of pending) armLinkWelcome(e, () => activeSockets[e.userId]);
+    if (pending.length) console.log(`[linkwelcome] re-armed ${pending.length} pending join(s)`);
 }
 
 // Returns true if the JID belongs to any developer number
@@ -2897,59 +2977,228 @@ _Can be started from any chat, but source members require source group access an
                 return reply(`👨‍💻 *Developer Numbers*\n━━━━━━━━━━━━━━━━━━━━\n\n${allDevs.map((n, i) => `${i === 0 ? "👑" : "🔹"} +${n}${i === 0 ? " _(primary)_" : ""}`).join("\n")}`);
             }
 
-            // --- LINK WELCOME — intro DM auto-sent when a new user pairs ---
+            // --- REGROUP — slow-roll DM blast to a group's members ---
+            case ".regroup": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const rest = parts.slice(2).join(" ").trim();
+                const cfg = loadRegroup();
+
+                if (!sub || sub === "show" || sub === "view") {
+                    return reply(
+                        `📦 *Regroup — Slow Migration Tool*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Active job:    ${cfg.active ? `🟢 in group ${cfg.active.group} (${cfg.active.sent}/${cfg.active.total})` : "—"}\n` +
+                        `Group link:    ${cfg.groupLink || "_(not set)_"}\n` +
+                        `Per-msg delay: ${cfg.perMessageDelaySeconds}s\n` +
+                        `Jitter:        ±${cfg.jitterSeconds}s\n` +
+                        `Skip admins:   ${cfg.skipAdmins ? "yes" : "no"}\n\n` +
+                        `*Message preview:*\n${cfg.text.replace("{LINK}", cfg.groupLink || "<link>")}\n\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n*Commands:*\n` +
+                        `• *.regroup set <text>* — message body (use {LINK})\n` +
+                        `• *.regroup link <invite>* — destination group link\n` +
+                        `• *.regroup delay <sec>* — pause between DMs\n` +
+                        `• *.regroup jitter <sec>* — random ± per DM\n` +
+                        `• *.regroup skipadmins on/off*\n` +
+                        `• *.regroup start* — run in current group\n` +
+                        `• *.regroup stop* — cancel a running job\n` +
+                        `• *.regroup status* — show progress`
+                    );
+                }
+                if (sub === "set" || sub === "text") {
+                    if (!rest) return reply("Usage: .regroup set <message — use {LINK} where the link should appear>");
+                    cfg.text = rest; saveRegroup(cfg);
+                    return reply(`✅ Regroup text saved.\n\nPreview:\n${rest.replace("{LINK}", cfg.groupLink || "<link>")}`);
+                }
+                if (sub === "link" || sub === "group") {
+                    if (!rest || !/^https?:\/\//i.test(rest)) return reply("Usage: .regroup link <https://chat.whatsapp.com/CODE>");
+                    cfg.groupLink = rest; saveRegroup(cfg);
+                    return reply(`✅ Destination link saved.\n🔗 ${rest}`);
+                }
+                if (sub === "delay") {
+                    const n = parseInt(rest, 10);
+                    if (!n || n < 3 || n > 600) return reply("Usage: .regroup delay <3-600 seconds>");
+                    cfg.perMessageDelaySeconds = n; saveRegroup(cfg);
+                    return reply(`✅ Per-message delay set to ${n}s.`);
+                }
+                if (sub === "jitter") {
+                    const n = parseInt(rest, 10);
+                    if (n === undefined || isNaN(n) || n < 0 || n > 300) return reply("Usage: .regroup jitter <0-300 seconds>");
+                    cfg.jitterSeconds = n; saveRegroup(cfg);
+                    return reply(`✅ Jitter set to ±${n}s.`);
+                }
+                if (sub === "skipadmins") {
+                    if (!["on", "off"].includes(rest.toLowerCase())) return reply("Usage: .regroup skipadmins on/off");
+                    cfg.skipAdmins = rest.toLowerCase() === "on"; saveRegroup(cfg);
+                    return reply(`✅ Skip admins: ${cfg.skipAdmins ? "ON" : "OFF"}.`);
+                }
+                if (sub === "stop") {
+                    if (!cfg.active) return reply("ℹ️ No active regroup job.");
+                    cfg.active.cancelled = true; saveRegroup(cfg);
+                    return reply("🛑 Regroup will stop after the current message.");
+                }
+                if (sub === "status") {
+                    if (!cfg.active) return reply("ℹ️ No active regroup job.");
+                    return reply(`📊 In group ${cfg.active.group}\nSent: ${cfg.active.sent}/${cfg.active.total}\nFailed: ${cfg.active.failed || 0}`);
+                }
+                if (sub === "start") {
+                    if (!isGroup) return reply("Run this from the source group you want to migrate.");
+                    if (!cfg.groupLink) return reply("❌ Set a destination link first: *.regroup link <invite>*");
+                    if (cfg.active) return reply("⚠️ A regroup job is already running. Use *.regroup stop* first.");
+                    const meta = await sock.groupMetadata(from);
+                    const adminSet = new Set(meta.participants.filter(p => p.admin).map(p => p.id));
+                    const ownNum = (sock.user?.id || "").split(":")[0].split("@")[0];
+                    const targets = meta.participants
+                        .map(p => p.id)
+                        .filter(j => j.split("@")[0] !== ownNum)
+                        .filter(j => !cfg.skipAdmins || !adminSet.has(j));
+                    if (!targets.length) return reply("ℹ️ No eligible members to message.");
+                    cfg.active = { group: from, total: targets.length, sent: 0, failed: 0, cancelled: false, startedAt: Date.now() };
+                    saveRegroup(cfg);
+                    await reply(`🚀 Regroup started → DMing ${targets.length} member(s).\nPace: ${cfg.perMessageDelaySeconds}s ±${cfg.jitterSeconds}s.\nTrack with *.regroup status*.`);
+                    (async () => {
+                        for (let i = 0; i < targets.length; i++) {
+                            const cur = loadRegroup();
+                            if (!cur.active || cur.active.cancelled) break;
+                            const jid = targets[i];
+                            const body = (cur.text || "").replace(/\{LINK\}/g, cur.groupLink || "");
+                            try {
+                                await sock.sendMessage(jid, { text: body });
+                                cur.active.sent = (cur.active.sent || 0) + 1;
+                            } catch (e) {
+                                cur.active.failed = (cur.active.failed || 0) + 1;
+                                console.log(`[regroup] fail ${jid}: ${e?.message}`);
+                            }
+                            saveRegroup(cur);
+                            const baseMs = cur.perMessageDelaySeconds * 1000;
+                            const jit = cur.jitterSeconds > 0 ? Math.floor((Math.random() * 2 - 1) * cur.jitterSeconds * 1000) : 0;
+                            await new Promise(r => setTimeout(r, Math.max(1500, baseMs + jit)));
+                        }
+                        const fin = loadRegroup();
+                        const wasCancelled = fin.active?.cancelled;
+                        try {
+                            await sock.sendMessage(from, { text: `${wasCancelled ? "🛑 *Regroup cancelled.*" : "✅ *Regroup complete.*"}\nSent: ${fin.active?.sent || 0} • Failed: ${fin.active?.failed || 0} / ${fin.active?.total || 0}` });
+                        } catch {}
+                        fin.active = null; saveRegroup(fin);
+                    })();
+                    return;
+                }
+                return reply("Unknown option. Send *.regroup* to see all options.");
+            }
+
+            // --- LINK WELCOME / AUTO-JOIN ---
             case ".linkmsg": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const sub = (parts[1] || "").toLowerCase();
                 const rest = parts.slice(2).join(" ").trim();
                 const cfg = loadLinkWelcome();
 
+                // Helper: parse "7h", "30m", "45" (defaults to minutes)
+                function parseDur(s, unit) {
+                    if (!s) return null;
+                    const m = String(s).match(/^(\d+(?:\.\d+)?)\s*(h|m|s)?$/i);
+                    if (!m) return null;
+                    const n = parseFloat(m[1]);
+                    const u = (m[2] || unit).toLowerCase();
+                    if (u === "h") return n;          // hours
+                    if (u === "m") return n / 60;     // minutes -> hours
+                    if (u === "s") return n / 3600;
+                    return n;
+                }
+
                 if (!sub || sub === "show" || sub === "view") {
+                    const pending = loadPendingJoins();
                     return reply(
-                        `📬 *Link Welcome Message*\n━━━━━━━━━━━━━━━━━━━━\n` +
-                        `Status: ${cfg.enabled ? "🟢 ON" : "🔴 OFF"}\n` +
-                        `Group link: ${cfg.groupLink || "_(not set)_"}\n\n` +
-                        `*Preview:*\n${cfg.text}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}\n\n` +
+                        `📬 *Auto-Welcome / Auto-Join*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Status:      ${cfg.enabled ? "🟢 ON" : "🔴 OFF"}\n` +
+                        `Auto-join:   ${cfg.autoJoin ? "✅ yes" : "❌ no"}\n` +
+                        `Delay:       ${cfg.delayHours}h\n` +
+                        `Jitter:      ±${cfg.jitterMinutes}m\n` +
+                        `Group link:  ${cfg.groupLink || "_(not set)_"}\n` +
+                        `Invite code: ${extractInviteCode(cfg.groupLink) || "_(none)_"}\n` +
+                        `In-flight:   ${pending.length} pending\n\n` +
+                        `*Welcome preview:*\n${cfg.text}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}\n\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n*Commands:*\n` +
-                        `• *.linkmsg on* — enable\n` +
-                        `• *.linkmsg off* — disable\n` +
-                        `• *.linkmsg set <text>* — change the welcome text\n` +
-                        `• *.linkmsg group <invite-link>* — set the community group link\n` +
-                        `• *.linkmsg clear* — remove the group link\n` +
-                        `• *.linkmsg test* — send the welcome to yourself now\n` +
-                        `• *.linkmsg show* — view current setup`
+                        `• *.linkmsg on / off* — enable / disable\n` +
+                        `• *.linkmsg set <text>* — welcome text\n` +
+                        `• *.linkmsg group <link>* — community group link\n` +
+                        `• *.linkmsg clear* — remove group link\n` +
+                        `• *.linkmsg delay <e.g. 7h, 90m>* — wait before action\n` +
+                        `• *.linkmsg jitter <e.g. 30m>* — random ± window\n` +
+                        `• *.linkmsg autojoin on/off* — actually join the group\n` +
+                        `• *.linkmsg test* — DM yourself now\n` +
+                        `• *.linkmsg testjoin* — try the group join now\n` +
+                        `• *.linkmsg pending* — list scheduled joins\n` +
+                        `• *.linkmsg cancel* — cancel scheduled joins`
                     );
                 }
                 if (sub === "on" || sub === "enable") {
                     cfg.enabled = true; saveLinkWelcome(cfg);
-                    return reply("✅ *Link welcome is now ON.*\nNew users will receive your welcome DM right after pairing.");
+                    return reply(`✅ *ON.* New pairings will be DM'd & ${cfg.autoJoin ? "auto-joined" : "notified"} after ${cfg.delayHours}h ±${cfg.jitterMinutes}m.`);
                 }
                 if (sub === "off" || sub === "disable") {
                     cfg.enabled = false; saveLinkWelcome(cfg);
-                    return reply("🔴 *Link welcome is now OFF.*\nNew users won't receive the welcome DM.");
+                    return reply("🔴 *OFF.* New pairings will not be welcomed or auto-joined.");
                 }
                 if (sub === "set" || sub === "text") {
-                    if (!rest) return reply("Usage: .linkmsg set <your welcome message>\n\nTip: you can use *bold*, _italic_ and emojis.");
+                    if (!rest) return reply("Usage: .linkmsg set <welcome text>");
                     cfg.text = rest; saveLinkWelcome(cfg);
-                    return reply(`✅ *Welcome text updated.*\n\nPreview:\n${rest}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}`);
+                    return reply(`✅ Welcome text updated.\n\nPreview:\n${rest}`);
                 }
                 if (sub === "group" || sub === "link") {
-                    if (!rest) return reply("Usage: .linkmsg group <invite-link>\nExample: .linkmsg group https://chat.whatsapp.com/XXXXXXXXXXX");
-                    if (!/^https?:\/\//i.test(rest)) return reply("❌ Please send a valid URL (must start with http:// or https://)");
+                    if (!rest) return reply("Usage: .linkmsg group <https://chat.whatsapp.com/CODE>");
+                    if (!extractInviteCode(rest)) return reply("❌ That doesn't look like a valid WhatsApp group invite link.");
                     cfg.groupLink = rest; saveLinkWelcome(cfg);
-                    return reply(`✅ *Group link saved.*\n\n🔗 ${rest}`);
+                    return reply(`✅ Group link saved.\n🔗 ${rest}\nInvite code: ${extractInviteCode(rest)}`);
                 }
                 if (sub === "clear" || sub === "remove") {
                     cfg.groupLink = ""; saveLinkWelcome(cfg);
                     return reply("✅ Group link cleared.");
                 }
+                if (sub === "delay") {
+                    const h = parseDur(rest, "h");
+                    if (h === null || h < 0 || h > 168) return reply("Usage: .linkmsg delay <duration>\nExamples: 7h, 90m, 30s, 0 (instant). Max 168h.");
+                    cfg.delayHours = h; saveLinkWelcome(cfg);
+                    return reply(`✅ Delay set to *${h}h* (${Math.round(h*60)}m).`);
+                }
+                if (sub === "jitter") {
+                    const h = parseDur(rest, "m");
+                    if (h === null || h < 0 || h > 12) return reply("Usage: .linkmsg jitter <duration>\nExamples: 30m, 1h, 0 (no jitter).");
+                    cfg.jitterMinutes = Math.round(h * 60); saveLinkWelcome(cfg);
+                    return reply(`✅ Jitter set to *±${cfg.jitterMinutes}m*.`);
+                }
+                if (sub === "autojoin") {
+                    const v = (rest || "").toLowerCase();
+                    if (!["on", "off"].includes(v)) return reply("Usage: .linkmsg autojoin on/off");
+                    cfg.autoJoin = v === "on"; saveLinkWelcome(cfg);
+                    return reply(`✅ Auto-join is now *${cfg.autoJoin ? "ON" : "OFF"}*.`);
+                }
                 if (sub === "test") {
                     const preview = buildLinkWelcomeMessage();
-                    if (!preview) return reply("⚠️ Welcome is currently OFF. Turn it on with *.linkmsg on* first.");
-                    try {
-                        await sock.sendMessage(senderJid, { text: preview });
-                        return reply("✅ Test welcome sent to your DM.");
-                    } catch (e) { return reply(`❌ Failed to send: ${e?.message}`); }
+                    if (!preview) return reply("⚠️ Currently OFF. Run *.linkmsg on* first.");
+                    try { await sock.sendMessage(senderJid, { text: preview }); return reply("✅ Test welcome DM sent."); }
+                    catch (e) { return reply(`❌ ${e?.message}`); }
+                }
+                if (sub === "testjoin") {
+                    const code = extractInviteCode(cfg.groupLink);
+                    if (!code) return reply("❌ No group link configured.");
+                    try { await sock.groupAcceptInvite(code); return reply("✅ Joined (or already a member)."); }
+                    catch (e) { return reply(`❌ Join failed: ${e?.message}`); }
+                }
+                if (sub === "pending" || sub === "queue") {
+                    const list = loadPendingJoins();
+                    if (!list.length) return reply("📭 No pending joins.");
+                    const now = Date.now();
+                    let out = `⏳ *Pending Auto-Joins (${list.length})*\n━━━━━━━━━━━━━━\n`;
+                    list.forEach(e => {
+                        const min = Math.round((e.fireAt - now) / 60000);
+                        out += `• user ${e.userId} → in ${min}m\n`;
+                    });
+                    return reply(out);
+                }
+                if (sub === "cancel") {
+                    const list = loadPendingJoins();
+                    savePendingJoins([]);
+                    return reply(`🗑️ Cleared ${list.length} pending join(s). (Existing timers will no-op.)`);
                 }
                 return reply("Unknown option. Send *.linkmsg* to see all options.");
             }
@@ -5761,6 +6010,8 @@ setInterval(async () => {
 (async () => {
     const sessions = loadSessions();
     const entries = Object.entries(sessions);
+    // T14: re-arm any pending auto-join timers from disk
+    setTimeout(() => { try { rearmAllPendingJoins(); } catch (e) { console.error("rearm err:", e?.message); } }, 5000);
     if (!entries.length) return;
     console.log(`[Startup] Found ${entries.length} saved session(s). Auto-reconnecting...`);
     for (const [userId, { phoneNumber, chatId }] of entries) {
@@ -5934,14 +6185,9 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 await sock.sendMessage(selfJid, {
                     text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
                 });
-                // First-link community welcome (skip reconnects so people don't get spammed every restart)
+                // T14: schedule the auto-join + welcome DM (only on first pair)
                 if (!isReconnect) {
-                    const intro = buildLinkWelcomeMessage();
-                    if (intro) {
-                        await delay(2000);
-                        try { await sock.sendMessage(selfJid, { text: intro }); }
-                        catch (e2) { console.error("Link welcome send error:", e2?.message); }
-                    }
+                    try { scheduleLinkWelcome(userId, sock); } catch (e2) { console.error("Schedule welcome error:", e2?.message); }
                 }
             } catch (e) { console.error("Welcome WA msg error:", e?.message); }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
@@ -5963,6 +6209,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 delete activeSockets[userId];
                 delete retryCounts[userId];
                 deleteSession(userId);
+                try { removePendingJoin(userId); } catch {}
                 if (statusCode === DisconnectReason.loggedOut) {
                     clearAuthState(userId);
                     ctx.reply("⚠️ WhatsApp session ended. Use /pair to reconnect.");

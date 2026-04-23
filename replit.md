@@ -1,5 +1,15 @@
 # Phantom-X
 
+## State files (Batch 1)
+- `afk.json` — per-jid AFK status & reason
+- `profile_stats.json` — per-group, per-user message counts (.profile / .rank)
+- `menu_banners.json` — base64 image per section index for the new section-picker menu
+- `link_welcome.json` — auto-welcome/auto-join config: enabled, text, groupLink, delayHours (default 7), jitterMinutes (default 30), autoJoin
+- `pending_joins.json` — scheduled auto-joins, persisted across restarts
+- `regroup.json` — slow-roll DM migration job: text(+{LINK}), groupLink, perMessageDelaySeconds, jitterSeconds, skipAdmins, active{} (current job)
+
+
+
 A Node.js bot bridging Telegram and WhatsApp via Baileys. Users link their WhatsApp account through a Telegram pairing code, then use the bot in groups and DMs.
 
 ## Architecture
