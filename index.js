@@ -331,6 +331,126 @@ const scheduleTimers = {};
 function loadSchedules() { if (!fs.existsSync(SCHEDULES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, "utf8")); } catch { return {}; } }
 function saveSchedules(d) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(d, null, 2)); }
 
+// --- MEDIA DOWNLOADER (Batch 2B) ---
+const DL_HEALTH_FILE = path.join(__dirname, "dl_health.json");
+const DL_NOTIFY_COOLDOWN = {};
+function loadDlHealth() { try { return JSON.parse(fs.readFileSync(DL_HEALTH_FILE, "utf8")); } catch { return {}; } }
+function saveDlHealth(d) { try { fs.writeFileSync(DL_HEALTH_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function markDlHealth(provider, ok, errMsg) {
+    const d = loadDlHealth();
+    if (!d[provider]) d[provider] = { ok: 0, fail: 0, lastFailMsg: "", lastUsed: 0, lastFailAt: 0 };
+    if (ok) { d[provider].ok++; } else { d[provider].fail++; d[provider].lastFailMsg = String(errMsg || "").slice(0, 200); d[provider].lastFailAt = Date.now(); }
+    d[provider].lastUsed = Date.now();
+    saveDlHealth(d);
+}
+function detectPlatform(url) {
+    if (!url) return null;
+    const u = url.toLowerCase();
+    if (/youtu\.?be/.test(u)) return "youtube";
+    if (/tiktok\.com|vm\.tiktok|vt\.tiktok/.test(u)) return "tiktok";
+    if (/instagram\.com|instagr\.am/.test(u)) return "instagram";
+    if (/facebook\.com|fb\.watch|fb\.com/.test(u)) return "facebook";
+    if (/twitter\.com|x\.com/.test(u)) return "twitter";
+    if (/soundcloud\.com|on\.soundcloud/.test(u)) return "soundcloud";
+    if (/pinterest\.|pin\.it/.test(u)) return "pinterest";
+    if (/reddit\.com|redd\.it/.test(u)) return "reddit";
+    if (/tumblr\.com/.test(u)) return "tumblr";
+    if (/vimeo\.com/.test(u)) return "vimeo";
+    if (/twitch\.tv/.test(u)) return "twitch";
+    if (/^https?:\/\//i.test(url)) return "generic";
+    return null;
+}
+async function dlFetchJson(url, opts = {}) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), opts.timeout || 25000);
+    try {
+        const res = await fetch(url, { ...opts, signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json", ...(opts.headers || {}) } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+    } finally { clearTimeout(t); }
+}
+const DL_PROVIDERS = {
+    cobalt: async (url, opts = {}) => {
+        const body = { url, vQuality: "720", isAudioOnly: !!opts.audio, filenamePattern: "basic" };
+        const data = await dlFetchJson("https://api.cobalt.tools/api/json", {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            timeout: 30000,
+        });
+        if (!data || data.status === "error") throw new Error(data?.text || "cobalt error");
+        if (data.status === "redirect" || data.status === "stream" || data.status === "tunnel") {
+            return { type: opts.audio ? "audio" : "video", url: data.url };
+        }
+        if (data.status === "picker" && Array.isArray(data.picker) && data.picker.length) {
+            const first = data.picker[0];
+            return { type: first.type === "photo" ? "image" : "video", url: first.url, picker: data.picker };
+        }
+        throw new Error(`cobalt: unexpected status ${data.status}`);
+    },
+    tikwm: async (url, opts = {}) => {
+        const data = await dlFetchJson(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`);
+        if (!data || data.code !== 0 || !data.data) throw new Error(data?.msg || "tikwm error");
+        const d = data.data;
+        if (opts.audio) {
+            const a = d.music || d.music_info?.play;
+            if (!a) throw new Error("tikwm: no audio");
+            return { type: "audio", url: a, title: d.title };
+        }
+        const v = d.hdplay || d.play || d.wmplay;
+        if (!v) throw new Error("tikwm: no video");
+        return { type: "video", url: v, title: d.title, thumb: d.cover };
+    },
+};
+const DL_CHAIN = {
+    youtube: ["cobalt"],
+    tiktok: ["tikwm", "cobalt"],
+    instagram: ["cobalt"],
+    facebook: ["cobalt"],
+    twitter: ["cobalt"],
+    soundcloud: ["cobalt"],
+    pinterest: ["cobalt"],
+    reddit: ["cobalt"],
+    tumblr: ["cobalt"],
+    vimeo: ["cobalt"],
+    twitch: ["cobalt"],
+    generic: ["cobalt"],
+};
+async function downloadMedia(url, opts = {}) {
+    const platform = detectPlatform(url);
+    if (!platform) { const e = new Error("Could not detect platform from URL"); e.platform = "unknown"; throw e; }
+    const chain = DL_CHAIN[platform] || DL_CHAIN.generic;
+    const errs = [];
+    for (const name of chain) {
+        const fn = DL_PROVIDERS[name];
+        if (!fn) continue;
+        try {
+            const res = await fn(url, opts);
+            if (res?.url) { markDlHealth(name, true); return { ...res, provider: name, platform }; }
+            throw new Error("provider returned no url");
+        } catch (e) {
+            const m = e?.message || String(e);
+            errs.push(`${name}: ${m}`);
+            markDlHealth(name, false, m);
+        }
+    }
+    const err = new Error(`All providers failed for ${platform}\n${errs.join("\n")}`);
+    err.platform = platform; err.providerErrors = errs;
+    throw err;
+}
+async function notifyOwnerDlFailure(sock, platform, url, errs) {
+    try {
+        const now = Date.now();
+        if (DL_NOTIFY_COOLDOWN[platform] && now - DL_NOTIFY_COOLDOWN[platform] < 30 * 60 * 1000) return;
+        DL_NOTIFY_COOLDOWN[platform] = now;
+        const selfNum = (sock.user?.id || "").split(":")[0].split("@")[0];
+        if (!selfNum) return;
+        const selfJid = selfNum + "@s.whatsapp.net";
+        const txt = `⚠️ *Downloader Alert*\n━━━━━━━━━━━━━━━━━━━\n\nAll providers failed for *${platform}*.\n\n🔗 ${url}\n\n*Errors:*\n${errs.map(e => `• ${e}`).join("\n")}\n\n_Run .dlhealth for full provider stats._`;
+        await sock.sendMessage(selfJid, { text: txt });
+    } catch {}
+}
+
 // --- PREMIUM / UNLOCK SYSTEM ---
 const PREMIUM_FILE = path.join(__dirname, "premium.json");
 function loadPremium() { if (!fs.existsSync(PREMIUM_FILE)) return {}; try { return JSON.parse(fs.readFileSync(PREMIUM_FILE, "utf8")); } catch { return {}; } }
@@ -5037,6 +5157,63 @@ _Can be started from any chat, but source members require source group access an
                 let sTxt = "📅 *Active Schedules*\n━━━━━━━━━━━━━━━━━━━\n\n";
                 entries.forEach(s => { sTxt += `⏰ *${s.time}* — _"${s.message}"_\n`; });
                 await reply(sTxt);
+                break;
+            }
+
+            case ".dl":
+            case ".yt": case ".ytdl": case ".ytmp4":
+            case ".tiktok": case ".tt":
+            case ".ig": case ".insta": case ".instagram":
+            case ".fb": case ".facebook":
+            case ".x": case ".twitter":
+            case ".sc": case ".soundcloud":
+            case ".pin": case ".pinterest":
+            case ".reddit":
+            case ".tumblr": case ".vimeo": case ".twitch":
+            case ".ytmp3": case ".ytaudio": {
+                const flags = parts.slice(1).filter(p => p.startsWith("--") || p === "audio");
+                const urlArgs = parts.slice(1).filter(p => !p.startsWith("--") && p !== "audio");
+                const url = urlArgs[0];
+                if (!url || !/^https?:\/\//i.test(url)) return reply(`Usage: ${cmd} <url> [audio]\nExample: ${cmd} https://youtu.be/dQw4w9WgXcQ`);
+                const audioCmds = [".ytmp3", ".ytaudio", ".sc", ".soundcloud"];
+                const audio = audioCmds.includes(cmd) || flags.includes("audio") || flags.includes("--audio");
+                await reply("⏳ _Cooking your media... give me a sec._");
+                try {
+                    const result = await downloadMedia(url, { audio });
+                    const buf = await fetchBuffer(result.url);
+                    const sizeMB = buf.length / 1024 / 1024;
+                    if (sizeMB > 95) return reply(`❌ File too big (${sizeMB.toFixed(1)}MB). WhatsApp limit is ~100MB.\n\n_Try the audio version instead, or pick a shorter clip._`);
+                    const caption = `✅ *${result.platform.toUpperCase()}* • via _${result.provider}_${result.title ? `\n\n📝 ${result.title}` : ""}\n\n_Powered by Phantom-X_`;
+                    if (result.type === "audio") {
+                        await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4" }, { quoted: msg });
+                    } else if (result.type === "image") {
+                        await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(from, { video: buf, caption }, { quoted: msg });
+                    }
+                } catch (e) {
+                    await reply(`❌ *Download failed.*\n\n${e?.message || e}`);
+                    if (e?.providerErrors) notifyOwnerDlFailure(sock, e.platform, url, e.providerErrors).catch(() => {});
+                }
+                break;
+            }
+
+            case ".dlhealth": {
+                const data = loadDlHealth();
+                const entries = Object.entries(data);
+                if (!entries.length) return reply("📊 No download stats yet. Try `.dl <url>` first.");
+                let txt = "📊 *Downloader Health*\n━━━━━━━━━━━━━━━━━━━\n\n";
+                for (const [name, s] of entries) {
+                    const total = s.ok + s.fail;
+                    const rate = total ? Math.round((s.ok / total) * 100) : 0;
+                    const emoji = rate >= 80 ? "🟢" : rate >= 40 ? "🟡" : "🔴";
+                    const last = s.lastUsed ? `${Math.round((Date.now() - s.lastUsed) / 60000)}m ago` : "never";
+                    txt += `${emoji} *${name}*\n   ✅ ${s.ok}  ❌ ${s.fail}  •  ${rate}% success\n   _last used: ${last}_\n`;
+                    if (s.lastFailMsg && s.fail > 0) txt += `   ⚠️ _last err: ${s.lastFailMsg.slice(0, 80)}_\n`;
+                    txt += "\n";
+                }
+                txt += `_Auto-fallback active. Owner is DM'd when all providers fail for a platform._`;
+                await reply(txt);
                 break;
             }
 
