@@ -451,6 +451,510 @@ async function notifyOwnerDlFailure(sock, platform, url, errs) {
     } catch {}
 }
 
+// --- THREAT NETWORK (cross-bot intel + mass-report) ---
+const THREATS_FILE = path.join(__dirname, "global_threats.json");
+const REPORT_CATEGORIES = ["scam", "harassment", "spam", "illegal", "impersonation", "hate", "other"];
+function loadThreats() { try { return JSON.parse(fs.readFileSync(THREATS_FILE, "utf8")); } catch { return {}; } }
+function saveThreats(d) { try { fs.writeFileSync(THREATS_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function normalizeNum(input) { return String(input || "").replace(/[^\d]/g, ""); }
+function jidFromNum(num) { return `${normalizeNum(num)}@s.whatsapp.net`; }
+function isThreatJid(jid) {
+    if (!jid) return false;
+    const num = normalizeNum(jid.split("@")[0].split(":")[0]);
+    const t = loadThreats()[num];
+    return !!(t && t.autoBlocked !== false);
+}
+function getThreat(num) { return loadThreats()[normalizeNum(num)] || null; }
+function addThreat(num, reporterBotJid, category, note) {
+    const cleanNum = normalizeNum(num);
+    if (!cleanNum) return null;
+    const cat = REPORT_CATEGORIES.includes((category || "").toLowerCase()) ? category.toLowerCase() : "scam";
+    const d = loadThreats();
+    if (!d[cleanNum]) {
+        d[cleanNum] = {
+            severity: "high", reports: [], autoBlocked: true,
+            firstReported: Date.now(), lastSeen: Date.now(),
+            triggerCount: 0, botActions: {}, nextReportAt: Date.now(),
+            primaryCategory: cat,
+        };
+    }
+    d[cleanNum].reports.push({ reporter: reporterBotJid || "unknown", category: cat, note: note || "", at: Date.now() });
+    d[cleanNum].lastSeen = Date.now();
+    d[cleanNum].primaryCategory = cat;
+    saveThreats(d);
+    return d[cleanNum];
+}
+function removeThreat(num) {
+    const d = loadThreats();
+    const k = normalizeNum(num);
+    if (d[k]) { delete d[k]; saveThreats(d); return true; }
+    return false;
+}
+function recordThreatBotAction(num, botJid, action) {
+    const d = loadThreats();
+    const k = normalizeNum(num);
+    if (!d[k]) return;
+    if (!d[k].botActions) d[k].botActions = {};
+    if (!d[k].botActions[botJid]) d[k].botActions[botJid] = { blocked: false, reportedAt: 0, reportCount: 0 };
+    if (action === "blocked") d[k].botActions[botJid].blocked = true;
+    if (action === "reported") { d[k].botActions[botJid].reportedAt = Date.now(); d[k].botActions[botJid].reportCount = (d[k].botActions[botJid].reportCount || 0) + 1; }
+    if (action === "trigger") d[k].triggerCount = (d[k].triggerCount || 0) + 1;
+    saveThreats(d);
+}
+async function blockUserOnSock(sock, jid) {
+    try {
+        if (typeof sock.updateBlockStatus === "function") {
+            await sock.updateBlockStatus(jid, "block");
+            return true;
+        }
+    } catch (e) { console.log(`[ThreatNet] block failed on ${jid}: ${e?.message}`); }
+    return false;
+}
+async function submitWAReport(sock, jid, category) {
+    try {
+        const cat = REPORT_CATEGORIES.includes(category) ? category : "scam";
+        if (typeof sock.sendReceipt === "function") {
+            try { await sock.sendReceipt(jid, undefined, [], "report"); } catch {}
+        }
+        if (typeof sock.query === "function") {
+            try {
+                await sock.query({
+                    tag: "iq",
+                    attrs: { to: "s.whatsapp.net", type: "set", xmlns: "urn:xmpp:reporting:0" },
+                    content: [{ tag: "report", attrs: { reason: cat }, content: [{ tag: "jid", attrs: {}, content: jid }] }],
+                });
+            } catch {}
+        }
+        return true;
+    } catch (e) { console.log(`[ThreatNet] report failed on ${jid}: ${e?.message}`); return false; }
+}
+async function runReportWaveAcrossAllBots(num, category, opts = {}) {
+    const cleanNum = normalizeNum(num);
+    if (!cleanNum) return { ok: 0, fail: 0 };
+    const targetJid = jidFromNum(cleanNum);
+    const bots = Object.entries(activeSockets).filter(([_, s]) => s && s.user);
+    let ok = 0, fail = 0;
+    const stagger = opts.immediate ? 0 : (opts.staggerSec || 8) * 1000;
+    for (let i = 0; i < bots.length; i++) {
+        const [, sock] = bots[i];
+        try {
+            const blocked = await blockUserOnSock(sock, targetJid);
+            const reported = await submitWAReport(sock, targetJid, category);
+            recordThreatBotAction(cleanNum, sock.user.id, "blocked");
+            recordThreatBotAction(cleanNum, sock.user.id, "reported");
+            if (blocked || reported) ok++; else fail++;
+        } catch { fail++; }
+        if (i < bots.length - 1 && stagger > 0) {
+            const jitter = Math.floor(Math.random() * stagger * 0.6);
+            await new Promise(r => setTimeout(r, stagger + jitter));
+        }
+    }
+    const d = loadThreats();
+    if (d[cleanNum]) {
+        d[cleanNum].nextReportAt = Date.now() + 6 * 3600 * 1000;
+        saveThreats(d);
+    }
+    return { ok, fail, totalBots: bots.length };
+}
+function scheduleThreatReportCycle() {
+    setInterval(() => {
+        try {
+            const d = loadThreats();
+            const now = Date.now();
+            for (const [num, t] of Object.entries(d)) {
+                if (!t.autoBlocked) continue;
+                if (t.nextReportAt && now >= t.nextReportAt) {
+                    const ageDays = (now - (t.firstReported || now)) / (24 * 3600 * 1000);
+                    if (ageDays > 7) continue;
+                    runReportWaveAcrossAllBots(num, t.primaryCategory || "scam", { staggerSec: 12 }).catch(() => {});
+                }
+            }
+        } catch {}
+    }, 30 * 60 * 1000);
+}
+
+// --- STRONGER ANTIBUG ---
+function detectBugPatterns(text) {
+    if (!text) return null;
+    const reasons = [];
+    const zw = (text.match(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]/g) || []).length;
+    const comb = (text.match(/[\u0300-\u036f\u0489\u0c00-\u0c7f\u0c80-\u0cff\u0b80-\u0bff\u0600-\u06ff\ufdfb-\ufdfd]/g) || []).length;
+    const newlines = (text.match(/\n/g) || []).length;
+    const mentions = (text.match(/@\d{6,}/g) || []).length;
+    const emojis = (text.match(/\p{Extended_Pictographic}/gu) || []).length;
+    const ratio = zw / Math.max(text.length, 1);
+    let maxRun = 0, run = 1;
+    for (let i = 1; i < text.length; i++) { if (text[i] === text[i-1]) { run++; if (run > maxRun) maxRun = run; } else run = 1; }
+    if (text.length > 5000) reasons.push(`oversize:${text.length}`);
+    if (zw > 300) reasons.push(`zero-width:${zw}`);
+    if (comb > 800) reasons.push(`combining:${comb}`);
+    if (ratio > 0.35) reasons.push(`invisible-ratio:${ratio.toFixed(2)}`);
+    if (newlines > 200) reasons.push(`newline-flood:${newlines}`);
+    if (mentions > 30) reasons.push(`mention-bomb:${mentions}`);
+    if (emojis > 400) reasons.push(`emoji-flood:${emojis}`);
+    if (maxRun > 800) reasons.push(`char-repeat:${maxRun}`);
+    return reasons.length ? reasons : null;
+}
+const antibugOffenders = {};
+function recordAntibugHit(senderJid) {
+    const k = senderJid;
+    const now = Date.now();
+    if (!antibugOffenders[k]) antibugOffenders[k] = { hits: [], firstHit: now };
+    antibugOffenders[k].hits = antibugOffenders[k].hits.filter(t => now - t < 30 * 60 * 1000);
+    antibugOffenders[k].hits.push(now);
+    return antibugOffenders[k].hits.length;
+}
+
+// --- PROMOGROUP (growth engine with per-bot stagger) ---
+const PROMOGROUP_FILE = path.join(__dirname, "promogroup.json");
+const PROMOGROUP_DEFAULTS = {
+    enabled: false, groupJid: "", groupLink: "",
+    rate: 2, intervalHours: 24, poolAuto: true,
+    manualPool: [], optedOut: [],
+    added: {}, skipped: {}, lastRun: {},
+    stats: { totalAdded: 0, totalInvited: 0, totalFailed: 0 },
+    paused: false,
+};
+function loadPromoGroup() {
+    if (!fs.existsSync(PROMOGROUP_FILE)) return { ...PROMOGROUP_DEFAULTS };
+    try { return { ...PROMOGROUP_DEFAULTS, ...JSON.parse(fs.readFileSync(PROMOGROUP_FILE, "utf8")) }; }
+    catch { return { ...PROMOGROUP_DEFAULTS }; }
+}
+function savePromoGroup(d) { try { fs.writeFileSync(PROMOGROUP_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function botStaggerOffsetMs(botJid, intervalHours) {
+    let h = 0; const s = String(botJid || "x");
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return (h % (intervalHours * 3600 * 1000));
+}
+function isBusinessHourLagos() {
+    const h = Number(new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", hour: "2-digit", hour12: false }));
+    return h >= 9 && h < 21;
+}
+function getPromoGroupContactPool(sock, cfg) {
+    const set = new Set();
+    if (cfg.poolAuto && sock?.store?.contacts) {
+        for (const jid of Object.keys(sock.store.contacts)) {
+            if (jid.endsWith("@s.whatsapp.net")) set.add(normalizeNum(jid.split("@")[0]));
+        }
+    }
+    for (const n of (cfg.manualPool || [])) set.add(normalizeNum(n));
+    for (const n of (cfg.optedOut || [])) set.delete(normalizeNum(n));
+    const selfNum = normalizeNum((sock.user?.id || "").split(":")[0]);
+    if (selfNum) set.delete(selfNum);
+    return [...set].filter(Boolean);
+}
+async function runPromoGroupCycleForBot(sock) {
+    const cfg = loadPromoGroup();
+    if (!cfg.enabled || cfg.paused || !cfg.groupJid) return;
+    if (!isBusinessHourLagos()) return;
+    const botJid = sock.user?.id || "unknown";
+    const pool = getPromoGroupContactPool(sock, cfg);
+    const alreadyDone = new Set(Object.keys((cfg.added[botJid] || {})).concat(Object.keys((cfg.skipped[botJid] || {})).filter(k => (cfg.skipped[botJid][k]?.reason === "permanent"))));
+    const eligible = pool.filter(n => !alreadyDone.has(n));
+    if (!eligible.length) return;
+    const picks = eligible.sort(() => Math.random() - 0.5).slice(0, cfg.rate || 2);
+    for (const num of picks) {
+        const jid = jidFromNum(num);
+        let method = "failed", reason = "";
+        try {
+            const res = await sock.groupParticipantsUpdate(cfg.groupJid, [jid], "add");
+            const code = Array.isArray(res) ? res[0]?.status : res?.[jid]?.status;
+            if (code === "200" || code === 200 || code === undefined) {
+                method = "added"; cfg.stats.totalAdded++;
+            } else if (String(code) === "403" || String(code) === "408" || String(code) === "409") {
+                try {
+                    await sock.sendMessage(jid, { text: `👋 Hey there!\n\nYou've got my number (Phantom-X) saved on WhatsApp, so I figured you might want in on the official community group for updates, new commands, and tips:\n\n🔗 ${cfg.groupLink || "<link>"}\n\nReply *STOP* if you'd rather I never message you again. 🙏` });
+                    method = "invited"; cfg.stats.totalInvited++;
+                } catch (e) { method = "failed"; reason = `dm-fail: ${e?.message}`; cfg.stats.totalFailed++; }
+            } else { method = "failed"; reason = `code:${code}`; cfg.stats.totalFailed++; }
+        } catch (e) { method = "failed"; reason = e?.message || "unknown"; cfg.stats.totalFailed++; }
+        if (!cfg.added[botJid]) cfg.added[botJid] = {};
+        if (!cfg.skipped[botJid]) cfg.skipped[botJid] = {};
+        if (method === "added" || method === "invited") cfg.added[botJid][num] = { at: Date.now(), method };
+        else cfg.skipped[botJid][num] = { at: Date.now(), reason };
+        await new Promise(r => setTimeout(r, 5000 + Math.floor(Math.random() * 5000)));
+    }
+    cfg.lastRun[botJid] = Date.now();
+    savePromoGroup(cfg);
+}
+function schedulePromoGroup() {
+    setInterval(async () => {
+        const cfg = loadPromoGroup();
+        if (!cfg.enabled || cfg.paused) return;
+        const intervalMs = (cfg.intervalHours || 24) * 3600 * 1000;
+        const now = Date.now();
+        for (const [, sock] of Object.entries(activeSockets)) {
+            if (!sock?.user?.id) continue;
+            const botJid = sock.user.id;
+            const last = cfg.lastRun[botJid] || 0;
+            const offset = botStaggerOffsetMs(botJid, cfg.intervalHours || 24);
+            const nextDue = last === 0 ? (now - intervalMs + offset) : (last + intervalMs);
+            if (now >= nextDue) {
+                runPromoGroupCycleForBot(sock).catch(e => console.log(`[promo] cycle err: ${e?.message}`));
+            }
+        }
+    }, 15 * 60 * 1000);
+}
+
+// --- PRODUCTIVITY: REMINDERS / TODOS / NOTES / TIMERS / COUNTDOWNS / CALENDAR ---
+const REMINDERS_FILE = path.join(__dirname, "reminders.json");
+const TODOS_FILE = path.join(__dirname, "todos.json");
+const NOTES_FILE = path.join(__dirname, "notes.json");
+const TIMERS_FILE = path.join(__dirname, "timers.json");
+const COUNTDOWNS_FILE = path.join(__dirname, "countdowns.json");
+function _loadJson(f, def) { if (!fs.existsSync(f)) return def; try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return def; } }
+function _saveJson(f, d) { try { fs.writeFileSync(f, JSON.stringify(d, null, 2)); } catch {} }
+function loadReminders() { return _loadJson(REMINDERS_FILE, []); }
+function saveReminders(d) { _saveJson(REMINDERS_FILE, d); }
+function loadTodos() { return _loadJson(TODOS_FILE, {}); }
+function saveTodos(d) { _saveJson(TODOS_FILE, d); }
+function loadNotes() { return _loadJson(NOTES_FILE, {}); }
+function saveNotes(d) { _saveJson(NOTES_FILE, d); }
+function loadTimers() { return _loadJson(TIMERS_FILE, []); }
+function saveTimers(d) { _saveJson(TIMERS_FILE, d); }
+function loadCountdowns() { return _loadJson(COUNTDOWNS_FILE, {}); }
+function saveCountdowns(d) { _saveJson(COUNTDOWNS_FILE, d); }
+function shortId() { return Math.random().toString(36).slice(2, 8); }
+function parseDuration(s) {
+    if (!s) return 0;
+    const str = String(s).toLowerCase().trim();
+    let total = 0; let matched = false;
+    const re = /(\d+(?:\.\d+)?)\s*(d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|wk|wks|week|weeks)/g;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+        matched = true;
+        const n = parseFloat(m[1]); const u = m[2];
+        if (/^w/.test(u)) total += n * 7 * 24 * 3600 * 1000;
+        else if (/^d/.test(u)) total += n * 24 * 3600 * 1000;
+        else if (/^h/.test(u)) total += n * 3600 * 1000;
+        else if (/^m/.test(u)) total += n * 60 * 1000;
+        else if (/^s/.test(u)) total += n * 1000;
+    }
+    if (!matched) {
+        const justNum = parseFloat(str);
+        if (!isNaN(justNum)) total = justNum * 60 * 1000;
+    }
+    return total;
+}
+function fmtDuration(ms) {
+    if (ms < 0) ms = 0;
+    const d = Math.floor(ms / 86400000); ms -= d * 86400000;
+    const h = Math.floor(ms / 3600000); ms -= h * 3600000;
+    const m = Math.floor(ms / 60000); ms -= m * 60000;
+    const s = Math.floor(ms / 1000);
+    const out = [];
+    if (d) out.push(`${d}d`); if (h) out.push(`${h}h`); if (m) out.push(`${m}m`);
+    if (!d && !h && s) out.push(`${s}s`); else if (!d && !h && !m) out.push("0s");
+    return out.join(" ") || "0s";
+}
+function armReminder(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const arr = loadReminders();
+            const still = arr.find(r => r.id === entry.id);
+            if (!still) return;
+            const s = getSock();
+            if (s) {
+                const mention = entry.userJid ? `@${entry.userJid.split("@")[0]}` : "";
+                await s.sendMessage(entry.chatJid, { text: `⏰ *Reminder${mention ? ` for ${mention}` : ""}*\n\n${entry.text}`, mentions: entry.userJid ? [entry.userJid] : [] });
+            }
+            saveReminders(loadReminders().filter(r => r.id !== entry.id));
+        } catch (e) { console.log(`[reminder] err: ${e?.message}`); }
+    }, wait).unref?.();
+}
+function rearmAllReminders() {
+    for (const e of loadReminders()) armReminder(e, () => {
+        for (const [, s] of Object.entries(activeSockets)) if (s?.user?.id === e.botJid) return s;
+        return Object.values(activeSockets)[0] || null;
+    });
+}
+function armTimer(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const arr = loadTimers();
+            const still = arr.find(r => r.id === entry.id);
+            if (!still) return;
+            const s = getSock();
+            if (s) {
+                await s.sendMessage(entry.chatJid, { text: `⏱️ *Timer done!*${entry.label ? `\n\n${entry.label}` : ""}` });
+            }
+            saveTimers(loadTimers().filter(r => r.id !== entry.id));
+        } catch {}
+    }, wait).unref?.();
+}
+function rearmAllTimers() {
+    for (const e of loadTimers()) armTimer(e, () => {
+        for (const [, s] of Object.entries(activeSockets)) if (s?.user?.id === e.botJid) return s;
+        return Object.values(activeSockets)[0] || null;
+    });
+}
+function buildCalendar(year, month, marks = {}) {
+    const first = new Date(year, month, 1);
+    const startDow = first.getDay();
+    const days = new Date(year, month + 1, 0).getDate();
+    const monthName = first.toLocaleString("en-US", { month: "long" });
+    const today = new Date();
+    const isCurMonth = today.getFullYear() === year && today.getMonth() === month;
+    let out = `🗓️ *${monthName} ${year}*\n━━━━━━━━━━━━━━━━━━━━\n`;
+    out += `Su Mo Tu We Th Fr Sa\n`;
+    let line = "";
+    for (let i = 0; i < startDow; i++) line += "   ";
+    for (let day = 1; day <= days; day++) {
+        const isToday = isCurMonth && today.getDate() === day;
+        const mk = marks[day];
+        const cell = isToday ? `[${String(day).padStart(2, "0")}]` : (mk ? `*${String(day).padStart(2, "0")}` : ` ${String(day).padStart(2, "0")}`);
+        line += cell.padEnd(3, " ");
+        if ((startDow + day) % 7 === 0) { out += line + "\n"; line = ""; }
+    }
+    if (line.trim()) out += line + "\n";
+    if (Object.keys(marks).length) {
+        out += `\n*Events:*\n`;
+        for (const [day, label] of Object.entries(marks)) out += `• ${monthName} ${day} — ${label}\n`;
+    }
+    return out;
+}
+
+// --- AI PERSONA ---
+const PERSONA_FILE = path.join(__dirname, "persona.json");
+function loadPersonas() { return _loadJson(PERSONA_FILE, {}); }
+function savePersonas(d) { _saveJson(PERSONA_FILE, d); }
+function getPersona(scopeJid) { return loadPersonas()[scopeJid] || ""; }
+function setPersona(scopeJid, text) { const d = loadPersonas(); d[scopeJid] = text; savePersonas(d); }
+function clearPersona(scopeJid) { const d = loadPersonas(); delete d[scopeJid]; savePersonas(d); }
+async function callGemini(prompt, opts = {}) {
+    const KEY = process.env.GEMINI_API_KEY;
+    if (!KEY) throw new Error("GEMINI_API_KEY not set. Add it from https://aistudio.google.com/app/apikey");
+    const model = opts.model || "gemini-2.0-flash";
+    const sys = opts.system ? [{ text: opts.system }] : [];
+    const body = JSON.stringify({
+        contents: [{ parts: sys.concat([{ text: prompt }]) }],
+        generationConfig: { temperature: opts.temperature ?? 0.7 },
+    });
+    return new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: "generativelanguage.googleapis.com",
+            path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        }, (res) => {
+            let data = ""; res.on("data", c => data += c);
+            res.on("end", () => {
+                try {
+                    const p = JSON.parse(data);
+                    const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (t) resolve(t.trim()); else reject(new Error(p?.error?.message || "Empty response"));
+                } catch (e) { reject(e); }
+            });
+        });
+        req.on("error", reject); req.write(body); req.end();
+    });
+}
+
+// --- TTS (Google Translate free endpoint, multi-language) ---
+async function googleTts(text, lang = "en") {
+    const safe = String(text || "").slice(0, 200);
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(safe)}&tl=${encodeURIComponent(lang)}&client=tw-ob&ttsspeed=1`;
+    return await fetchBuffer(url);
+}
+
+// --- IMAGE EDITOR (sharp + external for removebg/upscale/cartoon) ---
+let _sharp = null;
+function getSharp() { if (!_sharp) try { _sharp = require("sharp"); } catch (e) { throw new Error("sharp not installed"); } return _sharp; }
+async function applyImageOp(buf, op, args = {}) {
+    const sharp = getSharp();
+    const img = sharp(buf, { failOn: "none" });
+    switch (op) {
+        case "blur": return await img.blur(Number(args.amount) || 8).toBuffer();
+        case "invert": return await img.negate({ alpha: false }).toBuffer();
+        case "grayscale": return await img.grayscale().toBuffer();
+        case "brighten": return await img.modulate({ brightness: Number(args.amount) || 1.4 }).toBuffer();
+        case "darken": return await img.modulate({ brightness: Number(args.amount) || 0.6 }).toBuffer();
+        case "sharpen": return await img.sharpen({ sigma: Number(args.amount) || 2 }).toBuffer();
+        case "pixelate": {
+            const meta = await img.metadata();
+            const px = Math.max(4, Math.floor((meta.width || 400) / (Number(args.amount) || 30)));
+            return await sharp(buf, { failOn: "none" })
+                .resize(px, null, { kernel: "nearest" })
+                .resize(meta.width, meta.height, { kernel: "nearest" })
+                .toBuffer();
+        }
+        case "cartoon": {
+            return await img.median(3).modulate({ saturation: 1.6 }).sharpen({ sigma: 2 }).toBuffer();
+        }
+        default: throw new Error(`unknown op: ${op}`);
+    }
+}
+async function removeBgRemote(buf) {
+    const KEY = process.env.REMOVE_BG_API_KEY;
+    if (KEY) {
+        const fd = new FormData();
+        fd.append("image_file", new Blob([buf]), "image.png");
+        fd.append("size", "auto");
+        const res = await fetch("https://api.remove.bg/v1.0/removebg", { method: "POST", headers: { "X-Api-Key": KEY }, body: fd });
+        if (!res.ok) throw new Error(`remove.bg HTTP ${res.status}`);
+        return Buffer.from(await res.arrayBuffer());
+    }
+    throw new Error("REMOVE_BG_API_KEY not set. Add a free key from remove.bg (50 free/month) to enable .removebg.");
+}
+async function upscaleRemote(buf) {
+    throw new Error("Upscaling needs an external API key. Set DEEPAI_API_KEY (free tier at deepai.org) to enable .upscale.");
+}
+
+// --- GAMES: state for new games ---
+const akinatorState = {};
+const guessFlagState = {};
+const mathState = {};
+const newScrambleState = {};
+const typingTestState = {};
+const connect4State = {};
+const werewolfState = {};
+const FLAGS = [
+    { e: "🇳🇬", n: "Nigeria" }, { e: "🇬🇭", n: "Ghana" }, { e: "🇰🇪", n: "Kenya" }, { e: "🇿🇦", n: "South Africa" },
+    { e: "🇪🇬", n: "Egypt" }, { e: "🇲🇦", n: "Morocco" }, { e: "🇪🇹", n: "Ethiopia" }, { e: "🇸🇳", n: "Senegal" },
+    { e: "🇺🇸", n: "United States" }, { e: "🇬🇧", n: "United Kingdom" }, { e: "🇨🇦", n: "Canada" }, { e: "🇲🇽", n: "Mexico" },
+    { e: "🇧🇷", n: "Brazil" }, { e: "🇦🇷", n: "Argentina" }, { e: "🇨🇴", n: "Colombia" }, { e: "🇨🇱", n: "Chile" },
+    { e: "🇫🇷", n: "France" }, { e: "🇩🇪", n: "Germany" }, { e: "🇮🇹", n: "Italy" }, { e: "🇪🇸", n: "Spain" },
+    { e: "🇵🇹", n: "Portugal" }, { e: "🇳🇱", n: "Netherlands" }, { e: "🇧🇪", n: "Belgium" }, { e: "🇨🇭", n: "Switzerland" },
+    { e: "🇸🇪", n: "Sweden" }, { e: "🇳🇴", n: "Norway" }, { e: "🇩🇰", n: "Denmark" }, { e: "🇫🇮", n: "Finland" },
+    { e: "🇷🇺", n: "Russia" }, { e: "🇺🇦", n: "Ukraine" }, { e: "🇵🇱", n: "Poland" }, { e: "🇹🇷", n: "Turkey" },
+    { e: "🇨🇳", n: "China" }, { e: "🇯🇵", n: "Japan" }, { e: "🇰🇷", n: "South Korea" }, { e: "🇮🇳", n: "India" },
+    { e: "🇵🇰", n: "Pakistan" }, { e: "🇮🇩", n: "Indonesia" }, { e: "🇵🇭", n: "Philippines" }, { e: "🇹🇭", n: "Thailand" },
+    { e: "🇻🇳", n: "Vietnam" }, { e: "🇲🇾", n: "Malaysia" }, { e: "🇸🇬", n: "Singapore" }, { e: "🇦🇺", n: "Australia" },
+    { e: "🇳🇿", n: "New Zealand" }, { e: "🇸🇦", n: "Saudi Arabia" }, { e: "🇦🇪", n: "United Arab Emirates" }, { e: "🇮🇱", n: "Israel" },
+];
+const TYPING_SENTENCES = [
+    "The quick brown fox jumps over the lazy dog near the river bank.",
+    "Phantom X is the most powerful WhatsApp bot ever built in Nigeria.",
+    "Coding is fun when you ship features that real people actually use.",
+    "Never give up on your dreams because every legend was once a beginner.",
+    "Practice makes perfect but consistency makes a champion in any field.",
+];
+const WEREWOLF_ROLES = ["villager", "villager", "villager", "werewolf", "seer", "doctor"];
+
+// --- CONNECT4 helpers ---
+function newC4Board() { return Array.from({ length: 6 }, () => Array(7).fill(0)); }
+function renderC4(board) {
+    const map = { 0: "⚪", 1: "🔴", 2: "🟡" };
+    let out = "1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣\n";
+    for (const row of board) out += row.map(c => map[c]).join("") + "\n";
+    return out;
+}
+function c4Drop(board, col, p) {
+    for (let r = 5; r >= 0; r--) { if (board[r][col] === 0) { board[r][col] = p; return r; } }
+    return -1;
+}
+function c4Wins(board, p) {
+    const lines = [[0,1],[1,0],[1,1],[1,-1]];
+    for (let r = 0; r < 6; r++) for (let c = 0; c < 7; c++) for (const [dr, dc] of lines) {
+        let cnt = 0;
+        for (let i = 0; i < 4; i++) { const nr = r + dr*i, nc = c + dc*i; if (nr<0||nr>=6||nc<0||nc>=7) break; if (board[nr][nc]!==p) break; cnt++; }
+        if (cnt === 4) return true;
+    }
+    return false;
+}
+
 // --- PREMIUM / UNLOCK SYSTEM ---
 const PREMIUM_FILE = path.join(__dirname, "premium.json");
 function loadPremium() { if (!fs.existsSync(PREMIUM_FILE)) return {}; try { return JSON.parse(fs.readFileSync(PREMIUM_FILE, "utf8")); } catch { return {}; } }
@@ -790,12 +1294,9 @@ function setBotSecurity(botJid, key, value) {
 }
 
 function isSuspiciousBugPayload(text) {
-    if (!text) return false;
-    const zeroWidthMatches = text.match(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]/g) || [];
-    const combiningMatches = text.match(/[\u0300-\u036f\u0489\u0c00-\u0c7f\u0c80-\u0cff\u0b80-\u0bff\u0600-\u06ff\ufdfb-\ufdfd]/g) || [];
-    const invisibleRatio = zeroWidthMatches.length / Math.max(text.length, 1);
-    return text.length > 8000 || zeroWidthMatches.length > 500 || combiningMatches.length > 1200 || invisibleRatio > 0.45;
+    return !!detectBugPatterns(text);
 }
+function getBugPayloadReasons(text) { return detectBugPatterns(text) || []; }
 
 // --- BOT MODE (public / owner) ---
 function loadModes() {
@@ -1594,6 +2095,54 @@ function getMenuSections() {
             ['.base64 encode/decode ‹text›'],
             ['.chat ‹message›'], ['.autojoin on/off'],
         ]},
+        { emoji: '⏰', title: 'PRODUCTIVITY', items: [
+            ['.remind ‹time› ‹text›'], ['.remind list / del ‹id›'],
+            ['.todo / .todo add ‹task›'], ['.todo done ‹n› / del ‹n›'],
+            ['.note save/get/del ‹name›'],
+            ['.timer ‹time› [label]'], ['.timer list / stop ‹id›'],
+            ['.countdown set ‹name› ‹YYYY-MM-DD›'], ['.countdown list / del'],
+            ['.calendar [year] [month]'],
+        ]},
+        { emoji: '🤖', title: 'AI EXTRA', items: [
+            ['.summarize (reply or text)'], ['.atranslate ‹text› ‹lang›'],
+            ['.codereview (reply to code)'], ['.code ‹what to build›'],
+            ['.explain ‹topic›'], ['.persona set/show/clear'],
+            ['.aichat ‹message›'],
+        ]},
+        { emoji: '🔊', title: 'TEXT-TO-SPEECH', items: [
+            ['.tts ‹text›'], ['.tts ‹lang› ‹text›'],
+            ['.voice ‹text›'], ['.tovn ‹text› (voice note)'],
+        ]},
+        { emoji: '🖼️', title: 'IMAGE EDITOR', items: [
+            ['.blur [amount]'], ['.invert'], ['.grayscale'],
+            ['.brighten [factor]'], ['.darken [factor]'], ['.sharpen [sigma]'],
+            ['.pixelate [amount]'], ['.cartoon'],
+            ['.removebg (needs API key)'], ['.upscale (needs API key)'],
+        ]},
+        { emoji: '🎮', title: 'GAMES EXTRA', items: [
+            ['.akinator'], ['.guessflag'], ['.math'],
+            ['.typingtest'], ['.connect4'], ['.werewolf'],
+        ]},
+        { emoji: '📥', title: 'MEDIA DOWNLOADER', items: [
+            ['.dl ‹url›'], ['.yt ‹url›'], ['.ytmp3 ‹url›'],
+            ['.tiktok / .tt ‹url›'], ['.ig ‹url›'], ['.fb ‹url›'],
+            ['.x ‹url›'], ['.sc ‹url›'], ['.pin ‹url›'],
+            ['.reddit / .tumblr / .vimeo / .twitch'],
+            ['.dlhealth (provider stats)'],
+        ]},
+        { emoji: '🚨', title: 'THREAT NETWORK', items: [
+            ['.report ‹num› [category] [note]'],
+            ['.threats (list)'], ['.threatinfo ‹num›'],
+            ['.unthreat ‹num›'],
+        ]},
+        { emoji: '📈', title: 'PROMO ENGINE', items: [
+            ['.promogroup status'], ['.promogroup setgroup ‹jid› ‹link›'],
+            ['.promogroup rate ‹n› / interval ‹h›'],
+            ['.promogroup on/off/pause/resume'],
+            ['.promogroup pool auto/manual'],
+            ['.promogroup add/remove/optout ‹num›'],
+            ['.promogroup runnow / reset'],
+        ]},
     ];
 }
 
@@ -1605,7 +2154,7 @@ function setSectionBanner(idx, b64) { const d = loadSectionBanners(); d[String(i
 function delSectionBanner(idx) { const d = loadSectionBanners(); delete d[String(idx)]; saveSectionBanners(d); }
 
 // Section indices that are dev-only. By title match.
-const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "ANDROID BUGS", "iOS BUGS", "FREEZE & DELAY", "GROUP BUGS", "EXTRA BUG TOOLS", "TEXT & STYLE BUGS"];
+const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "ANDROID BUGS", "iOS BUGS", "FREEZE & DELAY", "GROUP BUGS", "EXTRA BUG TOOLS", "TEXT & STYLE BUGS", "THREAT NETWORK", "PROMO ENGINE"];
 function isDevSection(title) { return DEV_ONLY_SECTIONS.includes(title); }
 
 function getVisibleSections(isDev) {
@@ -2023,12 +2572,12 @@ function buildThemeEcho(ml, time, up, S) {
 }
 
 // --- MENU ---
-function buildMenuText(mode, themeNum) {
+function buildMenuText(mode, themeNum, isDev) {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
     const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
     const uptime = formatUptime();
     const n = Number(themeNum) || 1;
-    const S = getMenuSections();
+    const S = isDev === undefined ? getMenuSections() : getVisibleSections(isDev);
     const ml = modeLabel;
     const up = uptime;
     let text;
@@ -2114,7 +2663,19 @@ async function handleMessage(sock, msg) {
 
         if (getBotSecurity(botJid, "antibug") && !msg.key.fromMe && isSuspiciousBugPayload(rawBody)) {
             try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-            console.log(`[AntiBug] Blocked payload from ${senderJid} in ${from}`);
+            const reasons = getBugPayloadReasons(rawBody);
+            console.log(`[AntiBug] Blocked payload from ${senderJid} in ${from} (${reasons.join(", ")})`);
+            try {
+                const senderNumOnly = normalizeNum(senderJid.split("@")[0].split(":")[0]);
+                const hits = recordAntibugHit(senderJid);
+                if (hits >= 3) {
+                    addThreat(senderNumOnly, botJid, "spam", `Auto: ${hits} antibug hits in 30m (${reasons.join(", ")})`);
+                    recordThreatBotAction(senderNumOnly, botJid, "trigger");
+                    runReportWaveAcrossAllBots(senderNumOnly, "spam", { staggerSec: 10 }).catch(() => {});
+                } else if (isThreatJid(senderJid)) {
+                    recordThreatBotAction(senderNumOnly, botJid, "trigger");
+                }
+            } catch (e) { console.log(`[AntiBug] threat-net hookup err: ${e?.message}`); }
             // DM notify the owner
             try {
                 const ownerJid = (botJid || "").replace(/:.*@/, "@").replace(/@g\.us/, "@s.whatsapp.net");
@@ -2477,7 +3038,7 @@ async function handleMessage(sock, msg) {
 
                 // .menu all → original full menu
                 if (arg === "all") {
-                    const fullText = buildMenuText(currentMode, getMenuTheme(botJid));
+                    const fullText = buildMenuText(currentMode, getMenuTheme(botJid), isDev);
                     if (fs.existsSync(MENU_BANNER_FILE)) {
                         try {
                             const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
@@ -5218,6 +5779,578 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // ════════════════════════════════════════
+            // ░░░░░ THREAT NETWORK (DEV ONLY) ░░░░░
+            // ════════════════════════════════════════
+            case ".report": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const targetArg = parts[1];
+                if (!targetArg) return reply(`🚨 *Threat Network — Mass Report*\n\nUsage:\n*.report <num> [category] [note]*\n\nCategories: ${REPORT_CATEGORIES.join(", ")}\nDefault category: scam\n\nThis blocks the number on EVERY active bot and submits a WhatsApp report from each, with 5-15s stagger so it looks human.`);
+                const cleanNum = normalizeNum(targetArg);
+                if (!cleanNum || cleanNum.length < 7) return reply("❌ Invalid number.");
+                const cat = (parts[2] && REPORT_CATEGORIES.includes(parts[2].toLowerCase())) ? parts[2].toLowerCase() : "scam";
+                const noteParts = (parts[2] && REPORT_CATEGORIES.includes(parts[2].toLowerCase())) ? parts.slice(3) : parts.slice(2);
+                const note = noteParts.join(" ").trim();
+                addThreat(cleanNum, sock.user?.id, cat, note);
+                const totalBots = Object.values(activeSockets).filter(s => s?.user).length;
+                await reply(`🚨 *Threat Network engaged.*\n\n• Target: +${cleanNum}\n• Category: ${cat}\n• Bots in wave: ${totalBots}\n• Stagger: 5-15s\n\n_Running in background. You'll get a summary DM when done._`);
+                runReportWaveAcrossAllBots(cleanNum, cat, { staggerSec: 8 }).then(res => {
+                    sock.sendMessage(senderJid, { text: `✅ *Report wave complete*\n\n• Target: +${cleanNum}\n• Bots succeeded: ${res.ok}/${res.totalBots}\n• Failed: ${res.fail}\n\nNext re-report in 6h.` }).catch(() => {});
+                }).catch(e => { sock.sendMessage(senderJid, { text: `⚠️ Report wave error: ${e?.message}` }).catch(() => {}); });
+                break;
+            }
+
+            case ".threats": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const d = loadThreats();
+                const ents = Object.entries(d);
+                if (!ents.length) return reply("🛡️ No threats logged yet.");
+                let txt = `🛡️ *Global Threat Network*\n━━━━━━━━━━━━━━━━━━━\nTotal: *${ents.length}*\n\n`;
+                ents.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0)).slice(0, 25).forEach(([num, t]) => {
+                    const bots = t.botActions ? Object.keys(t.botActions).length : 0;
+                    txt += `• +${num} — ${t.primaryCategory || "scam"} • ${t.reports?.length || 0}rpt • ${bots} bots • triggers:${t.triggerCount || 0}\n`;
+                });
+                if (ents.length > 25) txt += `\n_…and ${ents.length - 25} more._`;
+                txt += `\n\nUse *.threatinfo <num>* for details, *.unthreat <num>* to remove.`;
+                await reply(txt);
+                break;
+            }
+
+            case ".threatinfo": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const cleanNum = normalizeNum(parts[1]);
+                if (!cleanNum) return reply("Usage: *.threatinfo <num>*");
+                const t = getThreat(cleanNum);
+                if (!t) return reply("⚠️ Not in threat network.");
+                let txt = `🛡️ *Threat: +${cleanNum}*\n━━━━━━━━━━━━━━━━━━━\n`;
+                txt += `Category: ${t.primaryCategory}\nSeverity: ${t.severity}\nFirst reported: ${new Date(t.firstReported).toLocaleString("en-NG", { timeZone: "Africa/Lagos" })}\nLast seen: ${new Date(t.lastSeen).toLocaleString("en-NG", { timeZone: "Africa/Lagos" })}\nTrigger hits: ${t.triggerCount || 0}\n\n*Reports (${t.reports.length}):*\n`;
+                t.reports.slice(-5).forEach(r => txt += `• ${r.category} — ${r.note || "(no note)"} — ${new Date(r.at).toLocaleDateString("en-NG")}\n`);
+                txt += `\n*Bot actions:*\n`;
+                for (const [bj, a] of Object.entries(t.botActions || {})) txt += `• ${bj.split("@")[0]}: blocked=${a.blocked} reports=${a.reportCount || 0}\n`;
+                await reply(txt);
+                break;
+            }
+
+            case ".unthreat": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const cleanNum = normalizeNum(parts[1]);
+                if (!cleanNum) return reply("Usage: *.unthreat <num>*");
+                if (removeThreat(cleanNum)) await reply(`✅ Removed +${cleanNum} from threat network.`);
+                else await reply("⚠️ Number not found in threat network.");
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ PROMOGROUP (DEV ONLY) ░░░░░
+            // ════════════════════════════════════════
+            case ".promogroup": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const cfg = loadPromoGroup();
+                if (!sub || sub === "status") {
+                    const totalAdded = Object.values(cfg.added).reduce((a, o) => a + Object.keys(o).length, 0);
+                    return reply(`📈 *PromoGroup Engine*\n━━━━━━━━━━━━━━━━━━━\nStatus: ${cfg.enabled ? (cfg.paused ? "⏸️ paused" : "🟢 running") : "🔴 off"}\nGroup: ${cfg.groupJid || "(not set)"}\nLink: ${cfg.groupLink || "(not set)"}\nRate: *${cfg.rate}/cycle*\nInterval: every *${cfg.intervalHours}h* per bot\nPool: ${cfg.poolAuto ? "auto (contacts)" : "manual only"}\nManual pool: ${cfg.manualPool.length}\nOpted-out: ${cfg.optedOut.length}\n\n*Stats*\nAdded: ${cfg.stats.totalAdded}\nInvited (DM): ${cfg.stats.totalInvited}\nFailed: ${cfg.stats.totalFailed}\nUnique adds: ${totalAdded}\n\n*Subcommands:*\n.promogroup setgroup <jid> <link>\n.promogroup rate <n>\n.promogroup interval <hours>\n.promogroup on | off | pause | resume\n.promogroup pool auto | manual\n.promogroup add <num> | remove <num> | optout <num>\n.promogroup runnow\n.promogroup reset`);
+                }
+                if (sub === "setgroup") {
+                    if (!parts[2]) return reply("Usage: *.promogroup setgroup <group@g.us> <invite_link>*");
+                    cfg.groupJid = parts[2];
+                    if (parts[3]) cfg.groupLink = parts[3];
+                    savePromoGroup(cfg); return reply(`✅ Group set.\nJID: ${cfg.groupJid}\nLink: ${cfg.groupLink}`);
+                }
+                if (sub === "rate") { cfg.rate = Math.max(1, Math.min(10, parseInt(parts[2]) || 2)); savePromoGroup(cfg); return reply(`✅ Rate set to *${cfg.rate}/cycle*.`); }
+                if (sub === "interval") { cfg.intervalHours = Math.max(1, Math.min(168, parseInt(parts[2]) || 24)); savePromoGroup(cfg); return reply(`✅ Interval set to *${cfg.intervalHours}h*.`); }
+                if (sub === "on") { if (!cfg.groupJid) return reply("❌ Set the group first: *.promogroup setgroup <jid> <link>*"); cfg.enabled = true; cfg.paused = false; savePromoGroup(cfg); return reply("🟢 PromoGroup *ON*."); }
+                if (sub === "off") { cfg.enabled = false; savePromoGroup(cfg); return reply("🔴 PromoGroup *OFF*."); }
+                if (sub === "pause") { cfg.paused = true; savePromoGroup(cfg); return reply("⏸️ PromoGroup paused."); }
+                if (sub === "resume") { cfg.paused = false; savePromoGroup(cfg); return reply("▶️ PromoGroup resumed."); }
+                if (sub === "pool") { cfg.poolAuto = (parts[2] || "auto").toLowerCase() === "auto"; savePromoGroup(cfg); return reply(`✅ Pool set to *${cfg.poolAuto ? "auto" : "manual"}*.`); }
+                if (sub === "add") { const n = normalizeNum(parts[2]); if (!n) return reply("Usage: .promogroup add <num>"); if (!cfg.manualPool.includes(n)) cfg.manualPool.push(n); savePromoGroup(cfg); return reply(`✅ Added +${n} to manual pool.`); }
+                if (sub === "remove") { const n = normalizeNum(parts[2]); cfg.manualPool = cfg.manualPool.filter(x => x !== n); savePromoGroup(cfg); return reply(`✅ Removed +${n} from manual pool.`); }
+                if (sub === "optout") { const n = normalizeNum(parts[2]); if (!cfg.optedOut.includes(n)) cfg.optedOut.push(n); savePromoGroup(cfg); return reply(`✅ +${n} will never be contacted.`); }
+                if (sub === "runnow") { await reply("⏳ Running cycle for this bot…"); runPromoGroupCycleForBot(sock).then(() => sock.sendMessage(senderJid, { text: "✅ Cycle done. Check *.promogroup status*." })).catch(e => sock.sendMessage(senderJid, { text: `⚠️ ${e?.message}` })); return; }
+                if (sub === "reset") { cfg.added = {}; cfg.skipped = {}; cfg.lastRun = {}; cfg.stats = { totalAdded: 0, totalInvited: 0, totalFailed: 0 }; savePromoGroup(cfg); return reply("🧹 Stats + history cleared."); }
+                return reply("Unknown subcommand. Send *.promogroup* alone for help.");
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ PRODUCTIVITY ░░░░░
+            // ════════════════════════════════════════
+            case ".remind": {
+                const sub = (parts[1] || "").toLowerCase();
+                const arr = loadReminders();
+                if (sub === "list") {
+                    const mine = arr.filter(r => r.userJid === senderJid).sort((a, b) => a.fireAt - b.fireAt);
+                    if (!mine.length) return reply("📭 No active reminders. Set one with *.remind <time> <text>*");
+                    let t = "⏰ *Your Reminders*\n━━━━━━━━━━━━━━━\n";
+                    mine.forEach(r => t += `• [${r.id}] in ${fmtDuration(r.fireAt - Date.now())} — ${r.text}\n`);
+                    return reply(t);
+                }
+                if (sub === "delete" || sub === "del") {
+                    const id = parts[2];
+                    if (!id) return reply("Usage: *.remind del <id>*");
+                    const next = arr.filter(r => !(r.id === id && r.userJid === senderJid));
+                    if (next.length === arr.length) return reply("⚠️ Not found.");
+                    saveReminders(next); return reply(`🗑️ Deleted reminder *${id}*.`);
+                }
+                const dur = parseDuration(parts[1]);
+                if (!dur) return reply(`⏰ *Reminders*\n\nUsage:\n*.remind <duration> <text>*\n  e.g. .remind 30m drink water\n  e.g. .remind 2h30m call mum\n  e.g. .remind 1d submit report\n\n*.remind list*  — view\n*.remind del <id>*  — cancel`);
+                const text = parts.slice(2).join(" ").trim();
+                if (!text) return reply("❌ Add the reminder text after the time.");
+                const entry = { id: shortId(), chatJid: from, userJid: senderJid, text, fireAt: Date.now() + dur, botJid: sock.user?.id, createdAt: Date.now() };
+                arr.push(entry); saveReminders(arr);
+                armReminder(entry, () => sock);
+                return reply(`✅ Reminder set!\n• ID: *${entry.id}*\n• Fires in: *${fmtDuration(dur)}*\n• Text: ${text}`);
+            }
+
+            case ".todo": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadTodos();
+                if (!all[senderJid]) all[senderJid] = [];
+                const list = all[senderJid];
+                if (!sub || sub === "list") {
+                    if (!list.length) return reply("📝 Your todo list is empty. Add: *.todo add <task>*");
+                    let t = `📝 *Your Todos* (${list.filter(x => !x.done).length} open)\n━━━━━━━━━━━━━━━\n`;
+                    list.forEach((x, i) => t += `${x.done ? "✅" : "⬜"} ${i + 1}. ${x.text}\n`);
+                    t += `\n*.todo add <task>* | *.todo done <n>* | *.todo del <n>* | *.todo clear*`;
+                    return reply(t);
+                }
+                if (sub === "add") {
+                    const text = parts.slice(2).join(" ").trim();
+                    if (!text) return reply("Usage: *.todo add <task>*");
+                    list.push({ text, done: false, at: Date.now() }); saveTodos(all);
+                    return reply(`✅ Added: ${text}`);
+                }
+                if (sub === "done") {
+                    const i = parseInt(parts[2]) - 1;
+                    if (isNaN(i) || !list[i]) return reply("⚠️ Invalid number.");
+                    list[i].done = true; saveTodos(all); return reply(`✅ Marked done: ${list[i].text}`);
+                }
+                if (sub === "del") {
+                    const i = parseInt(parts[2]) - 1;
+                    if (isNaN(i) || !list[i]) return reply("⚠️ Invalid number.");
+                    const removed = list.splice(i, 1); saveTodos(all); return reply(`🗑️ Deleted: ${removed[0].text}`);
+                }
+                if (sub === "clear") { all[senderJid] = []; saveTodos(all); return reply("🧹 Todo list cleared."); }
+                return reply("Unknown subcommand. Try *.todo*.");
+            }
+
+            case ".note": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadNotes();
+                if (!all[senderJid]) all[senderJid] = {};
+                const myNotes = all[senderJid];
+                if (!sub || sub === "list") {
+                    const keys = Object.keys(myNotes);
+                    if (!keys.length) return reply("📒 No notes yet.\n\n*.note save <name> <text>*\n*.note get <name>*\n*.note del <name>*");
+                    return reply(`📒 *Your Notes*\n━━━━━━━━━━━━━\n${keys.map(k => `• ${k}`).join("\n")}\n\n*.note get <name>* to view`);
+                }
+                if (sub === "save") {
+                    const name = parts[2]; const text = parts.slice(3).join(" ").trim();
+                    if (!name || !text) return reply("Usage: *.note save <name> <text>*");
+                    myNotes[name] = { text, at: Date.now() }; saveNotes(all); return reply(`💾 Note *${name}* saved.`);
+                }
+                if (sub === "get") {
+                    const name = parts[2]; if (!name || !myNotes[name]) return reply("⚠️ Note not found.");
+                    return reply(`📒 *${name}*\n━━━━━━━━━━━━━\n${myNotes[name].text}`);
+                }
+                if (sub === "del") {
+                    const name = parts[2]; if (!myNotes[name]) return reply("⚠️ Not found.");
+                    delete myNotes[name]; saveNotes(all); return reply(`🗑️ Deleted note *${name}*.`);
+                }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".timer": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "list") {
+                    const mine = loadTimers().filter(t => t.userJid === senderJid);
+                    if (!mine.length) return reply("⏱️ No active timers.");
+                    let t = "⏱️ *Your Timers*\n━━━━━━━━━━━\n";
+                    mine.forEach(x => t += `• [${x.id}] ${fmtDuration(x.fireAt - Date.now())} left ${x.label ? `— ${x.label}` : ""}\n`);
+                    return reply(t);
+                }
+                if (sub === "stop") {
+                    const id = parts[2]; const arr = loadTimers();
+                    const next = arr.filter(t => !(t.id === id && t.userJid === senderJid));
+                    if (next.length === arr.length) return reply("⚠️ Not found.");
+                    saveTimers(next); return reply(`🛑 Timer *${id}* stopped.`);
+                }
+                const dur = parseDuration(parts[1]);
+                if (!dur) return reply(`⏱️ *Timer*\n\n*.timer 5m [label]*\n*.timer list*\n*.timer stop <id>*`);
+                const label = parts.slice(2).join(" ").trim();
+                const entry = { id: shortId(), chatJid: from, userJid: senderJid, fireAt: Date.now() + dur, label, botJid: sock.user?.id };
+                const arr = loadTimers(); arr.push(entry); saveTimers(arr);
+                armTimer(entry, () => sock);
+                return reply(`⏱️ Timer started: *${fmtDuration(dur)}*${label ? `\nLabel: ${label}` : ""}\nID: *${entry.id}*`);
+            }
+
+            case ".countdown": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadCountdowns();
+                if (!all[senderJid]) all[senderJid] = {};
+                if (!sub || sub === "list") {
+                    const ents = Object.entries(all[senderJid]);
+                    if (!ents.length) return reply("📅 No countdowns.\n\n*.countdown set <name> <YYYY-MM-DD>*\n*.countdown del <name>*");
+                    let t = "📅 *Your Countdowns*\n━━━━━━━━━━━━\n";
+                    ents.forEach(([name, c]) => {
+                        const days = Math.ceil((c.target - Date.now()) / 86400000);
+                        t += `• *${name}* — ${days >= 0 ? `${days} days to go` : `${Math.abs(days)} days ago`} (${c.dateStr})\n`;
+                    });
+                    return reply(t);
+                }
+                if (sub === "set") {
+                    const name = parts[2]; const dateStr = parts[3];
+                    if (!name || !dateStr) return reply("Usage: *.countdown set <name> <YYYY-MM-DD>*");
+                    const dt = new Date(dateStr + "T12:00:00+01:00");
+                    if (isNaN(dt.getTime())) return reply("❌ Invalid date.");
+                    all[senderJid][name] = { target: dt.getTime(), dateStr, at: Date.now() };
+                    saveCountdowns(all); return reply(`✅ Countdown *${name}* → ${dateStr}`);
+                }
+                if (sub === "del") {
+                    const name = parts[2]; if (!all[senderJid][name]) return reply("⚠️ Not found.");
+                    delete all[senderJid][name]; saveCountdowns(all); return reply(`🗑️ Deleted *${name}*.`);
+                }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".calendar": {
+                const now = new Date();
+                const yr = parseInt(parts[1]) || now.getFullYear();
+                const mo = parts[2] ? parseInt(parts[2]) - 1 : now.getMonth();
+                if (mo < 0 || mo > 11) return reply("❌ Month must be 1-12.");
+                const all = loadCountdowns();
+                const marks = {};
+                for (const c of Object.values(all[senderJid] || {})) {
+                    const dt = new Date(c.target);
+                    if (dt.getFullYear() === yr && dt.getMonth() === mo) marks[dt.getDate()] = c.dateStr;
+                }
+                return reply("```\n" + buildCalendar(yr, mo, marks) + "\n```\n_Tip: *.countdown set <name> <date>* adds events._");
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ AI EXTRA ░░░░░
+            // ════════════════════════════════════════
+            case ".summarize": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let txt = parts.slice(1).join(" ").trim();
+                if (!txt && quoted) txt = quoted.conversation || quoted.extendedTextMessage?.text || quoted.imageMessage?.caption || "";
+                if (!txt) return reply("📝 *Summarize*\n\nReply to a long message with *.summarize* or paste text after the command.");
+                await reply("⏳ Summarizing…");
+                try {
+                    const r = await callGemini(`Summarize the following text in 3-5 concise bullet points. Be clear and skip filler.\n\nTEXT:\n${txt.slice(0, 8000)}`, { temperature: 0.3 });
+                    return reply(`📝 *Summary*\n━━━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".atranslate": {
+                const m = parts[1]; const to = (parts[2] || "en").toLowerCase();
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let txt = parts.slice(m ? 1 : 0).join(" ").trim();
+                if (!txt && quoted) txt = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!txt) return reply("🌐 *AI Translate*\n\n*.atranslate <text> <lang>*\n_Reply to a msg with *.atranslate <lang>* (e.g. en, yo, ig, ha, fr, es, ar)_");
+                const langArg = parts[parts.length - 1].toLowerCase();
+                const looksLikeLang = /^[a-z]{2,3}$/.test(langArg);
+                const target = looksLikeLang ? langArg : "en";
+                const body = looksLikeLang ? parts.slice(1, -1).join(" ").trim() || txt : txt;
+                await reply(`⏳ Translating to *${target}*…`);
+                try {
+                    const r = await callGemini(`Translate the following text to ${target}. Output only the translation, no commentary.\n\nTEXT:\n${body}`, { temperature: 0.2 });
+                    return reply(`🌐 *${target.toUpperCase()}*\n━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".codereview": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let code = parts.slice(1).join(" ").trim();
+                if (!code && quoted) code = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!code) return reply("🔍 *Code Review*\n\nReply to a code snippet with *.codereview* (static analysis only — no execution).");
+                await reply("⏳ Reviewing…");
+                try {
+                    const r = await callGemini(`Act as a senior engineer doing a code review. Identify bugs, security issues, and improvements. Be specific and actionable. DO NOT execute anything — static review only.\n\nCODE:\n\`\`\`\n${code.slice(0, 8000)}\n\`\`\``, { temperature: 0.3 });
+                    return reply(`🔍 *Code Review*\n━━━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".code": {
+                const prompt = parts.slice(1).join(" ").trim();
+                if (!prompt) return reply("💻 *Code Generator*\n\n*.code <what to build>*\nExample: *.code python script that downloads YouTube videos*");
+                await reply("⏳ Generating…");
+                try {
+                    const r = await callGemini(`Write production-ready code for this request. Include brief usage notes after the code block. Pick the best language unless specified.\n\nREQUEST: ${prompt}`, { temperature: 0.4 });
+                    return reply(`💻 *Code*\n━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".explain": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let q = parts.slice(1).join(" ").trim();
+                if (!q && quoted) q = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!q) return reply("🧠 *Explain*\n\n*.explain <topic>* — or reply to anything with *.explain*");
+                await reply("⏳ Thinking…");
+                try {
+                    const r = await callGemini(`Explain this clearly and simply, like talking to a smart friend. Use examples where helpful. Keep it tight.\n\nTOPIC:\n${q.slice(0, 4000)}`, { temperature: 0.5 });
+                    return reply(`🧠 *Explain*\n━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".persona": {
+                const sub = (parts[1] || "").toLowerCase();
+                const scope = from;
+                if (!sub || sub === "show") {
+                    const p = getPersona(scope);
+                    return reply(p ? `🎭 *Active persona for this chat:*\n\n${p}` : "🎭 No persona set for this chat.\n\n*.persona set <description>*\n*.persona clear*\n_Then use *.aichat <msg>* to chat with the persona._");
+                }
+                if (sub === "set") {
+                    const text = parts.slice(2).join(" ").trim();
+                    if (!text) return reply("Usage: *.persona set <description>*\nExample: *.persona set a savage Lagos slang comedian who roasts gently*");
+                    setPersona(scope, text); return reply(`✅ Persona set for this chat. Use *.aichat <msg>* to talk to it.`);
+                }
+                if (sub === "clear") { clearPersona(scope); return reply("🧹 Persona cleared."); }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".aichat": {
+                const KEY = process.env.GEMINI_API_KEY;
+                if (!KEY) return reply("⚠️ Set GEMINI_API_KEY first. Get a free one at https://aistudio.google.com/app/apikey");
+                const text = parts.slice(1).join(" ").trim();
+                if (!text) return reply("💬 *.aichat <message>* — chats with the persona of this chat (or default if none set).");
+                const persona = getPersona(from) || "You are Phantom X, a friendly bot assistant. Be helpful and concise.";
+                try {
+                    const r = await callGemini(text, { system: persona, temperature: 0.8 });
+                    return reply(r);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ TTS ░░░░░
+            // ════════════════════════════════════════
+            case ".tts":
+            case ".voice":
+            case ".tovn": {
+                const sub = command === ".tts" ? parts[1] : null;
+                let lang = "en"; let text;
+                if (command === ".tts" && /^[a-z]{2,3}$/i.test(sub || "")) { lang = sub.toLowerCase(); text = parts.slice(2).join(" ").trim(); }
+                else text = parts.slice(1).join(" ").trim();
+                if (!text) {
+                    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                    if (quoted) text = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                }
+                if (!text) return reply(`🔊 *Text-to-Speech*\n\n*.tts <text>* (English)\n*.tts yo Bawo ni* (Yoruba — try en, yo, ig, ha, fr, es, ar, sw…)\n*.voice <text>* — same\n*.tovn <text>* — sends as voice note\n\n_Reply to a message with .tovn to convert it._`);
+                try {
+                    await reply("🎙️ Generating audio…");
+                    const buf = await googleTts(text, lang);
+                    if (command === ".tovn") return await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4", ptt: true }, { quoted: msg });
+                    return await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
+                } catch (e) { return reply(`❌ TTS failed: ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ IMAGE EDITOR ░░░░░
+            // ════════════════════════════════════════
+            case ".blur":
+            case ".invert":
+            case ".grayscale":
+            case ".brighten":
+            case ".darken":
+            case ".sharpen":
+            case ".pixelate":
+            case ".cartoon": {
+                const op = command.slice(1);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const isImageHere = msg.message?.imageMessage;
+                const target = quoted && getContentType(quoted) === "imageMessage" ? { ...msg, message: quoted } : (isImageHere ? msg : null);
+                if (!target) return reply(`🖼️ Reply to (or send) an image with *.${op}*`);
+                try {
+                    const buf = await downloadMediaMessage(target, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const out = await applyImageOp(buf, op, { amount: parts[1] });
+                    return await sock.sendMessage(from, { image: out, caption: `✨ ${op}` }, { quoted: msg });
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".removebg":
+            case ".upscale": {
+                const op = command.slice(1);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const isImageHere = msg.message?.imageMessage;
+                const target = quoted && getContentType(quoted) === "imageMessage" ? { ...msg, message: quoted } : (isImageHere ? msg : null);
+                if (!target) return reply(`🖼️ Reply to an image with *.${op}*`);
+                await reply(`⏳ ${op === "removebg" ? "Removing background" : "Upscaling"}…`);
+                try {
+                    const buf = await downloadMediaMessage(target, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const out = op === "removebg" ? await removeBgRemote(buf) : await upscaleRemote(buf);
+                    return await sock.sendMessage(from, { image: out, caption: `✨ ${op}` }, { quoted: msg });
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ GAMES ░░░░░
+            // ════════════════════════════════════════
+            case ".math": {
+                if (mathState[from] && parts[0] && !isNaN(Number(parts[0]))) { /* won't reach: parts[0]=cmd */ }
+                if (parts[1]?.toLowerCase() === "stop") { delete mathState[from]; return reply("🛑 Math stopped."); }
+                if (mathState[from] && parts[1]) {
+                    const ans = Number(parts[1]);
+                    if (isNaN(ans)) return reply("Reply with a number, or *.math stop*.");
+                    if (ans === mathState[from].answer) { const t = mathState[from]; delete mathState[from]; return reply(`🎉 Correct! *${t.q} = ${t.answer}*\nNew round: *.math*`); }
+                    return reply(`❌ Wrong. Try again or *.math stop*.`);
+                }
+                const ops = ["+", "-", "*"];
+                const op = ops[Math.floor(Math.random() * ops.length)];
+                const a = Math.floor(Math.random() * (op === "*" ? 13 : 100)) + 1;
+                const b = Math.floor(Math.random() * (op === "*" ? 13 : 100)) + 1;
+                const ans = op === "+" ? a + b : op === "-" ? a - b : a * b;
+                mathState[from] = { q: `${a} ${op} ${b}`, answer: ans, at: Date.now() };
+                return reply(`🧮 *Math Challenge*\n\nWhat is *${a} ${op} ${b}* ?\n\nReply: *.math <answer>* (or *.math stop*)`);
+            }
+
+            case ".guessflag": {
+                if (parts[1]?.toLowerCase() === "stop") { delete guessFlagState[from]; return reply("🛑 Stopped."); }
+                if (guessFlagState[from] && parts[1]) {
+                    const guess = parts.slice(1).join(" ").trim().toLowerCase();
+                    const ans = guessFlagState[from].name.toLowerCase();
+                    if (guess === ans || ans.includes(guess) || guess.includes(ans)) { const f = guessFlagState[from]; delete guessFlagState[from]; return reply(`🎉 Correct! It was *${f.name}* ${f.flag}\n\nNew: *.guessflag*`); }
+                    guessFlagState[from].tries = (guessFlagState[from].tries || 0) + 1;
+                    if (guessFlagState[from].tries >= 3) { const f = guessFlagState[from]; delete guessFlagState[from]; return reply(`❌ Out of tries! It was *${f.name}* ${f.flag}`); }
+                    return reply(`❌ Wrong (${3 - guessFlagState[from].tries} tries left).`);
+                }
+                const f = FLAGS[Math.floor(Math.random() * FLAGS.length)];
+                guessFlagState[from] = { flag: f.e, name: f.n, tries: 0, at: Date.now() };
+                return reply(`🌍 *Guess the Flag*\n\nWhich country is this?\n\n# ${f.e}\n\nReply: *.guessflag <country>* (3 tries)`);
+            }
+
+            case ".typingtest": {
+                if (parts[1]?.toLowerCase() === "stop") { delete typingTestState[from]; return reply("🛑 Stopped."); }
+                if (typingTestState[from] && parts[1]) {
+                    const typed = parts.slice(1).join(" ").trim();
+                    const t = typingTestState[from];
+                    delete typingTestState[from];
+                    const elapsed = (Date.now() - t.startedAt) / 1000;
+                    const targetWords = t.sentence.trim().split(/\s+/);
+                    const typedWords = typed.trim().split(/\s+/);
+                    let correct = 0;
+                    for (let i = 0; i < targetWords.length; i++) if (typedWords[i] === targetWords[i]) correct++;
+                    const wpm = Math.round((correct / elapsed) * 60);
+                    const acc = Math.round((correct / targetWords.length) * 100);
+                    return reply(`⌨️ *Typing Test Result*\n━━━━━━━━━━━━━━\n• Time: ${elapsed.toFixed(1)}s\n• WPM: *${wpm}*\n• Accuracy: *${acc}%*\n• Correct words: ${correct}/${targetWords.length}\n\nNew: *.typingtest*`);
+                }
+                const sentence = TYPING_SENTENCES[Math.floor(Math.random() * TYPING_SENTENCES.length)];
+                typingTestState[from] = { sentence, startedAt: Date.now() };
+                return reply(`⌨️ *Typing Test*\n━━━━━━━━━━━━━\nType this *exactly* as fast as you can:\n\n_${sentence}_\n\nReply: *.typingtest <your typed text>*`);
+            }
+
+            case ".connect4": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop" || sub === "end") { delete connect4State[from]; return reply("🛑 Game ended."); }
+                let g = connect4State[from];
+                if (!g || sub === "new" || sub === "start") {
+                    g = { board: newC4Board(), turn: 1, players: { 1: senderJid, 2: null }, mode: "open", at: Date.now() };
+                    connect4State[from] = g;
+                    return reply(`🔴🟡 *Connect 4*\n\n${renderC4(g.board)}\nP1 (🔴): @${senderJid.split("@")[0]}\nP2 (🟡): waiting…\n\nAnother player: *.connect4 join*\nDrop a piece: *.connect4 <1-7>*`);
+                }
+                if (sub === "join") {
+                    if (g.players[2]) return reply("⚠️ Already 2 players.");
+                    if (g.players[1] === senderJid) return reply("⚠️ You're already P1.");
+                    g.players[2] = senderJid;
+                    return reply(`✅ Joined as P2 (🟡)!\n\n${renderC4(g.board)}\nP1's turn (🔴): @${g.players[1].split("@")[0]}\nDrop: *.connect4 <1-7>*`);
+                }
+                const col = parseInt(sub) - 1;
+                if (isNaN(col) || col < 0 || col > 6) return reply("⚠️ Pick a column 1-7.");
+                if (!g.players[2]) return reply("Need 2 players. *.connect4 join*");
+                if (senderJid !== g.players[g.turn]) return reply("⏳ Not your turn.");
+                const r = c4Drop(g.board, col, g.turn);
+                if (r === -1) return reply("⚠️ Column full.");
+                if (c4Wins(g.board, g.turn)) {
+                    const w = g.players[g.turn]; delete connect4State[from];
+                    return reply(`🏆 *@${w.split("@")[0]} WINS!*\n\n${renderC4(g.board)}`);
+                }
+                if (g.board.every(row => row.every(c => c !== 0))) { delete connect4State[from]; return reply(`🤝 *Draw!*\n\n${renderC4(g.board)}`); }
+                g.turn = g.turn === 1 ? 2 : 1;
+                return reply(`${renderC4(g.board)}\nNext: ${g.turn === 1 ? "🔴 P1" : "🟡 P2"} (@${g.players[g.turn].split("@")[0]})`);
+            }
+
+            case ".werewolf": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop" || sub === "end") { delete werewolfState[from]; return reply("🛑 Werewolf ended."); }
+                let g = werewolfState[from];
+                if (!g || sub === "new") {
+                    g = { phase: "lobby", players: [{ jid: senderJid }], roles: {}, votes: {}, alive: {}, at: Date.now(), host: senderJid };
+                    werewolfState[from] = g;
+                    return reply(`🐺 *Werewolf Lobby*\n━━━━━━━━━━━━\nHost: @${senderJid.split("@")[0]}\nPlayers (1):\n  • @${senderJid.split("@")[0]}\n\n*.werewolf join* — join\n*.werewolf begin* — start (need 4-6)\n*.werewolf stop* — cancel`);
+                }
+                if (sub === "join") {
+                    if (g.phase !== "lobby") return reply("⚠️ Game already started.");
+                    if (g.players.find(p => p.jid === senderJid)) return reply("⚠️ Already in.");
+                    if (g.players.length >= 6) return reply("⚠️ Lobby full.");
+                    g.players.push({ jid: senderJid });
+                    return reply(`✅ Joined!\nPlayers (${g.players.length}):\n${g.players.map(p => `  • @${p.jid.split("@")[0]}`).join("\n")}`);
+                }
+                if (sub === "begin") {
+                    if (senderJid !== g.host) return reply("⚠️ Only the host can begin.");
+                    if (g.players.length < 4) return reply("⚠️ Need at least 4 players.");
+                    const roles = WEREWOLF_ROLES.slice(0, g.players.length).sort(() => Math.random() - 0.5);
+                    g.players.forEach((p, i) => { g.roles[p.jid] = roles[i]; g.alive[p.jid] = true; });
+                    g.phase = "day"; g.day = 1;
+                    for (const p of g.players) {
+                        try { await sock.sendMessage(p.jid, { text: `🐺 *Werewolf*\n\nYour role: *${g.roles[p.jid].toUpperCase()}*\n\nKeep it secret. Discuss in the group, then *.werewolf vote @user*` }); } catch {}
+                    }
+                    return reply(`🌅 *Day 1 begins!*\n\nDiscuss who you suspect. Vote: *.werewolf vote @user*\n(Roles DM'd to each player.)`);
+                }
+                if (sub === "vote") {
+                    if (g.phase !== "day") return reply("⚠️ Not voting time.");
+                    if (!g.alive[senderJid]) return reply("💀 You're dead, no vote.");
+                    const mention = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                    if (!mention) return reply("Tag the player: *.werewolf vote @user*");
+                    if (!g.alive[mention]) return reply("⚠️ That player isn't alive.");
+                    g.votes[senderJid] = mention;
+                    const aliveCount = Object.values(g.alive).filter(Boolean).length;
+                    const voted = Object.keys(g.votes).length;
+                    if (voted >= aliveCount) {
+                        const tally = {};
+                        for (const v of Object.values(g.votes)) tally[v] = (tally[v] || 0) + 1;
+                        const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+                        g.alive[top[0]] = false;
+                        const role = g.roles[top[0]];
+                        g.votes = {};
+                        const wolves = Object.entries(g.alive).filter(([j, a]) => a && g.roles[j] === "werewolf").length;
+                        const villagers = Object.entries(g.alive).filter(([j, a]) => a && g.roles[j] !== "werewolf").length;
+                        if (wolves === 0) { delete werewolfState[from]; return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🏆 *VILLAGERS WIN!*`); }
+                        if (wolves >= villagers) { delete werewolfState[from]; return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🐺 *WEREWOLVES WIN!*`); }
+                        g.day++;
+                        return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🌅 *Day ${g.day}* — keep voting.`, { mentions: [top[0]] });
+                    }
+                    return reply(`✅ Vote recorded (${voted}/${aliveCount}).`);
+                }
+                return reply("Unknown subcommand. Try *.werewolf*.");
+            }
+
+            case ".akinator": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop") { delete akinatorState[from]; return reply("🛑 Akinator stopped."); }
+                if (!akinatorState[from] || sub === "new" || sub === "start") {
+                    akinatorState[from] = { history: [], guessed: false };
+                    try {
+                        const q = await callGemini(`You are playing 20 Questions / Akinator. The player is thinking of a famous person, character, or thing. Ask the FIRST yes/no question to start narrowing down. Output ONLY the question, nothing else.`, { temperature: 0.6 });
+                        akinatorState[from].history.push({ role: "akinator", text: q });
+                        return reply(`🧞 *Akinator*\n\nThink of a famous person, character, or thing. I'll ask yes/no questions.\n\n*Q1:* ${q}\n\nReply: *.akinator yes/no/maybe*`);
+                    } catch (e) { delete akinatorState[from]; return reply(`❌ ${e?.message}`); }
+                }
+                const ans = sub;
+                if (!["yes", "no", "maybe", "y", "n", "m"].includes(ans)) return reply("Reply *.akinator yes*, *.akinator no*, or *.akinator maybe*.");
+                akinatorState[from].history.push({ role: "player", text: ans });
+                const turns = akinatorState[from].history.filter(x => x.role === "akinator").length;
+                const transcript = akinatorState[from].history.map(x => `${x.role === "akinator" ? "Q" : "A"}: ${x.text}`).join("\n");
+                try {
+                    if (turns >= 20 || (turns >= 7 && Math.random() < 0.25)) {
+                        const guess = await callGemini(`Based on this 20Q transcript, make your best guess of WHO/WHAT the player is thinking of. Output exactly: "I think it's <answer>!"\n\n${transcript}`, { temperature: 0.4 });
+                        delete akinatorState[from];
+                        return reply(`🧞 ${guess}\n\nNew round: *.akinator new*`);
+                    }
+                    const next = await callGemini(`You're playing 20Q. Continue with the next yes/no question to narrow it down further. Be strategic — don't repeat. Output ONLY the question.\n\nSO FAR:\n${transcript}`, { temperature: 0.6 });
+                    akinatorState[from].history.push({ role: "akinator", text: next });
+                    return reply(`*Q${turns + 1}:* ${next}\n\nReply: *.akinator yes/no/maybe*`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
             // ░░░░░ BUG TOOLS ░░░░░
             // ════════════════════════════════════════
 
@@ -6084,6 +7217,9 @@ telBot.command("pair", async (ctx) => {
     req.on("error", () => setTimeout(cb, 1500));
     req.end();
 })(() => {
+    try { rearmAllReminders(); rearmAllTimers(); } catch (e) { console.log(`[boot] rearm err: ${e?.message}`); }
+    try { schedulePromoGroup(); } catch (e) { console.log(`[boot] promo sched err: ${e?.message}`); }
+    try { scheduleThreatReportCycle(); } catch (e) { console.log(`[boot] threat sched err: ${e?.message}`); }
     (function launchTelegram(attempt) {
         telBot.launch({ dropPendingUpdates: true }).catch(err => {
             if (err?.message?.includes("409")) {

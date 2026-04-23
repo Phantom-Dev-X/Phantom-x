@@ -188,3 +188,19 @@ npm start
 - **Fly.io** — Free allowance. Slightly more setup but reliable.
 
 > For 24/7 uptime: ping your app URL every 5 minutes using **UptimeRobot** (uptimerobot.com, free) to prevent sleep on free tiers.
+
+## Build Log — 2026-04-23 (Batch 3)
+Massive feature drop, all in `index.js`:
+- **Threat Network** — `.report <num> [cat] [note]`, `.threats`, `.threatinfo`, `.unthreat`. Cross-bot mass-block + WhatsApp report wave with 5–15s human-like stagger; auto re-report cycle every 30 min for 7 days. Stored in `global_threats.json`.
+- **Stronger antibug** — replaced `isSuspiciousBugPayload` with multi-signal `detectBugPatterns` (zero-width, combining marks, newline floods, mention bombs, emoji floods, char-repeat). 3 hits in 30 min auto-adds the sender to threat network and triggers a wave.
+- **Dev-only menu filter** — `THREAT NETWORK` & `PROMO ENGINE` sections plus `.menu all` now respect `isDev`.
+- **PromoGroup engine** — `.promogroup` (status / setgroup / rate / interval / on-off-pause-resume / pool / add / remove / optout / runnow / reset). Per-bot deterministic stagger from hash(botJid), Lagos business-hour gating, falls back to DM invite when group-add returns 403/408/409. Stored in `promogroup.json`.
+- **Productivity** — `.remind`, `.todo`, `.note`, `.timer`, `.countdown`, `.calendar` with persistence + auto re-arm on boot.
+- **AI extras** — `.summarize`, `.atranslate`, `.codereview` (static-only), `.code`, `.explain`, `.persona`, `.aichat`. Generic `callGemini(prompt, opts)` reuses Gemini 2.0 Flash.
+- **TTS** — `.tts`, `.voice`, `.tovn` via Google Translate free endpoint, multi-lang.
+- **Image editor** — `.blur .invert .grayscale .brighten .darken .sharpen .pixelate .cartoon` via sharp; `.removebg` (REMOVE_BG_API_KEY) and `.upscale` placeholder (DEEPAI_API_KEY).
+- **Games** — `.akinator` (Gemini-powered 20Q), `.guessflag`, `.math`, `.typingtest`, `.connect4` (2 players), `.werewolf` (4–6 players, role DMs).
+
+New files at runtime: `global_threats.json`, `promogroup.json`, `reminders.json`, `todos.json`, `notes.json`, `timers.json`, `countdowns.json`, `persona.json`.
+
+Optional env keys: `GEMINI_API_KEY` (AI/Akinator), `REMOVE_BG_API_KEY` (background removal), `DEEPAI_API_KEY` (upscale).
