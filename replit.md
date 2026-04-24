@@ -1,4 +1,29 @@
-# Phantom-X
+# Eclipse (formerly Phantom-X)
+
+## Eclipse personality (Build Log — 2026-04-24)
+The user-facing surface is now Eclipse. Bot replies are short and precise; menus are 30 chars wide with no emojis on borders.
+
+- `.menu` / `.eclipse` / `.phantom` — 3-stage edited animation: init → "the void exists" → main picker (single message, edited in place via Baileys `edit: sent.key`, ~3s between stages).
+- `.menu <num>` — Jump straight to the chosen top-level section.
+- Removed: `.menu style`, `.menu all`, `.menu <num>` legacy paths, `.help <topic>` long branches. (`.menudesign` themes 1–20 still exist but are no longer wired into `.menu`.)
+- Top-level sections (visible to all unless marked dev):
+  - `.chains` — Chains of Binding (group control, tag, automation, protection, threshold, mirror/clone, judgment, arena, revelry, compass, conduit, hourglass, forge, pitch, oracle)
+  - `.codex` — Codex of the End (pulse, ledger)
+  - `.ascend` — Ascension Protocol (premium gate, dev contact)
+  - `.flare` — Solar Flare (guide, revival, signal)
+  - `.abyss` — Eye of the Abyss (dev only: throne, pact, vault, registry, silent chamber)
+- `.dev` / `.devnumber` / `.devcontact` — Eclipse-themed dev contact card (uses first `DEV_NUMBERS` entry).
+- Short replies via `eclipseSay(key)`: e.g. mute → "shackled.", ban → "extinguished.", antilink on → "the ward has been raised.", welcome on → "the threshold greets.", warn → "marked. n/3.", etc.
+- All Eclipse helpers live in `index.js` between `// ECLIPSE PERSONALITY` block (~line 2577) and `function buildMenuText`. Section tree is in `getEclipseTree()`; phrase map is `ECLIPSE_PHRASES`.
+
+## Out of scope (intentionally untouched)
+The following code paths still exist but are NOT listed in the Eclipse menu and were not renamed/repackaged:
+- Crash / freeze / forceclose / groupcrash / forwardstorm payload commands
+- Spam / bomb / ghost-ping / zalgo flood commands
+- `.report` / `.threats` / `.threatinfo` / `.unthreat` mass-report network
+- `.promogroup` auto-promo engine
+
+# Phantom-X (legacy notes below)
 
 ## State files (Batch 1)
 - `afk.json` — per-jid AFK status & reason

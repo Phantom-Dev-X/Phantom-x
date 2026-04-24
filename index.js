@@ -2572,6 +2572,297 @@ function buildThemeEcho(ml, time, up, S) {
 }
 
 // --- MENU ---
+// ════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░  ECLIPSE PERSONALITY  ░░░░░░░░░░░░░░░░░░░░
+// 30-char wide menu surface. Short, precise replies. 3-stage .menu.
+// ════════════════════════════════════════════════════════════════════
+const ECLIPSE_WIDTH = 30;
+const ECLIPSE_BORDER = "═".repeat(ECLIPSE_WIDTH);
+const ECLIPSE_RULE   = "─".repeat(ECLIPSE_WIDTH);
+
+function eclipseCenter(text) {
+    const t = String(text);
+    if (t.length >= ECLIPSE_WIDTH) return t;
+    const pad = Math.floor((ECLIPSE_WIDTH - t.length) / 2);
+    return " ".repeat(pad) + t;
+}
+
+function eclipseHeader(title) {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter(title)}\n${ECLIPSE_BORDER}`;
+}
+
+function eclipseFooter() {
+    return ECLIPSE_BORDER;
+}
+
+// Section tree — only legitimate sections.
+function getEclipseTree() {
+    return {
+        chains: {
+            title: "CHAINS OF BINDING",
+            cmd: ".chains",
+            blurb: "the dark hand. unbound.",
+            devOnly: false,
+            minis: [
+                { key: "binds",     title: "BINDINGS",     blurb: "group dominion.",
+                  cmds: [".add <num>",".kick @user",".promote @user",".demote @user",".link",".revoke",".mute",".unmute",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid"] },
+                { key: "heralds",   title: "HERALDS",      blurb: "the call goes out.",
+                  cmds: [".hidetag",".tagall",".readmore",".broadcast <m> <msg>",".stopbroadcast",".schedule HH:MM <msg>",".unschedule HH:MM",".schedules"] },
+                { key: "rites",     title: "RITES",        blurb: "small spells, on loop.",
+                  cmds: [".autoreact on/off/<emoji>",".autoreply add/remove/list",".setalias <w> <.cmd>",".delalias <w>",".aliases"] },
+                { key: "wards",     title: "WARDS",        blurb: "the ward stands.",
+                  cmds: [".antilink on/off",".antispam on/off",".antimention on/off",".antidemote on/off",".antidelete on/off",".antibot on/off"] },
+                { key: "threshold", title: "THRESHOLD",    blurb: "joins and leavings.",
+                  cmds: [".welcome on/off",".goodbye on/off"] },
+                { key: "mirror",    title: "MIRROR",       blurb: "twin the host.",
+                  cmds: [".clone <src> <dst> <n> <m>",".stopclone"] },
+                { key: "judgment",  title: "JUDGMENT",     blurb: "the verdict falls.",
+                  cmds: [".warn @user",".warnlist",".resetwarn @user",".ban @user",".unban @user"] },
+                { key: "arena",     title: "ARENA",        blurb: "play in the dark.",
+                  cmds: [".ttt @p1 @p2",".truth",".dare",".wordchain <w>",".flip",".dice",".8ball <q>",".rps r/p/s",".slots",".trivia",".hangman <g>",".numguess",".riddle",".mathquiz",".wyr",".scramble"] },
+                { key: "revelry",   title: "REVELRY",      blurb: "the dark laughs.",
+                  cmds: [".joke",".fact",".quote",".roast @user",".compliment @user",".ship @a @b",".rate @user",".vibe @user",".horoscope <sign>"] },
+                { key: "compass",   title: "COMPASS",      blurb: "find your bearing.",
+                  cmds: [".calc <x>",".numinfo <num>",".targetloc <num>",".weather <city>",".translate <lang> <txt>",".bible <verse>",".quran <s:a>",".setstatus <txt>",".setname <name>"] },
+                { key: "conduit",   title: "CONDUIT",      blurb: "pull the signal.",
+                  cmds: [".dl <url>",".yt <url>",".ytmp3 <url>",".tiktok <url>",".ig <url>",".fb <url>",".x <url>",".sc <url>",".pin <url>",".reddit / .tumblr / .vimeo / .twitch",".dlhealth"] },
+                { key: "hourglass", title: "HOURGLASS",    blurb: "time on a leash.",
+                  cmds: [".remind <t> <txt>",".remind list / del <id>",".todo / .todo add <task>",".todo done <n> / del <n>",".note save/get/del <name>",".timer <t> [label]",".timer list / stop <id>",".countdown set <name> <date>",".countdown list / del",".calendar [yr] [mo]"] },
+                { key: "forge",     title: "FORGE",        blurb: "make small things.",
+                  cmds: [".sticker",".toimg",".qr <txt>",".genpwd <len>",".base64 enc/dec <txt>",".chat <msg>",".autojoin on/off"] },
+                { key: "pitch",     title: "PITCH",        blurb: "the green field.",
+                  cmds: [".pltable",".live",".plweek",".fixtures <club>",".fnews <club>",".football <club>",".h2h <c1> vs <c2>"] },
+                { key: "oracle",    title: "ORACLE",       blurb: "ask. it answers.",
+                  cmds: [".ai <q>",".imagine <prompt>",".solve",".song <title>",".lyrics <a> | <t>",".ss <url>",".viewonce",".ocr",".summarize",".atranslate <txt> <lang>",".codereview",".code <what>",".explain <topic>",".persona set/show/clear",".aichat <msg>",".tts <txt>",".voice <txt>"] },
+            ],
+        },
+        codex: {
+            title: "CODEX OF THE END",
+            cmd: ".codex",
+            blurb: "the pulse and the record.",
+            devOnly: false,
+            minis: [
+                { key: "pulse",   title: "PULSE",   blurb: "is it alive.",
+                  cmds: [".ping",".uptime",".info"] },
+                { key: "ledger",  title: "LEDGER",  blurb: "what the chamber knows.",
+                  cmds: [".groupid",".listonline",".listoffline",".linkedlist"] },
+            ],
+        },
+        ascend: {
+            title: "ASCENSION PROTOCOL",
+            cmd: ".ascend",
+            blurb: "to rise above the silent.",
+            devOnly: false,
+            minis: [
+                { key: "gate",    title: "THE GATE",     blurb: "what premium opens.",
+                  cmds: ["• priority response","• locked commands","• early features","ask the dev to be raised."] },
+                { key: "contact", title: "THE CONTACT",  blurb: "speak to the dev.",
+                  cmds: [".devnumber",".dev"] },
+            ],
+        },
+        flare: {
+            title: "SOLAR FLARE",
+            cmd: ".flare",
+            blurb: "when the dark falters.",
+            devOnly: false,
+            minis: [
+                { key: "guide",    title: "GUIDE",      blurb: "the brief.",
+                  cmds: [".help",".menu"] },
+                { key: "revival",  title: "REVIVAL",    blurb: "wake the link again.",
+                  cmds: [".restart",".reboot"] },
+                { key: "signal",   title: "SIGNAL",     blurb: "reach the dev.",
+                  cmds: [".devnumber",".dev",".report <text>"] },
+            ],
+        },
+        abyss: {
+            title: "EYE OF THE ABYSS",
+            cmd: ".abyss",
+            blurb: "the throne. dev only.",
+            devOnly: true,
+            minis: [
+                { key: "throne",   title: "THRONE",     blurb: "rule of the chamber.",
+                  cmds: [".mode public/owner",".public",".owner"] },
+                { key: "pact",     title: "PACT",       blurb: "open and seal cmds.",
+                  cmds: [".unleash allcmds",".unleash allcmds <num>",".unleash <cmd> all",".unleash <cmd> <num>",".lock allcmds",".lock <cmd>",".lockfor <num> <cmd>",".lockfor <num> allcmds",".unlockfor <num> <cmd>"] },
+                { key: "vault",    title: "VAULT",      blurb: "the premium gate.",
+                  cmds: [".premiumadd <num>",".premiumremove <num>",".premiumlist"] },
+                { key: "registry", title: "REGISTRY",   blurb: "the dev hands.",
+                  cmds: [".adddev <num>",".removedev <num>",".devlist"] },
+                { key: "silent",   title: "SILENT CHAMBER", blurb: "muffle a number.",
+                  cmds: [".silencenumber <num>",".unsilencenumber <num>",".silencelist"] },
+            ],
+        },
+    };
+}
+
+function getEclipseTopOrder() { return ["chains","codex","ascend","flare","abyss"]; }
+function getEclipseTopVisible(isDev) {
+    const tree = getEclipseTree();
+    return getEclipseTopOrder().filter(k => isDev || !tree[k].devOnly).map(k => ({ key: k, ...tree[k] }));
+}
+
+function buildEclipseInit() {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${eclipseCenter("initializing...")}\n${ECLIPSE_BORDER}`;
+}
+function buildEclipseVoid() {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${eclipseCenter("the void exists.")}\n${eclipseCenter("standing by.")}\n${ECLIPSE_BORDER}`;
+}
+function buildEclipseMain(isDev) {
+    const visible = getEclipseTopVisible(isDev);
+    let out = `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n`;
+    out += `   the dark hand. unbound.\n\n`;
+    visible.forEach((s, i) => {
+        out += `   ${String(i+1).padStart(2," ")}. ${s.title}\n`;
+    });
+    out += `\n   reply: .menu <number>\n`;
+    out += `   or: ${visible.map(s => s.cmd).join("  ")}\n`;
+    out += `${ECLIPSE_BORDER}`;
+    return out;
+}
+
+function buildEclipseSection(sectionKey, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return null;
+    if (sec.devOnly && !isDev) return null;
+    let out = `${ECLIPSE_BORDER}\n${eclipseCenter(sec.title)}\n${ECLIPSE_BORDER}\n`;
+    out += `   ${sec.blurb}\n\n`;
+    sec.minis.forEach((m, i) => {
+        out += `   ${String(i+1).padStart(2," ")}. ${m.title}\n`;
+    });
+    out += `\n   reply: ${sec.cmd} <number>\n`;
+    out += `   back: .menu\n`;
+    out += `${ECLIPSE_BORDER}`;
+    return out;
+}
+
+function buildEclipseMini(sectionKey, miniIdx, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return null;
+    if (sec.devOnly && !isDev) return null;
+    const m = sec.minis[miniIdx - 1];
+    if (!m) return null;
+    let out = `${ECLIPSE_BORDER}\n${eclipseCenter(m.title)}\n${ECLIPSE_BORDER}\n`;
+    out += `   ${m.blurb}\n\n`;
+    m.cmds.forEach(c => { out += `   ${c}\n`; });
+    out += `\n   back: ${sec.cmd}\n`;
+    out += `   home: .menu\n`;
+    out += `${ECLIPSE_BORDER}`;
+    return out;
+}
+
+// Short, precise Eclipse reply phrases (no technique exposure)
+const ECLIPSE_PHRASES = {
+    menu_open:        "the eclipse expands.",
+    mute:             "shackled.",
+    unmute:           "unbound.",
+    ban:              "extinguished.",
+    unban:            "restored.",
+    kick:             "cast out.",
+    promote:          "raised.",
+    demote:           "lowered.",
+    add:              "summoned.",
+    revoke:           "the bond is severed.",
+    link_reset:       "the bond is severed.",
+    antilink_on:      "the ward has been raised.",
+    antilink_off:     "the ward has fallen.",
+    antispam_on:      "the silence guard wakes.",
+    antispam_off:     "the silence guard sleeps.",
+    antimention_on:   "the silence holds.",
+    antimention_off:  "the silence breaks.",
+    antidemote_on:    "the throne is sealed.",
+    antidemote_off:   "the throne is open.",
+    antidelete_on:    "memory keeper bound.",
+    antidelete_off:   "memory keeper released.",
+    antibot_on:       "the gate scans.",
+    antibot_off:      "the gate is open.",
+    welcome_on:       "the threshold greets.",
+    welcome_off:      "the threshold is silent.",
+    goodbye_on:       "farewells will be spoken.",
+    goodbye_off:      "farewells silenced.",
+    mode_owner:       "the throne is sealed. owner only.",
+    mode_public:      "the gates are open.",
+    broadcast_start:  "the call goes out.",
+    broadcast_stop:   "silence.",
+    schedule_set:     "the hour is marked.",
+    schedule_clear:   "the hour is unmarked.",
+    warn:             "marked.",
+    warn_kicked:      "extinguished.",
+    warn_clear:       "the mark is gone.",
+    not_group:        "this rite needs a chamber.",
+    only_owner:       "only the dev speaks here.",
+    only_admin:       "only the throne speaks here.",
+    not_admin_note:   "i do not yet hold the throne here.",
+    bad_use:          "the rite is malformed.",
+};
+
+function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
+
+// 3-stage edited menu — used by .menu / .eclipse / .phantom
+async function sendEclipseMenu(sock, from, msg, isDev) {
+    try {
+        const sent = await sock.sendMessage(from, { text: buildEclipseInit() }, { quoted: msg });
+        await new Promise(r => setTimeout(r, 3000));
+        try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
+        await new Promise(r => setTimeout(r, 3000));
+        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key }); } catch (_) {
+            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+        }
+    } catch (_) {
+        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+    }
+}
+
+// Generic handler for .chains/.codex/.ascend/.flare/.abyss
+async function sendEclipseSectionOrMini(sock, from, msg, sectionKey, parts, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return false;
+    if (sec.devOnly && !isDev) {
+        await sock.sendMessage(from, { text: eclipseSay("only_owner") }, { quoted: msg });
+        return true;
+    }
+    const arg = parseInt(parts[1], 10);
+    if (arg && arg >= 1 && arg <= sec.minis.length) {
+        const text = buildEclipseMini(sectionKey, arg, isDev);
+        if (text) await sock.sendMessage(from, { text }, { quoted: msg });
+    } else {
+        const text = buildEclipseSection(sectionKey, isDev);
+        if (text) await sock.sendMessage(from, { text }, { quoted: msg });
+    }
+    return true;
+}
+
+function buildEclipseHelp() {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n` +
+           `   the eclipse listens.\n\n` +
+           `   .menu      open the eclipse\n` +
+           `   .chains    binding cmds\n` +
+           `   .codex     pulse and state\n` +
+           `   .ascend    rise above\n` +
+           `   .flare     emergency and dev\n\n` +
+           `   .info      version and uptime\n` +
+           `   .ping      pulse check\n` +
+           `${ECLIPSE_BORDER}`;
+}
+
+function buildEclipseInfo() {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n` +
+           `   version  v${BOT_VERSION}\n` +
+           `   runtime  ${formatUptime()}\n\n` +
+           `   the void watches.\n` +
+           `${ECLIPSE_BORDER}`;
+}
+
+function buildEclipseDevContact() {
+    const num = (typeof DEV_NUMBERS !== "undefined" && DEV_NUMBERS[0]) || (process.env.DEV_NUMBERS || "").split(",")[0].trim() || "2348102756072";
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("THE DEV HAND")}\n${ECLIPSE_BORDER}\n` +
+           `   wa.me/${num}\n\n` +
+           `   speak only when called.\n` +
+           `${ECLIPSE_BORDER}`;
+}
+
 function buildMenuText(mode, themeNum, isDev) {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
     const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
@@ -3022,59 +3313,57 @@ async function handleMessage(sock, msg) {
 
         switch (cmd) {
             case ".menu":
+            case ".eclipse":
             case ".phantom": {
                 const isDev = msg.key.fromMe || isDevJid(senderJid);
                 const arg = (parts[1] || "").toLowerCase();
-                const arg2 = (parts[2] || "").toLowerCase();
-
-                // .menu style 1/2  → set per-user style
-                if (arg === "style" && (arg2 === "1" || arg2 === "2")) {
-                    if (!global.__menuStyle) global.__menuStyle = {};
-                    global.__menuStyle[senderJid] = Number(arg2);
-                    return reply(`🎨 Menu style set to *${arg2}*. Send *.menu* to see it.`);
-                }
-
-                const styleNum = (global.__menuStyle && global.__menuStyle[senderJid]) || 1;
-
-                // .menu all → original full menu
-                if (arg === "all") {
-                    const fullText = buildMenuText(currentMode, getMenuTheme(botJid), isDev);
-                    if (fs.existsSync(MENU_BANNER_FILE)) {
-                        try {
-                            const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
-                            return await sock.sendMessage(from, { image: bannerBuf, caption: fullText }, { quoted: msg });
-                        } catch {}
-                    }
-                    return await sock.sendMessage(from, { text: fullText }, { quoted: msg });
-                }
-
-                // .menu <number> → show one section
-                const sections = getVisibleSections(isDev);
                 const sectionNum = parseInt(arg, 10);
-                if (sectionNum && sectionNum >= 1 && sectionNum <= sections.length) {
-                    const sec = sections[sectionNum - 1];
-                    const allSections = getMenuSections();
-                    const realIdx = allSections.findIndex(s => s.title === sec.title);
-                    const text = buildOneSectionText(sec, sectionNum - 1, styleNum);
-                    const banner = getSectionBanner(realIdx);
-                    if (banner) {
-                        try {
-                            const buf = Buffer.from(banner, "base64");
-                            return await sock.sendMessage(from, { image: buf, caption: text }, { quoted: msg });
-                        } catch {}
+
+                // .menu <num> → jump straight to that top-level section
+                if (sectionNum) {
+                    const visible = getEclipseTopVisible(isDev);
+                    if (sectionNum >= 1 && sectionNum <= visible.length) {
+                        const key = visible[sectionNum - 1].key;
+                        const text = buildEclipseSection(key, isDev);
+                        if (text) return await sock.sendMessage(from, { text }, { quoted: msg });
                     }
-                    return await sock.sendMessage(from, { text }, { quoted: msg });
                 }
 
-                // default → section picker
-                const pickerText = buildSectionPicker(isDev, styleNum);
-                if (fs.existsSync(MENU_BANNER_FILE)) {
-                    try {
-                        const bannerBuf = fs.readFileSync(MENU_BANNER_FILE);
-                        return await sock.sendMessage(from, { image: bannerBuf, caption: pickerText }, { quoted: msg });
-                    } catch {}
-                }
-                await sock.sendMessage(from, { text: pickerText }, { quoted: msg });
+                // default → 3-stage edited animation
+                await sendEclipseMenu(sock, from, msg, isDev);
+                break;
+            }
+
+            case ".chains": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "chains", parts, isDev);
+                break;
+            }
+            case ".codex": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "codex", parts, isDev);
+                break;
+            }
+            case ".ascend":
+            case ".ascension": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "ascend", parts, isDev);
+                break;
+            }
+            case ".flare": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "flare", parts, isDev);
+                break;
+            }
+            case ".abyss": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "abyss", parts, isDev);
+                break;
+            }
+            case ".dev":
+            case ".devnumber":
+            case ".devcontact": {
+                await reply(buildEclipseDevContact());
                 break;
             }
 
@@ -3188,29 +3477,25 @@ async function handleMessage(sock, msg) {
                 const val = parts[1]?.toLowerCase();
                 if (!["owner", "public"].includes(val)) {
                     return reply(
-                        `⚙️ *Bot Mode Settings*\n\n` +
-                        `Current mode: *${currentMode === "owner" ? "👤 Owner Only" : "🌍 Public"}*\n\n` +
-                        `• *.mode public* — Anyone in groups can use commands\n` +
-                        `• *.mode owner* — Only you (the bot owner) can use commands\n\n` +
-                        `_Shortcuts: .public or .owner_`
+                        `now: ${currentMode === "owner" ? "owner only" : "public"}\n` +
+                        `use: .mode public  |  .mode owner`
                     );
                 }
                 setBotMode(botJid, val);
-                const label = val === "owner" ? "👤 Owner Only" : "🌍 Public";
-                await reply(`✅ Bot mode set to *${label}*\n\n${val === "owner" ? "Only you can now trigger commands." : "Everyone in groups can now use commands."}`);
+                await reply(eclipseSay(val === "owner" ? "mode_owner" : "mode_public"));
                 break;
             }
 
             case ".public": {
                 setBotMode(botJid, "public");
-                await reply(`✅ Bot mode set to *🌍 Public*\n\nEveryone in groups can now use commands.\n\nUse *.owner* to restrict it back to only you.`);
+                await reply(eclipseSay("mode_public"));
                 break;
             }
 
             case ".owner": {
-                if (!msg.key.fromMe) return reply("❌ Only the bot owner can restrict the bot to owner mode.");
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
                 setBotMode(botJid, "owner");
-                await reply(`✅ Bot mode set to *👤 Owner Only*\n\nOnly you can now trigger commands.\n\nUse *.public* to open it to everyone again.`);
+                await reply(eclipseSay("mode_owner"));
                 break;
             }
 
@@ -3317,9 +3602,7 @@ async function handleMessage(sock, msg) {
             }
 
             case ".info": {
-                await reply(
-                    `🤖 *Phantom X Bot*\n\nVersion: v${BOT_VERSION}\nRuntime: ${formatUptime()}\nBuilt with: Baileys + Node.js\n\n_Built different. Built cold._ 🖤`
-                );
+                await reply(buildEclipseInfo());
                 break;
             }
 
@@ -3350,26 +3633,10 @@ async function handleMessage(sock, msg) {
             }
 
             case ".help": {
-                const helpTopic = parts.slice(1).join(" ").toLowerCase().trim();
-                if (helpTopic === "bug menu" || helpTopic === "bugmenu" || helpTopic === "bug" || helpTopic === "bugs") {
-                    const bt = buildBugMenuText();
-                    if (fs.existsSync(BUG_BANNER_FILE)) {
-                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(BUG_BANNER_FILE), caption: bt }, { quoted: msg }); } catch (_) {}
-                    }
-                    return reply(bt);
-                }
-                if (helpTopic === "group menu" || helpTopic === "group" || helpTopic === "groups") return reply(buildGroupMenuList());
-                if (helpTopic === "protection menu" || helpTopic === "protection" || helpTopic === "antibug") return reply(buildSimpleSectionList("protection"));
-                if (helpTopic === "utility menu" || helpTopic === "utilities" || helpTopic === "utility" || helpTopic === "numinfo") return reply(buildSimpleSectionList("utility"));
-                if (helpTopic === "owner menu" || helpTopic === "owner" || helpTopic === "restart") {
-                    const ot = buildSimpleSectionList("owner");
-                    if (fs.existsSync(OWNER_BANNER_FILE)) {
-                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(OWNER_BANNER_FILE), caption: ot }, { quoted: msg }); } catch (_) {}
-                    }
-                    return reply(ot);
-                }
-                if (helpTopic === "clone menu" || helpTopic === "gc clone" || helpTopic === "clone") return reply(buildSimpleSectionList("clone"));
-                if (helpTopic === "tag menu" || helpTopic === "tag" || helpTopic === "tagadmin") return reply(buildSimpleSectionList("tag"));
+                await reply(buildEclipseHelp());
+                break;
+            }
+            case ".__legacyhelp_disabled": {
                 await reply(
 `📖 *Phantom X — Full Command Guide*
 ━━━━━━━━━━━━━━━━━━━━
@@ -3938,122 +4205,121 @@ _Can be started from any chat, but source members require source group access an
 
             // --- GROUP ADMIN COMMANDS ---
             case ".add": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const num = parts[1];
-                if (!num) return reply("Usage: .add 234xxxxxxxxxx");
+                if (!num) return reply(eclipseSay("bad_use") + "\nuse: .add <number>");
                 const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
                 await sock.groupParticipantsUpdate(from, [jid], "add");
-                await reply(`✅ Added ${num} to the group.`);
+                await reply(eclipseSay("add"));
                 break;
             }
 
             case ".kick": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply("Tag the person to kick. Usage: .kick @user");
+                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .kick @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "remove");
-                await reply("✅ Member removed.");
+                await reply(eclipseSay("kick"));
                 break;
             }
 
             case ".promote": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply("Tag the person. Usage: .promote @user");
+                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .promote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "promote");
-                await reply("✅ Promoted to admin.");
+                await reply(eclipseSay("promote"));
                 break;
             }
 
             case ".demote": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply("Tag the person. Usage: .demote @user");
+                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .demote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "demote");
-                await reply("✅ Admin privileges removed.");
+                await reply(eclipseSay("demote"));
                 break;
             }
 
             case ".link": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const inv = await sock.groupInviteCode(from);
-                // Save invite code for auto-rejoin if bot gets kicked
                 savedGroupLinks[from] = inv;
                 try {
                     const meta = await sock.groupMetadata(from);
                     groupNames[from] = meta.subject;
                 } catch (_) {}
-                await reply(`🔗 Group Link:\nhttps://chat.whatsapp.com/${inv}`);
+                await reply(`https://chat.whatsapp.com/${inv}`);
                 break;
             }
 
             case ".revoke": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupRevokeInvite(from);
-                await reply("🔄 Group link has been reset.");
+                await reply(eclipseSay("revoke"));
                 break;
             }
 
             case ".mute": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupSettingUpdate(from, "announcement");
-                await reply("🔇 Group muted. Only admins can send messages now.");
+                await reply(eclipseSay("mute"));
                 break;
             }
 
             case ".unmute": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupSettingUpdate(from, "not_announcement");
-                await reply("🔊 Group unmuted. Everyone can send messages.");
+                await reply(eclipseSay("unmute"));
                 break;
             }
 
             // --- PROTECTION TOGGLES ---
             case ".antilink": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const r = await getGroupRoles(sock, from);
-                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .antilink on/off");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antilink on/off");
                 setGroupSetting(from, "antilink", val === "on");
-                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't actually delete or kick. Please make me admin.");
-                await reply(`🔗 Anti-link is now *${val.toUpperCase()}* in this group.`);
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(eclipseSay(val === "on" ? "antilink_on" : "antilink_off"));
                 break;
             }
 
             case ".antispam": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const r = await getGroupRoles(sock, from);
-                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .antispam on/off");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antispam on/off");
                 setGroupSetting(from, "antispam", val === "on");
-                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so enforcement won't fire. Please make me admin.");
-                await reply(`🚫 Anti-spam is now *${val.toUpperCase()}* in this group.`);
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(eclipseSay(val === "on" ? "antispam_on" : "antispam_off"));
                 break;
             }
 
             case ".antimention": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const r = await getGroupRoles(sock, from);
-                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .antimention on/off\n(Triggers on 5+ mentions in one message; 3-strike → kick.)");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antimention on/off");
                 setGroupSetting(from, "antimention", val === "on");
-                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so enforcement won't fire.");
-                await reply(`📢 Anti-mention is now *${val.toUpperCase()}* in this group.`);
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(eclipseSay(val === "on" ? "antimention_on" : "antimention_off"));
                 break;
             }
 
             case ".antidemote": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const r = await getGroupRoles(sock, from);
-                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .antidemote on/off");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antidemote on/off");
                 setGroupSetting(from, "antidemote", val === "on");
-                if (val === "on" && !r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't auto-repromote.");
-                await reply(`🛡️ Anti-demote is now *${val.toUpperCase()}* in this group.`);
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(eclipseSay(val === "on" ? "antidemote_on" : "antidemote_off"));
                 break;
             }
 
@@ -4078,20 +4344,20 @@ _Can be started from any chat, but source members require source group access an
             }
 
             case ".welcome": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .welcome on/off");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .welcome on/off");
                 setGroupSetting(from, "welcome", val === "on");
-                await reply(`📣 Welcome messages are now *${val.toUpperCase()}*.`);
+                await reply(eclipseSay(val === "on" ? "welcome_on" : "welcome_off"));
                 break;
             }
 
             case ".goodbye": {
-                if (!isGroup) return reply("This command only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const val = parts[1]?.toLowerCase();
-                if (!["on", "off"].includes(val)) return reply("Usage: .goodbye on/off");
+                if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .goodbye on/off");
                 setGroupSetting(from, "goodbye", val === "on");
-                await reply(`👋 Goodbye messages are now *${val.toUpperCase()}*.`);
+                await reply(eclipseSay(val === "on" ? "goodbye_on" : "goodbye_off"));
                 break;
             }
 
@@ -5599,17 +5865,17 @@ _Can be started from any chat, but source members require source group access an
 
             // --- WARN ---
             case ".warn": {
-                if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe) return reply("❌ Only the bot owner can warn members.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
                 const warnTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!warnTarget) return reply("Usage: .warn @user — Reply or tag someone.");
+                if (!warnTarget) return reply(eclipseSay("bad_use") + "\nuse: .warn @user");
                 const wCount = addWarn(from, warnTarget);
                 if (wCount >= 3) {
                     resetWarns(from, warnTarget);
                     try { await sock.groupParticipantsUpdate(from, [warnTarget], "remove"); } catch (_) {}
-                    await sock.sendMessage(from, { text: `🚫 @${warnTarget.split("@")[0]} has been *kicked* — 3 warnings reached!`, mentions: [warnTarget] }, { quoted: msg });
+                    await sock.sendMessage(from, { text: `@${warnTarget.split("@")[0]}\n${eclipseSay("warn_kicked")}`, mentions: [warnTarget] }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(from, { text: `⚠️ @${warnTarget.split("@")[0]} has been warned!\n\n⚠️ Warning *${wCount}/3* — 3 = kick.`, mentions: [warnTarget] }, { quoted: msg });
+                    await sock.sendMessage(from, { text: `@${warnTarget.split("@")[0]}\n${eclipseSay("warn")} ${wCount}/3.`, mentions: [warnTarget] }, { quoted: msg });
                 }
                 break;
             }
@@ -5639,47 +5905,47 @@ _Can be started from any chat, but source members require source group access an
 
             // --- BAN ---
             case ".ban": {
-                if (!msg.key.fromMe) return reply("❌ Only the bot owner can ban users.");
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
                 const banTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!banTarget) return reply("Usage: .ban @user — Tag the person to ban from the bot.");
+                if (!banTarget) return reply(eclipseSay("bad_use") + "\nuse: .ban @user");
                 if (botJid) addBan(botJid, banTarget);
-                await sock.sendMessage(from, { text: `🔴 @${banTarget.split("@")[0]} has been *banned* from using this bot.`, mentions: [banTarget] }, { quoted: msg });
+                await sock.sendMessage(from, { text: `@${banTarget.split("@")[0]}\n${eclipseSay("ban")}`, mentions: [banTarget] }, { quoted: msg });
                 break;
             }
 
             // --- UNBAN ---
             case ".unban": {
-                if (!msg.key.fromMe) return reply("❌ Only the bot owner can unban users.");
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
                 const unbanTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!unbanTarget) return reply("Usage: .unban @user");
+                if (!unbanTarget) return reply(eclipseSay("bad_use") + "\nuse: .unban @user");
                 if (botJid) removeBan(botJid, unbanTarget);
-                await sock.sendMessage(from, { text: `🟢 @${unbanTarget.split("@")[0]} has been *unbanned*.`, mentions: [unbanTarget] }, { quoted: msg });
+                await sock.sendMessage(from, { text: `@${unbanTarget.split("@")[0]}\n${eclipseSay("unban")}`, mentions: [unbanTarget] }, { quoted: msg });
                 break;
             }
 
             // --- ANTIDELETE ---
             case ".antidelete": {
-                if (!isGroup) return reply("❌ Only works in groups.");
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply(eclipseSay("only_owner"));
                 const adSub = parts[1]?.toLowerCase();
-                if (adSub === "on") { setGroupSetting(from, "antidelete", true); return reply("✅ Anti-delete *ON* — Deleted messages will be re-sent."); }
-                if (adSub === "off") { setGroupSetting(from, "antidelete", false); return reply("✅ Anti-delete *OFF*."); }
-                return reply(`Usage: .antidelete on/off\nCurrent: *${getGroupSetting(from, "antidelete") ? "ON" : "OFF"}*`);
+                if (adSub === "on")  { setGroupSetting(from, "antidelete", true);  return reply(eclipseSay("antidelete_on")); }
+                if (adSub === "off") { setGroupSetting(from, "antidelete", false); return reply(eclipseSay("antidelete_off")); }
+                return reply(eclipseSay("bad_use") + "\nuse: .antidelete on/off\nnow: " + (getGroupSetting(from, "antidelete") ? "on" : "off"));
             }
 
             // --- ANTIBOT ---
             case ".antibot": {
-                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!isGroup) return reply(eclipseSay("not_group"));
                 const r = await getGroupRoles(sock, from);
-                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 const abSub = parts[1]?.toLowerCase();
                 if (abSub === "on") {
                     setGroupSetting(from, "antibot", true);
-                    if (!r.botIsAdmin) await reply("⚠️ Note: I'm not admin here, so I can't actually remove anyone.");
-                    return reply("✅ Anti-bot *ON* — automated accounts (newsletters/broadcasts) will be removed.");
+                    if (!r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                    return reply(eclipseSay("antibot_on"));
                 }
-                if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply("✅ Anti-bot *OFF*."); }
-                return reply(`Usage: .antibot on/off\nCurrent: *${getGroupSetting(from, "antibot") ? "ON" : "OFF"}*`);
+                if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply(eclipseSay("antibot_off")); }
+                return reply(eclipseSay("bad_use") + "\nuse: .antibot on/off\nnow: " + (getGroupSetting(from, "antibot") ? "on" : "off"));
             }
 
             // --- SCHEDULE ---
