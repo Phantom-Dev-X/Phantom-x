@@ -1329,6 +1329,19 @@ function setMenuTheme(botJid, n) {
     fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
 }
 
+// --- ECLIPSE MENU STYLE: "loading" (animated bar) | "classic" (still 3-stage) ---
+function getMenuStyle(botJid) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    return d[`__style__${id}`] === "classic" ? "classic" : "loading";
+}
+function setMenuStyle(botJid, style) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    d[`__style__${id}`] = style === "classic" ? "classic" : "loading";
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
+}
+
 // --- HELPERS ---
 function getAuthDir(userId) {
     return path.join(__dirname, "auth_info", String(userId));
@@ -2860,11 +2873,36 @@ const ECLIPSE_PHRASES = {
 function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
 
 // 3-stage edited menu — used by .menu / .eclipse / .phantom.
-// Stage 1 carries a live progress-bar that fills over ~4 seconds,
-// then the same message is edited to stage 2 (void), then stage 3 (terminal).
-async function sendEclipseMenu(sock, from, msg, isDev) {
+// Two styles, switchable via .menustyle:
+//   "loading"  → stage 1 has a live progress-bar that fills over ~4 seconds
+//   "classic"  → stage 1 sits still for 4 seconds, no extra bar
+// Then the same message edits to stage 2 (void), then stage 3 (terminal).
+async function sendEclipseMenu(sock, from, msg, isDev, botJid) {
     const STAGE_GAP = 4000;
     const init = buildEclipseInit();
+    const style = getMenuStyle(botJid);
+
+    // CLASSIC — original behavior, no progress bar
+    if (style === "classic") {
+        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+        try {
+            const sent = await sock.sendMessage(from, { text: init }, { quoted: msg });
+            await new Promise(r => setTimeout(r, STAGE_GAP));
+            try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
+            await new Promise(r => setTimeout(r, STAGE_GAP));
+            try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key }); } catch (_) {
+                try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+            }
+            try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
+        } catch (_) {
+            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+        }
+        return;
+    }
+
+    // LOADING — stage 1 with animated progress bar underneath
 
     // Loading frames appended UNDER the user's stage-1 art (art is preserved verbatim).
     const loadFrames = [
@@ -3433,7 +3471,7 @@ async function handleMessage(sock, msg) {
                 }
 
                 // default → 3-stage edited animation (Eventide / Void / Terminal)
-                await sendEclipseMenu(sock, from, msg, isDev);
+                await sendEclipseMenu(sock, from, msg, isDev, botJid);
                 break;
             }
 
@@ -3602,7 +3640,23 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
-            // .menudesign / .menu style — REMOVED in Eclipse rewrite.
+            // .menustyle — switch the .menu animation between "loading" and "classic"
+            case ".menustyle": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const cur = getMenuStyle(botJid);
+                const arg = (parts[1] || "").toLowerCase();
+                if (arg !== "loading" && arg !== "classic") {
+                    return reply(
+                        "🌑 *Eclipse menu style*\n" +
+                        `current: *${cur}*\n\n` +
+                        "• *.menustyle loading* — stage 1 has a live progress bar\n" +
+                        "• *.menustyle classic* — stage 1 sits still, no bar\n\n" +
+                        "either way you still get the 3 stages, 4s apart."
+                    );
+                }
+                setMenuStyle(botJid, arg);
+                return reply(`✅ menu style set to *${arg}*. type *.menu* to see it.`);
+            }
 
             case ".broadcast": {
                 const intervalMins = parseInt(parts[1]);
