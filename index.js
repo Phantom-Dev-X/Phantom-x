@@ -2860,25 +2860,61 @@ const ECLIPSE_PHRASES = {
 function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
 
 // 3-stage edited menu — used by .menu / .eclipse / .phantom.
-// 4-second gap between stages. Presence updates between stages give
-// the message a "live / loading" feel.
+// Stage 1 carries a live progress-bar that fills over ~4 seconds,
+// then the same message is edited to stage 2 (void), then stage 3 (terminal).
 async function sendEclipseMenu(sock, from, msg, isDev) {
-    const ECLIPSE_STAGE_GAP = 4000;
+    const STAGE_GAP = 4000;
+    const init = buildEclipseInit();
+
+    // Loading frames appended UNDER the user's stage-1 art (art is preserved verbatim).
+    const loadFrames = [
+        "[░░░░░░░░░░]   0%   ▸ bypassing solar interference",
+        "[██░░░░░░░░]  20%   ▸ collapsing quantum states",
+        "[████░░░░░░]  40%   ▸ erasing redundant timelines",
+        "[██████░░░░]  60%   ▸ establishing void uplink",
+        "[████████░░]  80%   ▸ severing last anchor",
+        "[██████████] 100%   ▸ ECLIPSE IS AWAKE",
+    ];
+    const frameMs = Math.max(550, Math.floor(STAGE_GAP / loadFrames.length));
+
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+    let sent;
+    try {
+        sent = await sock.sendMessage(
+            from,
+            { text: init + "\n\n" + loadFrames[0] },
+            { quoted: msg }
+        );
+    } catch (_) {
+        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+        return;
+    }
+
+    // Animate the loading bar in-place
+    for (let i = 1; i < loadFrames.length; i++) {
+        await new Promise(r => setTimeout(r, frameMs));
+        try {
+            await sock.sendMessage(from, {
+                text: init + "\n\n" + loadFrames[i],
+                edit: sent.key,
+            });
+        } catch (_) {}
+    }
+    await new Promise(r => setTimeout(r, frameMs));
+
+    // Stage 2 — the void
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+    try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
+    await new Promise(r => setTimeout(r, STAGE_GAP));
+
+    // Stage 3 — terminal access
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     try {
-        const sent = await sock.sendMessage(from, { text: buildEclipseInit() }, { quoted: msg });
-        await new Promise(r => setTimeout(r, ECLIPSE_STAGE_GAP));
-        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-        try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
-        await new Promise(r => setTimeout(r, ECLIPSE_STAGE_GAP));
-        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key }); } catch (_) {
-            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
-        }
-        try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
+        await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key });
     } catch (_) {
         try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
     }
+    try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
 }
 
 // Generic handler for .chains/.codex/.ascend/.flare/.abyss
