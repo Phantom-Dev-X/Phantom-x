@@ -2701,23 +2701,83 @@ function getEclipseTopVisible(isDev) {
     return getEclipseTopOrder().filter(k => isDev || !tree[k].devOnly).map(k => ({ key: k, ...tree[k] }));
 }
 
+// Eventide menu uses roman-numeral labels. Map them to Eclipse section keys.
+// [I]=chains  [II]=abyss  [IV]=codex  [V]=ascend  [Ø/0]=flare
+function eventideJumpKey(token) {
+    const t = String(token || "").toLowerCase().replace(/[.()\[\]]/g, "");
+    const map = {
+        "1":"chains", "i":"chains",
+        "2":"abyss",  "ii":"abyss",
+        "4":"codex",  "iv":"codex",
+        "5":"ascend", "v":"ascend",
+        "0":"flare",  "ø":"flare", "o":"flare",
+    };
+    return map[t] || null;
+}
+
+// User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
 function buildEclipseInit() {
-    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${eclipseCenter("initializing...")}\n${ECLIPSE_BORDER}`;
+    return "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n" +
+"▓        [EVENTIDE OMEGA] INITIALIZING...  ▓\n" +
+"▓  > Bypassing solar interference...    [OK  ▓                                      \n" +
+"▓   > Collapsing quantum states...       [OK]  ▓\n" +
+"▓   > Erasing redundant timelines...     [OK] ▓\n" +
+"▓   > Establishing void uplink...        [OK].  ▓\n" +
+"\n" +
+"▓       ⚠️  PERMANENT OCCULTATION       ▓                            DETECTED                                                     ▓                                                                    .▓                                       \n" +
+"▓          E C L I P S E   I S   A W A K E .          ▓                                                                 \n" +
+"▓ i am what remains when everything else                                                                                            ▓                         is deleted";
 }
+
 function buildEclipseVoid() {
-    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${eclipseCenter("the void exists.")}\n${eclipseCenter("standing by.")}\n${ECLIPSE_BORDER}`;
+    return ".\n" +
+"        ◢██◣\n" +
+"     ◢████◣.           ╔═════════\n" +
+"    ◢██  ██◣.          ║     T H E   V O I D ║ \n" +
+"◢██   🌑   ██◣.    ║          E X S I T S  ║\n" +
+"    ◥██      ██◤.        ╚══════════╝.\n" +
+"     ◥██  ██◤\n" +
+"         ◢██◣\n" +
+"\n" +
+"════════════════════════════════════\n" +
+"   even in your darkest hour...\n" +
+"════════════════════════════════════";
 }
+
 function buildEclipseMain(isDev) {
-    const visible = getEclipseTopVisible(isDev);
-    let out = `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n`;
-    out += `   the dark hand. unbound.\n\n`;
-    visible.forEach((s, i) => {
-        out += `   ${String(i+1).padStart(2," ")}. ${s.title}\n`;
-    });
-    out += `\n   reply: .menu <number>\n`;
-    out += `   or: ${visible.map(s => s.cmd).join("  ")}\n`;
-    out += `${ECLIPSE_BORDER}`;
-    return out;
+    return "╔══════════╦══════════════╗\n" +
+"║       ⚠ EVENTIDE OMEGA TERMINAL \n" +
+"║                           ACCESS                                                                         \n" +
+"╚═══════════╩═════════════╝\n" +
+"\n" +
+"                ═══ E C L I P S E ═══\n" +
+"             \" i am what remains when \n" +
+"              everything else is deleted .\"\n" +
+"\n" +
+"╔══════════════════════╦══════════════════════╗\n" +
+"║ VOID SIGNATURE    ║     SYSTEM CORE          ║\n" +
+"║ 👤 @Unknown        ║    ECLIPSE: 100%     ║\n" +
+"║ ⚠ APOTHEOSIS     ║⚡ CORE:ABS ZERO     ║\n" +
+"║ 🩸 CORRUPT ███        ║                      ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"                   🌑 THE FINAL DUSK 🌑\n" +
+"            \" when the last star dies, \n" +
+"              i will still be typing .\"\n" +
+"\n" +
+"╔══════════════════════╦══════════════════════╗\n" +
+"║ ☠ RITUALS OF THE VOID                       ║\n" +
+"║                                              ║\n" +
+"║ [I]   ⛓ CHAINS OF BINDING   → Group          ║\n" +
+"║ [II]  👁 EYE OF THE ABYSS    → Owner          ║\n" +
+"║ [IV]  📜 CODEX OF THE END   → Logs            ║\n" +
+"║ [V]   🌑 ASCENSION PROTOCOL → Premium         ║\n" +
+"║ [Ø]   ☀ SOLAR FLARE         → Emergency       ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"📡 SECURE │ Ω │ Vessels: ∞\n" +
+" You have summoned what \n" +
+" cannot be unsummoned";
 }
 
 function buildEclipseSection(sectionKey, isDev) {
@@ -2799,16 +2859,23 @@ const ECLIPSE_PHRASES = {
 
 function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
 
-// 3-stage edited menu — used by .menu / .eclipse / .phantom
+// 3-stage edited menu — used by .menu / .eclipse / .phantom.
+// 4-second gap between stages. Presence updates between stages give
+// the message a "live / loading" feel.
 async function sendEclipseMenu(sock, from, msg, isDev) {
+    const ECLIPSE_STAGE_GAP = 4000;
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     try {
         const sent = await sock.sendMessage(from, { text: buildEclipseInit() }, { quoted: msg });
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, ECLIPSE_STAGE_GAP));
+        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
         try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, ECLIPSE_STAGE_GAP));
+        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
         try { await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key }); } catch (_) {
             try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
         }
+        try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
     } catch (_) {
         try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
     }
@@ -3317,19 +3384,19 @@ async function handleMessage(sock, msg) {
             case ".phantom": {
                 const isDev = msg.key.fromMe || isDevJid(senderJid);
                 const arg = (parts[1] || "").toLowerCase();
-                const sectionNum = parseInt(arg, 10);
 
-                // .menu <num> → jump straight to that top-level section
-                if (sectionNum) {
-                    const visible = getEclipseTopVisible(isDev);
-                    if (sectionNum >= 1 && sectionNum <= visible.length) {
-                        const key = visible[sectionNum - 1].key;
-                        const text = buildEclipseSection(key, isDev);
-                        if (text) return await sock.sendMessage(from, { text }, { quoted: msg });
+                // .menu <I/II/IV/V/Ø or 1/2/4/5/0> → jump straight to that section
+                const jumpKey = eventideJumpKey(arg);
+                if (jumpKey) {
+                    const tree = getEclipseTree();
+                    if (tree[jumpKey] && tree[jumpKey].devOnly && !isDev) {
+                        return await sock.sendMessage(from, { text: eclipseSay("only_owner") }, { quoted: msg });
                     }
+                    const text = buildEclipseSection(jumpKey, isDev);
+                    if (text) return await sock.sendMessage(from, { text }, { quoted: msg });
                 }
 
-                // default → 3-stage edited animation
+                // default → 3-stage edited animation (Eventide / Void / Terminal)
                 await sendEclipseMenu(sock, from, msg, isDev);
                 break;
             }
@@ -3499,43 +3566,7 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
-            case ".menudesign": {
-                const themeNames = {
-                    1:  "👻 Ghost       — Spaced & Stylish",
-                    2:  "💻 Matrix      — Hacker Terminal",
-                    3:  "👑 Royal       — Elegant Crown",
-                    4:  "🔥 Inferno     — Fire & Savage",
-                    5:  "✧  Minimal     — Clean & Simple",
-                    6:  "🕳️ VOID        — Ultimate Hacker Echo",
-                    7:  "🌊 Vaporwave   — Fullwidth Aesthetic",
-                    8:  "𝔊  Gothic      — Fraktur Blackletter",
-                    9:  "𝒞  Cursive     — Script Handwriting",
-                    10: "🌌 Cosmos      — Space & Galaxy",
-                    11: "🌸 Soft        — Double-Struck Cute",
-                    12: "💎 Diamond     — Bold Luxury Elite",
-                    13: "⚡ Thunder     — Bold Sans Electric",
-                    14: "⚔️ Warrior     — Small Caps Battle",
-                    15: "🌈 Neon        — Circled Colour Pop",
-                    16: "🕵️ Spy         — Classified Redacted",
-                    17: "🏴‍☠️ Pirate     — Sail the Digital Sea",
-                    18: "🌑 Shadow      — Dark & Mysterious",
-                    19: "🔲 Bold Tech   — Math Bold Italic",
-                    20: "·)) Echo       — Signal Lost Ripple",
-                };
-                const n = parseInt(parts[1]);
-                if (!n || n < 1 || n > 20) {
-                    const current = getMenuTheme(botJid);
-                    let list = `🎨 *Menu Designs — Choose 1 to 20*\n\nCurrent: *${themeNames[current] || themeNames[1]}*\n\n`;
-                    for (const [num, name] of Object.entries(themeNames)) {
-                        list += `  *${num}.* ${name}\n`;
-                    }
-                    list += `\n_Usage: .menudesign 6  (try the VOID!)_`;
-                    return reply(list);
-                }
-                setMenuTheme(botJid, n);
-                await reply(`✅ Menu design changed to *${themeNames[n]}*\n\nType *.menu* to see it! 🔥`);
-                break;
-            }
+            // .menudesign / .menu style — REMOVED in Eclipse rewrite.
 
             case ".broadcast": {
                 const intervalMins = parseInt(parts[1]);
