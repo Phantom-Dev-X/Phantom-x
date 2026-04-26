@@ -1342,6 +1342,19 @@ function setMenuStyle(botJid, style) {
     fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
 }
 
+// --- BOT PERSONA: "eclipse" (default, dark) | "astraea" (golden, divine) ---
+function getBotPersona(botJid) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    return d[`__persona__${id}`] === "astraea" ? "astraea" : "eclipse";
+}
+function setBotPersona(botJid, persona) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    d[`__persona__${id}`] = persona === "astraea" ? "astraea" : "eclipse";
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
+}
+
 // --- HELPERS ---
 function getAuthDir(userId) {
     return path.join(__dirname, "auth_info", String(userId));
@@ -1569,35 +1582,40 @@ async function getPLTable() {
 
     if (!entries.length) throw new Error("No standings data returned. The ESPN API may be temporarily unavailable.");
 
-    let text = "🏆 *Premier League Table*\n━━━━━━━━━━━━━━━━━━━\n";
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `🏆 *Premier League Table*\n_updated ${stamp} (Africa/Lagos)_\n\n`;
     for (let i = 0; i < Math.min(entries.length, 20); i++) {
         const e = entries[i];
         const stats = {};
         for (const s of e.stats || []) stats[s.name] = s.displayValue ?? s.value;
-        const pts  = stats.points  ?? stats.pts    ?? 0;
-        const played = stats.gamesPlayed ?? stats.played ?? 0;
-        const wins = stats.wins    ?? stats.w      ?? 0;
-        const draws = stats.ties   ?? stats.draws  ?? stats.d ?? 0;
-        const losses = stats.losses ?? stats.l     ?? 0;
-        const gd   = stats.pointDifferential ?? stats.goalDifference ?? stats.gd ?? "";
-        text += `*${i + 1}.* ${e.team.displayName} — P:${played} W:${wins} D:${draws} L:${losses}${gd !== "" ? ` GD:${gd}` : ""} *Pts:${pts}*\n`;
+        const pts    = stats.points          ?? stats.pts ?? 0;
+        const played = stats.gamesPlayed     ?? stats.played ?? 0;
+        const gd     = stats.pointDifferential ?? stats.goalDifference ?? stats.gd ?? 0;
+        const gdStr  = (Number(gd) >= 0 ? "+" : "") + gd;
+        const rank   = String(i + 1).padStart(2, " ");
+        const name   = e.team.shortDisplayName || e.team.displayName;
+        text += `*${rank}.* ${name} — *${pts}pts*  (${played} GP, ${gdStr} GD)\n`;
     }
-    return text;
+    return text.trim();
 }
 
 async function getLiveScores() {
     const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/scoreboard");
     const events = data.events || [];
-    if (!events.length) return "⚽ No Premier League matches happening right now.";
-    let text = "🔴 *Live / Today's PL Matches*\n━━━━━━━━━━━━━━━━━━━\n";
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    if (!events.length) return `⚽ *Premier League*\nno matches happening right now.\n_checked ${stamp}_`;
+    let text = `🔴 *Live / Today's PL Matches*\n_as of ${stamp} (Africa/Lagos)_\n\n`;
+    let n = 1;
     for (const ev of events) {
         const comp = ev.competitions?.[0];
         const home = comp?.competitors?.find(c => c.homeAway === "home");
         const away = comp?.competitors?.find(c => c.homeAway === "away");
-        const status = ev.status?.type?.shortDetail || "";
-        text += `⚽ ${home?.team?.shortDisplayName} *${home?.score || 0}* - *${away?.score || 0}* ${away?.team?.shortDisplayName}\n📍 ${status}\n\n`;
+        const status = ev.status?.type?.shortDetail || ev.status?.type?.description || "";
+        const state  = ev.status?.type?.state;
+        const tag    = state === "in" ? "🔴" : state === "post" ? "✅" : "🕒";
+        text += `${tag} *${n++}.* ${home?.team?.shortDisplayName} *${home?.score ?? 0}* – *${away?.score ?? 0}* ${away?.team?.shortDisplayName}\n      _${status}_\n\n`;
     }
-    return text;
+    return text.trim();
 }
 
 
@@ -1667,28 +1685,31 @@ async function getClubFixtures(teamName) {
     const events = sched.events || [];
     const upcoming = events.filter(e => e.competitions?.[0]?.status?.type?.state !== "post").slice(0, 5);
     const past = events.filter(e => e.competitions?.[0]?.status?.type?.state === "post").slice(-3);
-    let text = `⚽ *${team.team.displayName} — Fixtures & Results*\n━━━━━━━━━━━━━━━━━━━\n`;
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `⚽ *${team.team.displayName}*\n_fixtures & results — ${stamp} (Africa/Lagos)_\n`;
     if (past.length) {
-        text += "\n📋 *Recent Results:*\n";
+        text += "\n*recent results*\n";
+        let n = 1;
         for (const ev of past) {
             const comp = ev.competitions?.[0];
             const home = comp?.competitors?.find(c => c.homeAway === "home");
             const away = comp?.competitors?.find(c => c.homeAway === "away");
-            text += `• ${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}\n`;
+            text += `*${n++}.* ${home?.team?.shortDisplayName} *${home?.score}* – *${away?.score}* ${away?.team?.shortDisplayName}\n`;
         }
     }
     if (upcoming.length) {
-        text += "\n📅 *Upcoming Fixtures:*\n";
+        text += "\n*upcoming*\n";
+        let n = 1;
         for (const ev of upcoming) {
-            const date = new Date(ev.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short" });
+            const date = new Date(ev.date).toLocaleString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
             const comp = ev.competitions?.[0];
             const home = comp?.competitors?.find(c => c.homeAway === "home");
             const away = comp?.competitors?.find(c => c.homeAway === "away");
-            text += `• ${date}: ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n`;
+            text += `*${n++}.* ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n      _${date}_\n`;
         }
     }
-    if (!past.length && !upcoming.length) text += "No fixtures found.";
-    return text;
+    if (!past.length && !upcoming.length) text += "\nno fixtures found.";
+    return text.trim();
 }
 
 // --- SONG SEARCH (iTunes API, free, no key) ---
@@ -1909,22 +1930,25 @@ async function getPLWeekMatches() {
         return d >= now && d <= weekEnd;
     });
     const allEvents = weekEvents.length ? weekEvents : events.slice(0, 10);
-    let text = `📅 *Premier League — This Week's Matches*\n━━━━━━━━━━━━━━━━━━━\n`;
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `📅 *PL — This Week's Matches*\n_as of ${stamp} (Africa/Lagos)_\n\n`;
+    let n = 1;
     for (const ev of allEvents) {
         const comp = ev.competitions?.[0];
         const home = comp?.competitors?.find(c => c.homeAway === "home");
         const away = comp?.competitors?.find(c => c.homeAway === "away");
-        const dateStr = new Date(ev.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
+        const dateStr = new Date(ev.date).toLocaleString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
         const status = ev.status?.type?.state;
         if (status === "post") {
-            text += `✅ *${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}*\n📅 ${dateStr}\n\n`;
+            text += `✅ *${n}.* ${home?.team?.shortDisplayName} *${home?.score}-${away?.score}* ${away?.team?.shortDisplayName}\n      _${dateStr}_\n\n`;
         } else if (status === "in") {
-            text += `🔴 *${home?.team?.shortDisplayName} ${home?.score}-${away?.score} ${away?.team?.shortDisplayName}* _(LIVE)_\n📅 ${dateStr}\n\n`;
+            text += `🔴 *${n}.* ${home?.team?.shortDisplayName} *${home?.score}-${away?.score}* ${away?.team?.shortDisplayName} _(LIVE)_\n      _${dateStr}_\n\n`;
         } else {
-            text += `⚽ *${home?.team?.shortDisplayName}* vs *${away?.team?.shortDisplayName}*\n📅 ${dateStr}\n\n`;
+            text += `⚽ *${n}.* ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n      _${dateStr}_\n\n`;
         }
+        n++;
     }
-    if (!allEvents.length) text += "No matches found this week.";
+    if (!allEvents.length) text += "no matches found this week.";
     return text.trim();
 }
 
@@ -2793,6 +2817,67 @@ function buildEclipseMain(isDev) {
 " cannot be unsummoned";
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// ░░░░░  ASTRAEA PERSONA — second persona (golden, divine, judgmental)  ░░░░░
+// User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
+// ════════════════════════════════════════════════════════════════════════════
+
+function buildAstraeaInit() {
+    return "✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦\n" +
+"✦   *[CELESTIAL FORGE] — SUMMONING*  ✦\n" +
+"✦                            *ASTRAEA* ...                  ✦              \n" +
+"✦   > Purging shadows...              [✓]        ✦\n" +
+"✦   > Igniting divine core...     [✓]      .       ✦              \n" +
+"✦   > Opening the golden court...     [✓]   ✦\n" +
+"✦                                                                .✦\n" +
+"✦   ☀️ *ASTRAEA HAS DESCENDED.*        ✦\n" +
+"✦                                                                ✦ \n" +
+"✦                                                                 ✦                                                          \n" +
+"✦ \" *I DO NOT DELETE. I JUDGE, FOR I AM* ✦\n" +
+"✦                          *ASTRAEA* \"                    ✦                                                            \n" +
+"✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦";
+}
+
+function buildAstraeaMid() {
+    return ".            ✦✦✦\n" +
+"      ✦✦✦✦✦✦✦\n" +
+"    ✦✦✦  ☀️  ✦✦✦   ╔═══════════╗\n" +
+" ✦✦✦✦✦✦✦✦✦✦  ║  J U D G M E N T ║\n" +
+"    ✦✦✦✦✦✦✦✦      ║  A R R I V E S       ║\n" +
+"        ✦✦✦✦✦✦         ╚═══════════╝\n" +
+"             ✦✦✦";
+}
+
+function buildAstraeaMain(isDev) {
+    return "╔══════════╦══════════════╗\n" +
+"║        ☀ *ASTRAEA* — *DIVINE* *SYSTEM ACCESS*               \n" +
+"╚══════════╩══════════════╝\n" +
+"\n" +
+"              ═══ ✦ *J U D G M E N T* ✦ ═══\n" +
+"          \" *i do not delete. i judge* .\"\n" +
+"\n" +
+"╔══════════════════════╦══════════════════════╗\n" +
+"║ *DIVINE CORE*        ║  *SYSTEM BALANCE* ║\n" +
+"║☀ GOLDEN: 100%║⚖ READY: EQUAL ║\n" +
+"║🔥WRATH: MODE ║ GRACE: ████░░   ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"                 🌑 *THE GOLDEN COURT* 🌑\n" +
+"        \" *every vessel stands trial* .\"\n" +
+"\n" +
+"╔══════════════════════╦═════════════════════════════╗\n" +
+"║             ⚔ COURT OF JUDGMENT          ║                                                              \n" +
+"║ [ I ]   ⛓ CHAINS OF ORDER   → Group   ║\n" +
+"║ [ II ]  👁 THE ALL-SEEING      → Owner   ║\n" +
+"║ [ IV ]  📜 BOOK OF LIFE        → Logs      ║\n" +
+"║ [ V ]   ✨ ASCENSION RITE  →Premium ║\n" +
+"║ [ Ø ]   ☀ SOLAR FLARE →Emergency   ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"📡 Uplink: *DIVINE* │ ☀ │ *Souls* : ∞\n" +
+"\" *the light does not ask permission. it simply arrives* .\"";
+}
+
 function buildEclipseSection(sectionKey, isDev) {
     const tree = getEclipseTree();
     const sec = tree[sectionKey];
@@ -2872,88 +2957,110 @@ const ECLIPSE_PHRASES = {
 
 function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
 
-// 3-stage edited menu — used by .menu / .eclipse / .phantom.
+// Persona-aware loading frames. Spaced 1s apart so WhatsApp actually renders
+// each edit instead of throttling them.
+function getPersonaScenes(persona) {
+    if (persona === "astraea") {
+        return {
+            init:  buildAstraeaInit(),
+            mid:   buildAstraeaMid(),
+            main:  buildAstraeaMain,
+            frames: [
+                "[░░░░░░░░░░]   0%   ☀ purging shadows",
+                "[████░░░░░░]  40%   ☀ igniting divine core",
+                "[████████░░]  80%   ☀ opening golden court",
+                "[██████████] 100%  ☀ ASTRAEA HAS DESCENDED",
+            ],
+        };
+    }
+    return {
+        init:  buildEclipseInit(),
+        mid:   buildEclipseVoid(),
+        main:  buildEclipseMain,
+        frames: [
+            "[░░░░░░░░░░]   0%   ▸ bypassing solar interference",
+            "[████░░░░░░]  40%   ▸ collapsing quantum states",
+            "[████████░░]  80%   ▸ severing last anchor",
+            "[██████████] 100%  ▸ ECLIPSE IS AWAKE",
+        ],
+    };
+}
+
+// 3-stage edited menu — used by .menu / .eclipse / .phantom / .astraea.
 // Two styles, switchable via .menustyle:
-//   "loading"  → stage 1 has a live progress-bar that fills over ~4 seconds
+//   "loading"  → stage 1 has a live 4-frame progress-bar that fills over ~4s
 //   "classic"  → stage 1 sits still for 4 seconds, no extra bar
-// Then the same message edits to stage 2 (void), then stage 3 (terminal).
-async function sendEclipseMenu(sock, from, msg, isDev, botJid) {
+async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
     const STAGE_GAP = 4000;
-    const init = buildEclipseInit();
+    const persona = getBotPersona(botJid);
+    const scenes = getPersonaScenes(persona);
     const style = getMenuStyle(botJid);
 
-    // CLASSIC — original behavior, no progress bar
+    // CLASSIC — no progress bar, just three still stages
     if (style === "classic") {
         try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
         try {
-            const sent = await sock.sendMessage(from, { text: init }, { quoted: msg });
+            const sent = await sock.sendMessage(from, { text: scenes.init }, { quoted: msg });
             await new Promise(r => setTimeout(r, STAGE_GAP));
             try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-            try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
+            try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
             await new Promise(r => setTimeout(r, STAGE_GAP));
             try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key }); } catch (_) {
-                try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+            try { await sock.sendMessage(from, { text: scenes.main(isDev), edit: sent.key }); } catch (_) {
+                try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
             }
             try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
         } catch (_) {
-            try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+            try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
         }
         return;
     }
 
-    // LOADING — stage 1 with animated progress bar underneath
-
-    // Loading frames appended UNDER the user's stage-1 art (art is preserved verbatim).
-    const loadFrames = [
-        "[░░░░░░░░░░]   0%   ▸ bypassing solar interference",
-        "[██░░░░░░░░]  20%   ▸ collapsing quantum states",
-        "[████░░░░░░]  40%   ▸ erasing redundant timelines",
-        "[██████░░░░]  60%   ▸ establishing void uplink",
-        "[████████░░]  80%   ▸ severing last anchor",
-        "[██████████] 100%   ▸ ECLIPSE IS AWAKE",
-    ];
-    const frameMs = Math.max(550, Math.floor(STAGE_GAP / loadFrames.length));
+    // LOADING — stage 1 with animated progress bar underneath the user's art
+    const frames = scenes.frames;
+    const frameMs = 1000; // 4 frames * 1s = 4s total
 
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     let sent;
     try {
         sent = await sock.sendMessage(
             from,
-            { text: init + "\n\n" + loadFrames[0] },
+            { text: scenes.init + "\n\n" + frames[0] },
             { quoted: msg }
         );
     } catch (_) {
-        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+        try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
         return;
     }
 
-    // Animate the loading bar in-place
-    for (let i = 1; i < loadFrames.length; i++) {
+    for (let i = 1; i < frames.length; i++) {
         await new Promise(r => setTimeout(r, frameMs));
         try {
             await sock.sendMessage(from, {
-                text: init + "\n\n" + loadFrames[i],
+                text: scenes.init + "\n\n" + frames[i],
                 edit: sent.key,
             });
-        } catch (_) {}
+        } catch (e) { /* edit may be throttled — keep going */ }
     }
     await new Promise(r => setTimeout(r, frameMs));
 
-    // Stage 2 — the void
+    // Stage 2 — middle scene
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-    try { await sock.sendMessage(from, { text: buildEclipseVoid(), edit: sent.key }); } catch (_) {}
+    try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
     await new Promise(r => setTimeout(r, STAGE_GAP));
 
-    // Stage 3 — terminal access
+    // Stage 3 — final / terminal
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     try {
-        await sock.sendMessage(from, { text: buildEclipseMain(isDev), edit: sent.key });
+        await sock.sendMessage(from, { text: scenes.main(isDev), edit: sent.key });
     } catch (_) {
-        try { await sock.sendMessage(from, { text: buildEclipseMain(isDev) }, { quoted: msg }); } catch (_) {}
+        try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
     }
     try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
 }
+
+// Backwards alias so older call sites keep working
+const sendEclipseMenu = sendPersonaMenu;
 
 // Generic handler for .chains/.codex/.ascend/.flare/.abyss
 async function sendEclipseSectionOrMini(sock, from, msg, sectionKey, parts, isDev) {
@@ -3434,6 +3541,58 @@ async function handleMessage(sock, msg) {
             return;
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // NATURAL-LANGUAGE ROUTER — "hey eclipse menu", "astraea ping", etc.
+        // Pattern-match common intents first; Gemini fallback only if API key set.
+        // Rewrites `body` to a normal `.command` and lets the switch handle it.
+        // ─────────────────────────────────────────────────────────────────────
+        const NL_TRIGGER = /^\s*(hey\s+|yo\s+|ok\s+|hi\s+)?(eclipse|astraea|phantom)[\s,:!.\-]+/i;
+        if (body && !body.startsWith(".") && !body.startsWith(",") && !body.startsWith("?") && NL_TRIGGER.test(body)) {
+            const intent = body.replace(NL_TRIGGER, "").trim();
+            const lc = intent.toLowerCase();
+            let resolved = null;
+            if (!intent) {
+                resolved = ".menu"; // bare "hey eclipse" → menu
+            } else if (/^(menu|home|main|show.*menu|whats? up|what can you do|help|commands?)$/i.test(lc)) {
+                resolved = ".menu";
+            } else if (/(switch|become|turn into|change).*(eclipse|astraea)/i.test(lc) || /^(be|use)\s+(eclipse|astraea)/i.test(lc)) {
+                resolved = lc.includes("astraea") ? ".persona astraea" : ".persona eclipse";
+            } else if (/(chains|chain.*order|group.*menu|group.*command)/i.test(lc)) {
+                resolved = ".chains";
+            } else if (/(codex|book.*life|log.*menu|log.*command)/i.test(lc)) {
+                resolved = ".codex";
+            } else if (/(ascend|premium|ascension|rite)/i.test(lc)) {
+                resolved = ".ascend";
+            } else if (/(flare|emergency|solar|panic)/i.test(lc)) {
+                resolved = ".flare";
+            } else if (/(abyss|owner.*menu|all[ -]?seeing)/i.test(lc)) {
+                resolved = ".abyss";
+            } else if (/^ping/i.test(lc) || /are you (alive|there|up|on)/i.test(lc)) {
+                resolved = ".ping";
+            } else if (/(pl.*table|league.*table|standings?)/i.test(lc)) {
+                resolved = ".pltable";
+            } else if (/(live.*scor|live.*match|whats? on now)/i.test(lc)) {
+                resolved = ".live";
+            } else if (/(this week|week.*match|this[\s-]?weeks? game)/i.test(lc)) {
+                resolved = ".plweek";
+            }
+
+            // Gemini fallback when no pattern matches
+            if (!resolved && process.env.GEMINI_API_KEY && intent.length <= 200) {
+                try {
+                    const sys = "You map a user's free-form request to ONE WhatsApp bot command from this list. Reply with ONLY the command (with leading dot), no explanation. If nothing fits, reply NONE.\n\nCommands:\n.menu — main menu\n.chains — group commands\n.codex — log/system commands\n.ascend — premium commands\n.flare — emergency commands\n.abyss — owner commands\n.ping — health check\n.persona eclipse — switch to dark persona\n.persona astraea — switch to golden persona\n.pltable — Premier League table\n.live — live PL scores\n.plweek — this week's PL matches\n.fixtures <club> — club fixtures (include club name)\n.h2h <a> vs <b> — head to head";
+                    const out = await callGemini(intent, { system: sys, temperature: 0.2 });
+                    const first = (out || "").trim().split("\n")[0].trim();
+                    if (first && first !== "NONE" && first.startsWith(".")) resolved = first;
+                } catch (_) { /* ignore — graceful fallback */ }
+            }
+
+            if (resolved) {
+                body = resolved;
+                try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            }
+        }
+
         const parts = body.trim().split(" ");
         let cmd = parts[0].toLowerCase();
         // Normalize , and ? prefix → . so users can use any of the three trigger chars
@@ -3455,9 +3614,14 @@ async function handleMessage(sock, msg) {
         switch (cmd) {
             case ".menu":
             case ".eclipse":
-            case ".phantom": {
+            case ".phantom":
+            case ".astraea": {
                 const isDev = msg.key.fromMe || isDevJid(senderJid);
                 const arg = (parts[1] || "").toLowerCase();
+
+                // Force-switch persona just by typing .eclipse / .astraea
+                if (cmd === ".astraea") setBotPersona(botJid, "astraea");
+                else if (cmd === ".eclipse" || cmd === ".phantom") setBotPersona(botJid, "eclipse");
 
                 // .menu <I/II/IV/V/Ø or 1/2/4/5/0> → jump straight to that section
                 const jumpKey = eventideJumpKey(arg);
@@ -3470,9 +3634,27 @@ async function handleMessage(sock, msg) {
                     if (text) return await sock.sendMessage(from, { text }, { quoted: msg });
                 }
 
-                // default → 3-stage edited animation (Eventide / Void / Terminal)
-                await sendEclipseMenu(sock, from, msg, isDev, botJid);
+                // default → 3-stage edited animation
+                await sendPersonaMenu(sock, from, msg, isDev, botJid);
                 break;
+            }
+
+            // .persona — owner toggles between eclipse and astraea
+            case ".persona": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const cur = getBotPersona(botJid);
+                const arg = (parts[1] || "").toLowerCase();
+                if (arg !== "eclipse" && arg !== "astraea") {
+                    return reply(
+                        "🌑☀ *Persona*\n" +
+                        `current: *${cur}*\n\n` +
+                        "• *.persona eclipse* — the dark one (Eventide Omega)\n" +
+                        "• *.persona astraea* — the divine one (Celestial Forge)\n\n" +
+                        "type *.menu* after switching to see the new flow."
+                    );
+                }
+                setBotPersona(botJid, arg);
+                return reply(`✅ persona set to *${arg}*. type *.menu* to summon.`);
             }
 
             case ".chains": {
@@ -4564,6 +4746,25 @@ _Can be started from any chat, but source members require source group access an
 
                     if (!destJid) return reply("❌ Could not access the destination group. Make sure the link is valid.");
 
+                    // Pre-flight: linked WA number must be IN destination AND admin
+                    let destInfo;
+                    try {
+                        destInfo = await sock.groupMetadata(destJid);
+                    } catch (e) {
+                        return reply(`❌ Could not read destination group.\n\nThe linked WhatsApp number must be *inside* the destination group.\n\nReason: ${e?.message || "unknown"}`);
+                    }
+                    const myNum = (sock.user?.id || "").split(":")[0].split("@")[0];
+                    const meInDest = (destInfo.participants || []).find(p => {
+                        const idNum = String(p.id).split(":")[0].split("@")[0];
+                        return idNum === myNum;
+                    });
+                    if (!meInDest) {
+                        return reply(`❌ The linked WhatsApp number is *not in the destination group* (${destInfo.subject || destJid}).\n\nFix: join that group first, then make yourself admin, then re-run *.clone*.`);
+                    }
+                    if (!meInDest.admin) {
+                        return reply(`❌ You're in the destination group but *not an admin*.\n\nOnly admins can add members. Make yourself admin in *${destInfo.subject || "that group"}* first, then re-run *.clone*.`);
+                    }
+
                     const totalBatches = Math.ceil(members.length / batchSize);
                     const estTime = totalBatches * intervalMins;
 
@@ -4595,14 +4796,39 @@ _Can be started from any chat, but source members require source group access an
 
                         for (const memberJid of batch) {
                             try {
-                                await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
-                                await sock.sendMessage(from, {
-                                    text: `➕ Added (${job.index + 1}/${job.total}): @${memberJid.split("@")[0]}`,
-                                    mentions: [memberJid],
-                                });
+                                const res = await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
+                                // baileys returns an array of {status, jid} — inspect for soft failures
+                                const r = Array.isArray(res) ? res[0] : null;
+                                const status = r?.status ? String(r.status) : "200";
+                                if (status === "200" || status === 200) {
+                                    job.added = (job.added || 0) + 1;
+                                    await sock.sendMessage(from, {
+                                        text: `➕ Added (${job.index + 1}/${job.total}): @${memberJid.split("@")[0]}`,
+                                        mentions: [memberJid],
+                                    });
+                                } else {
+                                    job.skipped = (job.skipped || 0) + 1;
+                                    let label = "couldn't add";
+                                    if (status === "403") label = "blocked by their privacy settings";
+                                    else if (status === "408") label = "their account is inactive";
+                                    else if (status === "409") label = "already in the group";
+                                    else if (status === "401") label = "you're not admin in destination";
+                                    else if (status === "500") label = "WhatsApp internal error";
+                                    await sock.sendMessage(from, {
+                                        text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label}`,
+                                        mentions: [memberJid],
+                                    });
+                                }
                             } catch (e) {
+                                job.skipped = (job.skipped || 0) + 1;
+                                const errMsg = String(e?.message || "failed").toLowerCase();
+                                let label = e?.message || "failed";
+                                if (errMsg.includes("forbidden") || errMsg.includes("privacy") || errMsg.includes("403")) label = "blocked by their privacy settings";
+                                else if (errMsg.includes("not-authorized") || errMsg.includes("401")) label = "you're not admin in destination";
+                                else if (errMsg.includes("rate") || errMsg.includes("429") || errMsg.includes("too many")) label = "WhatsApp is rate-limiting — pausing batch";
+                                else if (errMsg.includes("conflict") || errMsg.includes("409")) label = "already in the group";
                                 await sock.sendMessage(from, {
-                                    text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${e?.message || "failed"}`,
+                                    text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label}`,
                                     mentions: [memberJid],
                                 });
                             }
@@ -4619,11 +4845,23 @@ _Can be started from any chat, but source members require source group access an
             }
 
             case ".stopclone": {
-                if (!cloneJobs[from]) return reply("⚠️ No active clone job in this chat.");
-                clearInterval(cloneJobs[from].intervalId);
-                const done = cloneJobs[from].members.filter((_, i) => i < cloneJobs[from].total).length;
+                const job = cloneJobs[from];
+                if (!job) return reply("⚠️ No active clone job in this chat.");
+                clearInterval(job.intervalId);
+                const done    = job.index || 0;
+                const total   = job.total || 0;
+                const added   = job.added || 0;
+                const skipped = job.skipped || 0;
+                const remaining = Math.max(0, total - done);
+                const pct = total ? Math.round((done / total) * 100) : 0;
                 delete cloneJobs[from];
-                await reply(`🛑 *Clone stopped.*\n\nJob cancelled successfully.`);
+                await reply(
+                    `🛑 *Clone stopped.*\n\n` +
+                    `processed: *${done}/${total}* (${pct}%)\n` +
+                    `✅ added: *${added}*\n` +
+                    `⚠️ skipped: *${skipped}*\n` +
+                    `⏸ remaining: *${remaining}*`
+                );
                 break;
             }
 
