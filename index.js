@@ -291,6 +291,8 @@ const AUTOJOIN_BLACKLIST = ["porn", "18+", "adult", "xxx", "sex", "nude", "naked
 
 // --- MUTED USERS (per-group individual silence) ---
 const MUTED_USERS_FILE = path.join(__dirname, "muted_users.json");
+// Module-level message log for .clear (indexed by "botJid::groupJid" → [msg, ...])
+const globalMsgCache = {};
 function loadMutedUsers() { if (!fs.existsSync(MUTED_USERS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(MUTED_USERS_FILE, "utf8")); } catch { return {}; } }
 function saveMutedUsers(d) { fs.writeFileSync(MUTED_USERS_FILE, JSON.stringify(d, null, 2)); }
 function addMutedUser(groupJid, userJid) { const d = loadMutedUsers(); if (!d[groupJid]) d[groupJid] = []; if (!d[groupJid].includes(userJid)) d[groupJid].push(userJid); saveMutedUsers(d); }
@@ -4741,7 +4743,7 @@ _Can be started from any chat, but source members require source group access an
                     if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 }
                 const muteTarget = resolveTargetJid(msg, parts);
-                if (!muteTarget) return reply("Usage: .mute @user  or reply to their message with .mute");
+                if (!muteTarget) return reply("Usage: .mute @user / .mute <number> / reply to their message with .mute");
                 if (isUserMuted(from, muteTarget)) return reply(`@${muteTarget.split("@")[0]} is already muted.`, { mentions: [muteTarget] });
                 addMutedUser(from, muteTarget);
                 await sock.sendMessage(from, {
@@ -4764,7 +4766,7 @@ _Can be started from any chat, but source members require source group access an
                     if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
                 }
                 const unmuteTarget = resolveTargetJid(msg, parts);
-                if (!unmuteTarget) return reply("Usage: .unmute @user  or reply to their message with .unmute");
+                if (!unmuteTarget) return reply("Usage: .unmute @user / .unmute <number> / reply to their message with .unmute");
                 if (!isUserMuted(from, unmuteTarget)) return reply(`@${unmuteTarget.split("@")[0]} is not currently muted.`, { mentions: [unmuteTarget] });
                 removeMutedUser(from, unmuteTarget);
                 await sock.sendMessage(from, {
@@ -6578,6 +6580,93 @@ _Can be started from any chat, but source members require source group access an
             }
 
             // --- ANTIDELETE ---
+            // --- CLEAR CHAT ---
+            case ".clear": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    if (isGroup) {
+                        const rcRoles = await getGroupRoles(sock, from);
+                        if (!rcRoles.admins.has(senderJid)) return reply("❌ Only admins can clear messages.");
+                    } else {
+                        return reply("❌ Owner only in private chat.");
+                    }
+                }
+                const clearSub = parts[1]?.toLowerCase();
+                const cacheKey = `${sock.user?.id}::${from}`;
+                const cachedMsgs = (globalMsgCache[cacheKey] || []).slice();
+                if (!clearSub) {
+                    // Show prompt
+                    if (isGroup) {
+                        const rcCheck = await getGroupRoles(sock, from);
+                        const botIsAdmin = rcCheck.botIsAdmin;
+                        if (botIsAdmin) {
+                            return reply(buildOmegaTerminal(
+                                `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                                `   Choose what to purge:\n\n` +
+                                `   *.clear all* — delete ALL cached messages\n` +
+                                `               for everyone in this group\n\n` +
+                                `   *.clear me* — delete only YOUR messages\n` +
+                                `               from this group\n\n` +
+                                `   " *The past can be erased.*\n     *Choose wisely.* "`
+                            ));
+                        } else {
+                            return reply(buildOmegaTerminal(
+                                `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                                `   Bot is not admin — can only delete\n` +
+                                `   its own messages.\n\n` +
+                                `   *.clear me* — delete bot's own messages\n\n` +
+                                `   _(Make bot admin to enable full purge)_`
+                            ));
+                        }
+                    } else {
+                        return reply(buildOmegaTerminal(
+                            `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                            `   *.clear all* — delete all cached messages\n` +
+                            `   *.clear me* — delete only your own messages`
+                        ));
+                    }
+                }
+                if (!cachedMsgs.length) return reply("⚠️ No cached messages found. Only messages received while the bot was running can be cleared.");
+                await reply(`⏳ _Purging messages..._`);
+                let deleted = 0, failed = 0;
+                if (clearSub === "all") {
+                    // Delete all cached messages for this chat
+                    for (const m of cachedMsgs) {
+                        try {
+                            await sock.sendMessage(from, { delete: m.key });
+                            deleted++;
+                            await new Promise(r => setTimeout(r, 300));
+                        } catch { failed++; }
+                    }
+                    globalMsgCache[cacheKey] = [];
+                } else if (clearSub === "me") {
+                    // Delete only messages sent by the command sender (or bot's own messages in private)
+                    const targetSender = isGroup ? senderJid : (sock.user?.id || "");
+                    for (const m of cachedMsgs) {
+                        const msgSender = m.key?.participant || m.key?.remoteJid || "";
+                        const isFromTarget = m.key?.fromMe || jidLocal(msgSender) === jidLocal(targetSender);
+                        if (!isFromTarget) continue;
+                        try {
+                            await sock.sendMessage(from, { delete: m.key });
+                            deleted++;
+                            await new Promise(r => setTimeout(r, 300));
+                        } catch { failed++; }
+                    }
+                    globalMsgCache[cacheKey] = (globalMsgCache[cacheKey] || []).filter(m => {
+                        const msgSender = m.key?.participant || m.key?.remoteJid || "";
+                        return !m.key?.fromMe && jidLocal(msgSender) !== jidLocal(senderJid);
+                    });
+                } else {
+                    return reply("Usage: `.clear all` — everyone's messages\n`.clear me` — only your messages");
+                }
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *PURGE_COMPLETE* █▓▒░\n\n` +
+                    `   [ 🗑️ ] *DELETED* : ${deleted}\n` +
+                    `   [ ⚠️ ] *FAILED*  : ${failed}\n\n` +
+                    `   " *The slate is wiped clean.*\n     *What was spoken here*\n     *is now silence.* "`
+                ));
+                break;
+            }
+
             case ".antidelete": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply(eclipseSay("only_owner"));
@@ -8127,11 +8216,18 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         }
     }, 10 * 60 * 1000);
 
-    // Store messages for antidelete lookup
+    // Store messages for antidelete lookup + .clear cache
     const msgCache = {};
     sock.ev.on("messages.upsert", ({ messages }) => {
+        const botId = sock.user?.id || "unknown";
         for (const m of messages) {
-            if (m.key?.id && m.message) msgCache[m.key.id] = m;
+            if (!m.key?.id || !m.message) continue;
+            msgCache[m.key.id] = m;
+            // Also store in globalMsgCache for .clear command
+            const gKey = `${botId}::${m.key.remoteJid}`;
+            if (!globalMsgCache[gKey]) globalMsgCache[gKey] = [];
+            globalMsgCache[gKey].push(m);
+            if (globalMsgCache[gKey].length > 1000) globalMsgCache[gKey].shift();
         }
     });
 
