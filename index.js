@@ -351,16 +351,26 @@ async function dlFetchJson(url, opts = {}) {
     } finally { clearTimeout(t); }
 }
 const DL_PROVIDERS = {
+    // Cobalt — updated to new v7 API format (POST /, not /api/json)
     cobalt: async (url, opts = {}) => {
-        const body = { url, vQuality: "720", isAudioOnly: !!opts.audio, filenamePattern: "basic" };
-        const data = await dlFetchJson("https://api.cobalt.tools/api/json", {
-            method: "POST",
-            headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-            timeout: 30000,
-        });
-        if (!data || data.status === "error") throw new Error(data?.text || "cobalt error");
-        if (data.status === "redirect" || data.status === "stream" || data.status === "tunnel") {
+        const body = { url, downloadMode: opts.audio ? "audio" : "auto", videoQuality: "720", audioFormat: "mp3", filenameStyle: "basic" };
+        let data;
+        // Try new endpoint first, fall back to legacy
+        for (const endpoint of ["https://api.cobalt.tools/", "https://api.cobalt.tools/api/json"]) {
+            try {
+                data = await dlFetchJson(endpoint, {
+                    method: "POST",
+                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                    body: JSON.stringify(endpoint.endsWith("/api/json")
+                        ? { url, vQuality: "720", isAudioOnly: !!opts.audio, filenamePattern: "basic" }
+                        : body),
+                    timeout: 30000,
+                });
+                break;
+            } catch (e) { if (endpoint.includes("api/json")) throw e; }
+        }
+        if (!data || data.status === "error") throw new Error(data?.text || data?.error?.code || "cobalt error");
+        if (["redirect", "stream", "tunnel"].includes(data.status)) {
             return { type: opts.audio ? "audio" : "video", url: data.url };
         }
         if (data.status === "picker" && Array.isArray(data.picker) && data.picker.length) {
@@ -369,40 +379,55 @@ const DL_PROVIDERS = {
         }
         throw new Error(`cobalt: unexpected status ${data.status}`);
     },
+
+    // tikwm — TikTok HD (no watermark). Prefers HD, falls back to SD, never wmplay.
     tikwm: async (url, opts = {}) => {
         const data = await dlFetchJson(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`);
         if (!data || data.code !== 0 || !data.data) throw new Error(data?.msg || "tikwm error");
         const d = data.data;
         if (opts.audio) {
-            const a = d.music || d.music_info?.play;
-            if (!a) throw new Error("tikwm: no audio");
+            const a = d.music_info?.play || d.music;
+            if (!a) throw new Error("tikwm: no audio track");
             return { type: "audio", url: a, title: d.title };
         }
-        const v = d.hdplay || d.play || d.wmplay;
-        if (!v) throw new Error("tikwm: no video");
+        // hdplay = HD no-watermark, play = SD no-watermark — never use wmplay (watermark)
+        const v = d.hdplay || d.play;
+        if (!v) throw new Error("tikwm: no playable video url");
         return { type: "video", url: v, title: d.title, thumb: d.cover };
+    },
+
+    // locoloader — secondary TikTok/Instagram fallback (free, no key)
+    locoloader: async (url, opts = {}) => {
+        const data = await dlFetchJson(`https://locoloader.com/api/v2/social?url=${encodeURIComponent(url)}`, { timeout: 25000 });
+        if (!data || data.error) throw new Error(data?.message || "locoloader error");
+        if (opts.audio && data.audio) return { type: "audio", url: data.audio, title: data.title };
+        if (data.video) return { type: "video", url: data.video, title: data.title };
+        if (data.image) return { type: "image", url: data.image, title: data.title };
+        throw new Error("locoloader: no media url in response");
     },
 };
 const DL_CHAIN = {
-    youtube: ["cobalt"],
-    tiktok: ["tikwm", "cobalt"],
-    instagram: ["cobalt"],
-    facebook: ["cobalt"],
-    twitter: ["cobalt"],
+    youtube:    ["cobalt"],
+    tiktok:     ["tikwm", "locoloader", "cobalt"],
+    instagram:  ["cobalt", "locoloader"],
+    facebook:   ["cobalt"],
+    twitter:    ["cobalt"],
     soundcloud: ["cobalt"],
-    pinterest: ["cobalt"],
-    reddit: ["cobalt"],
-    tumblr: ["cobalt"],
-    vimeo: ["cobalt"],
-    twitch: ["cobalt"],
-    generic: ["cobalt"],
+    pinterest:  ["cobalt"],
+    reddit:     ["cobalt"],
+    tumblr:     ["cobalt"],
+    vimeo:      ["cobalt"],
+    twitch:     ["cobalt"],
+    generic:    ["cobalt"],
 };
 async function downloadMedia(url, opts = {}) {
     const platform = detectPlatform(url);
     if (!platform) { const e = new Error("Could not detect platform from URL"); e.platform = "unknown"; throw e; }
     const chain = DL_CHAIN[platform] || DL_CHAIN.generic;
+    const skip = new Set(opts.skipProviders || []);
     const errs = [];
     for (const name of chain) {
+        if (skip.has(name)) continue;
         const fn = DL_PROVIDERS[name];
         if (!fn) continue;
         try {
@@ -5696,14 +5721,14 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            case ".geolocate": {
+            case ".itrace": case ".geolocate": {
                 const ip = parts[1];
-                if (!ip) return reply("Usage: .geolocate <ip-or-domain>");
+                if (!ip) return reply("Usage: .itrace <ip-or-domain>");
                 try {
                     const data = await fetchJSON(`https://ipwho.is/${encodeURIComponent(ip)}`);
                     if (!data.success) return reply(`❌ ${data.message || "Lookup failed"}`);
                     await reply(
-                        `🌍 *Geolocation*\n━━━━━━━━━━\n` +
+                        `🌍 *IP Trace*\n━━━━━━━━━━\n` +
                         `IP: ${data.ip}\n` +
                         `Country: ${data.country} ${data.country_code}\n` +
                         `Region: ${data.region}\n` +
@@ -6318,10 +6343,32 @@ _Can be started from any chat, but source members require source group access an
                 const audio = audioCmds.includes(cmd) || flags.includes("audio") || flags.includes("--audio");
                 await reply("⏳ _Cooking your media... give me a sec._");
                 try {
-                    const result = await downloadMedia(url, { audio });
-                    const buf = await fetchBuffer(result.url);
+                    // Min buffer sizes — anything smaller is a black/corrupt/empty file
+                    const MIN_VIDEO = 80 * 1024;   // 80 KB
+                    const MIN_AUDIO = 20 * 1024;   // 20 KB
+                    const MIN_IMAGE =  5 * 1024;   //  5 KB
+
+                    let result = await downloadMedia(url, { audio });
+                    let buf = await fetchBuffer(result.url);
+
+                    // If the returned file is suspiciously small, it's almost certainly a
+                    // black / corrupt / placeholder — automatically skip that provider and retry.
+                    const minBytes = result.type === "audio" ? MIN_AUDIO : result.type === "image" ? MIN_IMAGE : MIN_VIDEO;
+                    if (buf.length < minBytes) {
+                        console.log(`[dl] ${result.provider} returned ${buf.length}B (< ${minBytes}B) for ${url} — retrying next provider`);
+                        markDlHealth(result.provider, false, `suspiciously small: ${buf.length}B`);
+                        try {
+                            result = await downloadMedia(url, { audio, skipProviders: [result.provider] });
+                            buf = await fetchBuffer(result.url);
+                        } catch (_) {
+                            // retry failed — fall through with the original (will hit size check below)
+                        }
+                    }
+
                     const sizeMB = buf.length / 1024 / 1024;
                     if (sizeMB > 95) return reply(`❌ File too big (${sizeMB.toFixed(1)}MB). WhatsApp limit is ~100MB.\n\n_Try the audio version instead, or pick a shorter clip._`);
+                    if (buf.length < minBytes) return reply(`❌ *Download returned an empty or corrupt file.*\n\nAll providers failed for this link. Try again later or use a different URL.`);
+
                     const caption = `✅ *${result.platform.toUpperCase()}* • via _${result.provider}_${result.title ? `\n\n📝 ${result.title}` : ""}\n\n_Powered by Phantom-X_`;
                     if (result.type === "audio") {
                         await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4" }, { quoted: msg });
