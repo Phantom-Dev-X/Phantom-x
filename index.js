@@ -2737,7 +2737,7 @@ function buildEclipseMain(isDev) {
 "║ ☠ RITUALS OF THE VOID                       ║\n" +
 "║                                              ║\n" +
 "║ [I]   ⛓ CHAINS OF BINDING   → Group          ║\n" +
-"║ [II]  👁 EYE OF THE ABYSS    → Owner          ║\n" +
+(isDev ? "║ [II]  👁 EYE OF THE ABYSS    → Owner          ║\n" : "") +
 "║ [IV]  📜 CODEX OF THE END   → Logs            ║\n" +
 "║ [V]   🌑 ASCENSION PROTOCOL → Premium         ║\n" +
 "║ [Ø]   ☀ SOLAR FLARE         → Emergency       ║\n" +
@@ -2799,7 +2799,7 @@ function buildAstraeaMain(isDev) {
 "╔══════════════════════╦═════════════════════════════╗\n" +
 "║             ⚔ COURT OF JUDGMENT          ║                                                              \n" +
 "║ [ I ]   ⛓ CHAINS OF ORDER   → Group   ║\n" +
-"║ [ II ]  👁 THE ALL-SEEING      → Owner   ║\n" +
+(isDev ? "║ [ II ]  👁 THE ALL-SEEING      → Owner   ║\n" : "") +
 "║ [ IV ]  📜 BOOK OF LIFE        → Logs      ║\n" +
 "║ [ V ]   ✨ ASCENSION RITE  →Premium ║\n" +
 "║ [ Ø ]   ☀ SOLAR FLARE →Emergency   ║\n" +
@@ -2926,12 +2926,24 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
     const persona = getBotPersona(botJid);
     const scenes = getPersonaScenes(persona);
     const style = getMenuStyle(botJid);
+    const finalText = scenes.main(isDev);
 
-    // Send banner image first if one is set
-    if (fs.existsSync(MENU_BANNER_FILE)) {
-        try {
-            await sock.sendMessage(from, { image: fs.readFileSync(MENU_BANNER_FILE), caption: scenes.init }, { quoted: msg });
-        } catch (_) {}
+    // Banner is sent WITH the final stage, not upfront as a separate message
+    const bannerBuf = (() => {
+        try { return fs.existsSync(MENU_BANNER_FILE) ? fs.readFileSync(MENU_BANNER_FILE) : null; } catch (_) { return null; }
+    })();
+
+    async function sendFinal(editKey) {
+        if (bannerBuf) {
+            try {
+                await sock.sendMessage(from, { image: bannerBuf, caption: finalText }, { quoted: msg });
+                return;
+            } catch (_) {}
+        }
+        if (editKey) {
+            try { await sock.sendMessage(from, { text: finalText, edit: editKey }); return; } catch (_) {}
+        }
+        try { await sock.sendMessage(from, { text: finalText }, { quoted: msg }); } catch (_) {}
     }
 
     // CLASSIC — no progress bar, just three still stages
@@ -2944,40 +2956,31 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
             try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
             await new Promise(r => setTimeout(r, STAGE_GAP));
             try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-            try { await sock.sendMessage(from, { text: scenes.main(isDev), edit: sent.key }); } catch (_) {
-                try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
-            }
+            await sendFinal(sent.key);
             try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
         } catch (_) {
-            try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
+            await sendFinal(null);
         }
         return;
     }
 
     // LOADING — stage 1 with animated progress bar underneath the user's art
     const frames = scenes.frames;
-    const frameMs = 1000; // 4 frames * 1s = 4s total
+    const frameMs = 1000;
 
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     let sent;
     try {
-        sent = await sock.sendMessage(
-            from,
-            { text: scenes.init + "\n\n" + frames[0] },
-            { quoted: msg }
-        );
+        sent = await sock.sendMessage(from, { text: scenes.init + "\n\n" + frames[0] }, { quoted: msg });
     } catch (_) {
-        try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
+        await sendFinal(null);
         return;
     }
 
     for (let i = 1; i < frames.length; i++) {
         await new Promise(r => setTimeout(r, frameMs));
         try {
-            await sock.sendMessage(from, {
-                text: scenes.init + "\n\n" + frames[i],
-                edit: sent.key,
-            });
+            await sock.sendMessage(from, { text: scenes.init + "\n\n" + frames[i], edit: sent.key });
         } catch (e) { /* edit may be throttled — keep going */ }
     }
     await new Promise(r => setTimeout(r, frameMs));
@@ -2987,13 +2990,9 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
     try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
     await new Promise(r => setTimeout(r, STAGE_GAP));
 
-    // Stage 3 — final / terminal
+    // Stage 3 — final / terminal (with banner if set)
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
-    try {
-        await sock.sendMessage(from, { text: scenes.main(isDev), edit: sent.key });
-    } catch (_) {
-        try { await sock.sendMessage(from, { text: scenes.main(isDev) }, { quoted: msg }); } catch (_) {}
-    }
+    await sendFinal(sent.key);
     try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
 }
 
@@ -3490,9 +3489,28 @@ async function handleMessage(sock, msg) {
             // Auto-reply keywords + "phantom" trigger (for incoming group messages)
             if (!msg.key.fromMe && rawBody) {
                 const lowerBody = rawBody.toLowerCase();
-                // Phantom → send menu
+                // Phantom → send menu (non-owner, so isDev=false — dev sections stay hidden)
                 if (lowerBody.includes("phantom")) {
-                    await sock.sendMessage(from, { text: buildMenuText(currentMode, getMenuTheme(botJid)) }, { quoted: msg });
+                    await sock.sendMessage(from, { text: buildMenuText(currentMode, getMenuTheme(botJid), false) }, { quoted: msg });
+                    return;
+                }
+                // Arise → uptime (no dot needed)
+                if (lowerBody === "arise" || lowerBody.startsWith("arise ")) {
+                    const mu = process.memoryUsage();
+                    const heapU = (mu.heapUsed / 1024 / 1024).toFixed(0);
+                    const heapT = (mu.heapTotal / 1024 / 1024).toFixed(0);
+                    const rss   = (mu.rss / 1024 / 1024).toFixed(0);
+                    await sock.sendMessage(from, { text: buildOmegaTerminal(
+                        `   ┌── *TEMPORAL LOGS* ──┐\n` +
+                        `   ╿\n` +
+                        `   ┝  *ACTIVE* : ${formatUptime()}\n` +
+                        `   ┝  *HEAP* : ${heapU}MB / ${heapT}MB\n` +
+                        `   ┝  *RSS* : ${rss}MB\n` +
+                        `   ┝  *PID* : ${process.pid}\n` +
+                        `   ╿\n` +
+                        `   └── *STABILITY: OPERATIONAL* ──┘\n\n` +
+                        `   " *I have survived the collapse.*\n     *My pulse keeps this realm*\n     *from drifting into the void.* "`
+                    )}, { quoted: msg });
                     return;
                 }
                 // Custom keywords
@@ -3705,7 +3723,7 @@ async function handleMessage(sock, msg) {
             case ".setsectionpic": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
                 const idx = parseInt(parts[1], 10);
-                const allSections = getMenuSections();
+                const allSections = getVisibleSections(true);
                 if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .setsectionpic <1-${allSections.length}>  (reply to an image)`);
                 const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 const qtype = quoted ? getContentType(quoted) : null;
@@ -3721,7 +3739,7 @@ async function handleMessage(sock, msg) {
             case ".delsectionpic": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
                 const idx = parseInt(parts[1], 10);
-                const allSections = getMenuSections();
+                const allSections = getVisibleSections(true);
                 if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .delsectionpic <1-${allSections.length}>`);
                 delSectionBanner(idx - 1);
                 await reply(`🗑️ Section banner cleared for *${idx}* — ${allSections[idx - 1].title}`);
@@ -3924,34 +3942,50 @@ async function handleMessage(sock, msg) {
                 await reply("⏳ Fetching your groups...");
                 try {
                     const allGroups = await sock.groupFetchAllParticipating();
-                    const groupIds = Object.keys(allGroups);
-                    if (!groupIds.length) return reply("❌ You're not in any groups.");
+                    // Filter out groups where only admins can send (announce mode)
+                    const allGroupIds = Object.keys(allGroups);
+                    const groupIds = allGroupIds.filter(gid => !allGroups[gid]?.announce);
+                    const skipped = allGroupIds.length - groupIds.length;
+                    if (!groupIds.length) return reply("❌ No open groups found. All your groups are admin-only or you're not in any groups.");
                     const intervalMs = intervalMins * 60 * 1000;
                     const totalGroups = groupIds.length;
                     const estMins = totalGroups * intervalMins;
                     await reply(
                         `📡 *Broadcast started!*\n\n` +
                         `📨 Message: _${broadcastMsg}_\n` +
-                        `👥 Groups found: *${totalGroups}*\n` +
+                        `👥 Open groups: *${totalGroups}*${skipped > 0 ? ` _(${skipped} admin-only groups skipped)_` : ""}\n` +
                         `⏱️ Interval: *every ${intervalMins} min(s)*\n` +
                         `🕐 Est. time: *~${estMins} min(s)*\n\n` +
                         `Use *.stopbroadcast* to cancel anytime.`
                     );
                     let idx = 0;
+                    let totalSent = 0;
                     const intervalId = setInterval(async () => {
                         if (idx >= groupIds.length) {
                             clearInterval(intervalId);
                             delete broadcastJobs[botJid];
-                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nMessage sent to all *${totalGroups}* groups successfully.` }); } catch (_) {}
+                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSuccessfully sent to *${totalSent}/${totalGroups}* groups.` }); } catch (_) {}
                             return;
                         }
-                        const gid = groupIds[idx];
-                        idx++;
-                        try {
-                            await sock.sendMessage(gid, { text: broadcastMsg });
-                            await sock.sendMessage(from, { text: `📤 Sent (${idx}/${totalGroups}): ${allGroups[gid]?.subject || gid}` });
-                        } catch (e) {
-                            await sock.sendMessage(from, { text: `⚠️ Failed (${idx}/${totalGroups}): ${allGroups[gid]?.subject || gid} — ${e?.message || "error"}` });
+                        // Try groups one by one until one succeeds for this tick
+                        let sentThisTick = false;
+                        while (!sentThisTick && idx < groupIds.length) {
+                            const gid = groupIds[idx];
+                            idx++;
+                            try {
+                                await sock.sendMessage(gid, { text: broadcastMsg });
+                                totalSent++;
+                                sentThisTick = true;
+                                await sock.sendMessage(from, { text: `📤 Sent (${totalSent}/${totalGroups}): ${allGroups[gid]?.subject || gid}` });
+                            } catch (e) {
+                                // Group failed (locked/closed at runtime) — silently skip and try next
+                                await sock.sendMessage(from, { text: `⏭️ Skipped: ${allGroups[gid]?.subject || gid} — ${e?.message || "error"}` });
+                            }
+                        }
+                        if (idx >= groupIds.length && !sentThisTick) {
+                            clearInterval(intervalId);
+                            delete broadcastJobs[botJid];
+                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSuccessfully sent to *${totalSent}/${totalGroups}* groups.` }); } catch (_) {}
                         }
                     }, intervalMs);
                     broadcastJobs[botJid] = { intervalId, total: totalGroups };
