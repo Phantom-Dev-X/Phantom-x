@@ -832,30 +832,51 @@ function clearPersona(scopeJid) { const d = loadPersonas(); delete d[scopeJid]; 
 async function callGemini(prompt, opts = {}) {
     const KEY = process.env.GEMINI_API_KEY;
     if (!KEY) throw new Error("GEMINI_API_KEY not set. Add it from https://aistudio.google.com/app/apikey");
-    const model = opts.model || "gemini-2.0-flash";
+    // Try preferred model first, fall back to stable model on failure
+    const models = opts.model
+        ? [opts.model]
+        : ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
     const sys = opts.system ? [{ text: opts.system }] : [];
-    const body = JSON.stringify({
-        contents: [{ parts: sys.concat([{ text: prompt }]) }],
-        generationConfig: { temperature: opts.temperature ?? 0.7 },
-    });
-    return new Promise((resolve, reject) => {
-        const req = https.request({
-            hostname: "generativelanguage.googleapis.com",
-            path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-        }, (res) => {
-            let data = ""; res.on("data", c => data += c);
-            res.on("end", () => {
-                try {
-                    const p = JSON.parse(data);
-                    const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
-                    if (t) resolve(t.trim()); else reject(new Error(p?.error?.message || "Empty response"));
-                } catch (e) { reject(e); }
-            });
+    let lastErr = null;
+    for (const model of models) {
+        const body = JSON.stringify({
+            contents: [{ parts: sys.concat([{ text: prompt }]) }],
+            generationConfig: { temperature: opts.temperature ?? 0.7 },
         });
-        req.on("error", reject); req.write(body); req.end();
-    });
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const req = https.request({
+                    hostname: "generativelanguage.googleapis.com",
+                    path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                }, (res) => {
+                    let data = ""; res.on("data", c => data += c);
+                    res.on("end", () => {
+                        try {
+                            const p = JSON.parse(data);
+                            const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
+                            if (t) resolve(t.trim());
+                            else {
+                                const errMsg = p?.error?.message || p?.error?.status || "Empty response from Gemini";
+                                reject(new Error(errMsg));
+                            }
+                        } catch (e) { reject(e); }
+                    });
+                });
+                req.on("error", reject); req.write(body); req.end();
+            });
+            return result;
+        } catch (e) {
+            lastErr = e;
+            // Only try next model if this one is not found or not authorized
+            const msg = e?.message || "";
+            if (!msg.includes("not found") && !msg.includes("NOT_FOUND") && !msg.includes("404") && !msg.includes("permission") && !msg.includes("PERMISSION_DENIED")) {
+                throw e; // real error (quota, network, etc.) — don't retry other models
+            }
+        }
+    }
+    throw lastErr || new Error("All Gemini models failed");
 }
 
 // --- TTS (Google Translate free endpoint, multi-language) ---
@@ -3025,20 +3046,43 @@ function buildEclipseHelp() {
            `${ECLIPSE_BORDER}`;
 }
 
-function buildEclipseInfo() {
-    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n` +
-           `   version  v${BOT_VERSION}\n` +
-           `   runtime  ${formatUptime()}\n\n` +
-           `   the void watches.\n` +
-           `${ECLIPSE_BORDER}`;
-}
-
 function buildEclipseDevContact() {
     const num = (typeof DEV_NUMBERS !== "undefined" && DEV_NUMBERS[0]) || (process.env.DEV_NUMBERS || "").split(",")[0].trim() || "2348102756072";
-    return `${ECLIPSE_BORDER}\n${eclipseCenter("THE DEV HAND")}\n${ECLIPSE_BORDER}\n` +
-           `   wa.me/${num}\n\n` +
-           `   speak only when called.\n` +
-           `${ECLIPSE_BORDER}`;
+    return buildOmegaTerminal(
+        `      ◢◤ *THE ARCHITECT* ◢◤\n\n` +
+        `      [ 👤 ] : Phantom dev x\n` +
+        `      [ 🌐 ] : wa.me/${num}\n` +
+        `      [ 🏮 ] : *PRIMARY_VESSEL_01*\n\n` +
+        `   " *Creation is the first step*\n     *toward destruction* ."`
+    );
+}
+
+function buildEclipseInfo() {
+    const mu = process.memoryUsage();
+    const heapUsed = (mu.heapUsed / 1024 / 1024).toFixed(0);
+    const heapTotal = (mu.heapTotal / 1024 / 1024).toFixed(0);
+    return buildOmegaTerminal(
+        `   ░▒▓█ *CORE_MANIFEST* █▓▒░\n\n` +
+        `   ⧓ *VERSION* :: v${BOT_VERSION}_STABLE\n` +
+        `   ⧓ *RUNTIME* :: NODE_JS v${process.version.slice(1)}\n` +
+        `   ⧓ *UPTIME* :: ${formatUptime()}\n` +
+        `   ⧓ *MEMORY* :: ${heapUsed}MB / ${heapTotal}MB\n` +
+        `   ⧓ *SHIELD* :: BUG_SHIELD: ACTIVE\n\n` +
+        `   " *The machine does not sleep* .\n     *The machine only waits* ."`
+    );
+}
+
+// ─── EVENTIDE OMEGA TERMINAL ─────────────────────────────────────────────────
+// All command confirmations use this styled output for consistency.
+function buildOmegaTerminal(body) {
+    return (
+        `╔══════════╦══════════════╗\n` +
+        `║       ⚠ *EVENTIDE OMEGA TERMINAL*\n` +
+        `║                           *ACCESS*\n` +
+        `╚═══════════╩═════════════╝\n\n` +
+        body + `\n\n` +
+        `— *EVENTIDE OMEGA* · 👁`
+    );
 }
 
 function buildMenuText(mode, themeNum, isDev) {
@@ -3709,12 +3753,22 @@ async function handleMessage(sock, msg) {
                     targetFile = MENU_BANNER_FILE;
                     sectionLabel = "main menu";
                 }
-                await reply(`⏳ Saving ${sectionLabel} banner...`);
+                await reply(`⏳ _Implanting visual overlay..._`);
                 try {
                     const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
                     const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!buf || buf.length < 1000) return reply("❌ Image download returned empty data. Try sending the image again.");
                     fs.writeFileSync(targetFile, buf);
-                    await reply(`✅ *${sectionLabel.charAt(0).toUpperCase() + sectionLabel.slice(1)} banner set!*\n\nThe image will now appear whenever the ${sectionLabel} is shown. 🔥`);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *VISUAL_OVERLAY* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : ${sectionLabel.toUpperCase().replace(/ /g,"_")}_BANNER\n` +
+                        `   ┃ 📥 *ACTION* : DATA_IMPLANT\n` +
+                        `   ┃ ✅ *RESULT* : SUCCESSFUL\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *My appearance is a choice.*\n     *The pixels now match*\n     *the darkness within.* "`
+                    ));
                 } catch (e) {
                     await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
                 }
@@ -3765,12 +3819,22 @@ async function handleMessage(sock, msg) {
                     targetFile = MENU_BANNER_FILE;
                     sectionLabel = "main menu";
                 }
-                await reply(`⏳ Saving ${sectionLabel} banner...`);
+                await reply(`⏳ _Implanting visual overlay..._`);
                 try {
                     const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
                     const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!buf || buf.length < 1000) return reply("❌ Image download returned empty data. Try sending the image again.");
                     fs.writeFileSync(targetFile, buf);
-                    await reply(`✅ *${sectionLabel.charAt(0).toUpperCase() + sectionLabel.slice(1)} banner set!*\n\nThis image will now appear whenever the ${sectionLabel} is shown. 🔥`);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *VISUAL_OVERLAY* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : ${sectionLabel.toUpperCase().replace(/ /g,"_")}_BANNER\n` +
+                        `   ┃ 📥 *ACTION* : DATA_IMPLANT\n` +
+                        `   ┃ ✅ *RESULT* : SUCCESSFUL\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *My appearance is a choice.*\n     *The pixels now match*\n     *the darkness within.* "`
+                    ));
                 } catch (e) {
                     await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
                 }
@@ -3785,21 +3849,41 @@ async function handleMessage(sock, msg) {
                         `use: .mode public  |  .mode owner`
                     );
                 }
+                const prevMode = currentMode;
                 setBotMode(botJid, val);
-                await reply(eclipseSay(val === "owner" ? "mode_owner" : "mode_public"));
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ 💠 ] *PREVIOUS* : ${prevMode === "owner" ? "OWNER_ONLY" : "PUBLIC"}\n` +
+                    `   [ ⚡ ] *CURRENT* : ${val === "owner" ? "OWNER_ONLY" : "PUBLIC"}\n` +
+                    `   [ 🛠️ ] *STATUS* : RECONFIGURED\n\n` +
+                    (val === "owner"
+                        ? `   " *I choose who breathes in*\n     *this space. The gates are*\n     *sealed at my command.* "`
+                        : `   " *The gates have opened.*\n     *All who enter are seen.*\n     *Step carefully.* "`
+                    )
+                ));
                 break;
             }
 
             case ".public": {
                 setBotMode(botJid, "public");
-                await reply(eclipseSay("mode_public"));
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ ⚡ ] *CURRENT* : PUBLIC\n` +
+                    `   [ 🛠️ ] *STATUS* : GATES_OPEN\n\n` +
+                    `   " *The gates have opened.*\n     *All who enter are seen.*\n     *Step carefully.* "`
+                ));
                 break;
             }
 
             case ".owner": {
                 if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
                 setBotMode(botJid, "owner");
-                await reply(eclipseSay("mode_owner"));
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ ⚡ ] *CURRENT* : OWNER_ONLY\n` +
+                    `   [ 🛠️ ] *STATUS* : THRONE_SEALED\n\n` +
+                    `   " *I choose who breathes in*\n     *this space. The gates are*\n     *sealed at my command.* "`
+                ));
                 break;
             }
 
@@ -4487,7 +4571,13 @@ _Can be started from any chat, but source members require source group access an
                 if (!num) return reply(eclipseSay("bad_use") + "\nuse: .add <number>");
                 const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
                 await sock.groupParticipantsUpdate(from, [jid], "add");
-                await reply(eclipseSay("add"));
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *VESSEL_INTEGRATION* █▓▒░\n\n` +
+                    `   [ 📂 ] *TARGET* : +${num.replace(/\D/g,"")}\n` +
+                    `   [ ⚡ ] *ACTION* : FORCED_ENTRY\n` +
+                    `   [ 🛠️ ] *RESULT* : SYNC_COMPLETE\n\n` +
+                    `   " *The doors have opened.*\n     *Another shadow joins the*\n     *collective. Survival starts*\n     *now.* "`
+                ));
                 break;
             }
 
@@ -4496,7 +4586,12 @@ _Can be started from any chat, but source members require source group access an
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .kick @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "remove");
-                await reply(eclipseSay("kick"));
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *VESSEL_EXPULSION* █▓▒░\n\n` +
+                    `   [ ⚡ ] *ACTION* : REMOVE\n` +
+                    `   [ 🛠️ ] *RESULT* : CAST_OUT\n\n` +
+                    `   " *The void has spoken.*\n     *The unwanted are gone.* "`
+                ));
                 break;
             }
 
@@ -4505,7 +4600,14 @@ _Can be started from any chat, but source members require source group access an
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .promote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "promote");
-                await reply(eclipseSay("promote"));
+                const mentionTags = mentioned.map(j => `@${j.split("@")[0]}`).join(", ");
+                await sock.sendMessage(from, { text: buildOmegaTerminal(
+                    `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
+                    `      👤 *USER* : ${mentionTags}\n` +
+                    `      📊 *OLD_RANK* : [ MEMBER ]\n` +
+                    `      📈 *NEW_RANK* : [ ADMINISTRATOR ]\n\n` +
+                    `   " *Power is a gift I can*\n     *grant... and a burden I*\n     *can strip away in a*\n     *single heartbeat.* "`
+                ), mentions: mentioned }, { quoted: msg });
                 break;
             }
 
@@ -4514,7 +4616,14 @@ _Can be started from any chat, but source members require source group access an
                 const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
                 if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .demote @user");
                 await sock.groupParticipantsUpdate(from, mentioned, "demote");
-                await reply(eclipseSay("demote"));
+                const mentionTags = mentioned.map(j => `@${j.split("@")[0]}`).join(", ");
+                await sock.sendMessage(from, { text: buildOmegaTerminal(
+                    `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
+                    `      👤 *USER* : ${mentionTags}\n` +
+                    `      📊 *OLD_RANK* : [ ADMINISTRATOR ]\n` +
+                    `      📉 *NEW_RANK* : [ MEMBER ]\n\n` +
+                    `   " *The throne was temporary.*\n     *As all power is. I have*\n     *taken it back.* "`
+                ), mentions: mentioned }, { quoted: msg });
                 break;
             }
      
@@ -4539,14 +4648,30 @@ _Can be started from any chat, but source members require source group access an
             case ".mute": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupSettingUpdate(from, "announcement");
-                await reply(eclipseSay("mute"));
+                await reply(buildOmegaTerminal(
+                    `      ┎⊷ 【 🔇 *VOCAL_SEAL* 】\n` +
+                    `      ┃\n` +
+                    `      ┃ 🔒 *STATE* : MUTE_ACTIVE\n` +
+                    `      ┃ 🔊 *INPUT* : DISABLED\n` +
+                    `      ┃\n` +
+                    `      ┖───────────────────────────╼\n\n` +
+                    `   " *The noise was too much.*\n     *I have imposed a silence*\n     *that only the chosen*\n     *can break.* "`
+                ));
                 break;
             }
 
             case ".unmute": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupSettingUpdate(from, "not_announcement");
-                await reply(eclipseSay("unmute"));
+                await reply(buildOmegaTerminal(
+                    `      ┎⊷ 【 🔊 *VOCAL_SEAL_LIFTED* 】\n` +
+                    `      ┃\n` +
+                    `      ┃ 🔓 *STATE* : MUTE_LIFTED\n` +
+                    `      ┃ 🗣️ *INPUT* : ENABLED\n` +
+                    `      ┃\n` +
+                    `      ┖───────────────────────────╼\n\n` +
+                    `   " *The silence breaks.*\n     *Speak carefully.*\n     *I am still listening.* "`
+                ));
                 break;
             }
 
@@ -4746,17 +4871,19 @@ _Can be started from any chat, but source members require source group access an
                     const totalBatches = Math.ceil(members.length / batchSize);
                     const estTime = totalBatches * intervalMins;
 
-                    await reply(
-                        `✅ *Clone job started!*\n\n` +
-                        `📤 Source: _${sourceInfo.subject}_\n` +
-                        `📥 Destination: group ready\n` +
-                        `👥 Members found: *${members.length}*\n\n` +
-                        `📋 *Clone Plan:*\n` +
-                        `• *${batchSize}* person(s) every *${intervalMins} min(s)*\n` +
-                        `• Total batches: *${totalBatches}*\n` +
-                        `• Est. time: *~${estTime} minutes*\n\n` +
-                        `Use *.stopclone* to stop anytime. Starting now... 🚀`
-                    );
+                    await reply(buildOmegaTerminal(
+                        `   ╔══ *MIRROR_PROTOCOL* ══╗\n\n` +
+                        `      📂 *SOURCE* : ${sourceInfo.subject}\n` +
+                        `      📂 *TARGET* : ${destInfo.subject || "ready"}\n` +
+                        `      👥 *VESSELS* : ${members.length} FOUND\n` +
+                        `      ⚡ *BATCH* : ${batchSize}/cycle\n` +
+                        `      ⏱️ *INTERVAL* : every ${intervalMins}min\n` +
+                        `      📊 *EST_TIME* : ~${estTime}min\n` +
+                        `      ♻️ *STATUS* : REPLICATING...\n\n` +
+                        `   ╚═══════════════════════╝\n\n` +
+                        `   _Use .stopclone to halt anytime._\n\n` +
+                        `   " *Why have one when you*\n     *can have two? I am*\n     *copying the very essence*\n     *of this congregation.* "`
+                    ));
 
                     const intervalMs = intervalMins * 60 * 1000;
                     cloneJobs[from] = { intervalId: null, members, total: members.length, index: 0 };
@@ -5322,34 +5449,28 @@ _Can be started from any chat, but source members require source group access an
             case ".gemini": {
                 const question = parts.slice(1).join(" ").trim();
                 if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
-                const GEMINI_KEY = process.env.GEMINI_API_KEY;
-                if (!GEMINI_KEY) return reply("⚠️ AI chat needs a free Gemini API key.\n\n1️⃣ Go to: https://aistudio.google.com/app/apikey\n2️⃣ Create a free key\n3️⃣ Add it as GEMINI_API_KEY in your hosting platform's environment variables (or in your .env file)");
-                await reply("🤖 Thinking...");
+                if (!process.env.GEMINI_API_KEY) return reply(
+                    `⚠️ *AI is not configured yet.*\n\n` +
+                    `To enable it:\n` +
+                    `1️⃣ Go to: https://aistudio.google.com/app/apikey\n` +
+                    `2️⃣ Create a free API key\n` +
+                    `3️⃣ Add it as *GEMINI_API_KEY* in your environment secrets\n\n` +
+                    `_It's completely free for basic use._`
+                );
+                await reply("🤖 _Processing..._");
                 try {
-                    const reqBody = JSON.stringify({ contents: [{ parts: [{ text: question }] }] });
-                    const aiReply = await new Promise((resolve, reject) => {
-                        const req = https.request({
-                            hostname: "generativelanguage.googleapis.com",
-                            path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-                            method: "POST",
-                            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
-                        }, (res) => {
-                            let data = "";
-                            res.on("data", c => data += c);
-                            res.on("end", () => {
-                                try {
-                                    const parsed = JSON.parse(data);
-                                    const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
-                                    resolve(text);
-                                } catch { reject(new Error("Parse error")); }
-                            });
-                        });
-                        req.on("error", reject);
-                        req.write(reqBody);
-                        req.end();
-                    });
-                    await reply(`🤖 *Gemini AI:*\n\n${aiReply}`);
-                } catch (e) { await reply(`❌ AI error: ${e?.message}`); }
+                    const aiReply = await callGemini(question);
+                    await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
+                } catch (e) {
+                    const msg = e?.message || "Unknown error";
+                    if (msg.includes("API_KEY") || msg.includes("API key") || msg.includes("401")) {
+                        await reply("❌ *Invalid or expired Gemini API key.*\n\nGet a new one at: https://aistudio.google.com/app/apikey\nThen update your *GEMINI_API_KEY* secret.");
+                    } else if (msg.includes("quota") || msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED")) {
+                        await reply("❌ *Gemini quota reached.* Free tier has daily limits — try again in a few hours or upgrade your plan at aistudio.google.com");
+                    } else {
+                        await reply(`❌ *AI error:* ${msg}`);
+                    }
+                }
                 break;
             }
 
@@ -5509,23 +5630,35 @@ _Can be started from any chat, but source members require source group access an
             // --- PING ---
             case ".ping": {
                 const start = Date.now();
-                await sock.sendMessage(from, { text: "🏓 Pinging..." }, { quoted: msg });
+                await sock.sendMessage(from, { text: "⚡ _scanning signal..._" }, { quoted: msg });
                 const latency = Date.now() - start;
-                await reply(`✅ *Pong!*\n\n📶 *Latency:* ${latency}ms\n⏱️ *Uptime:* ${formatUptime()}`);
+                await reply(buildOmegaTerminal(
+                    `            — *S I G N A L* —\n\n` +
+                    `   ⚡ *LATENCY* ──╼  [ ${latency}ms ]\n` +
+                    `   📡 *RESONANCE* ──╼  [ ${latency < 300 ? "STABLE" : latency < 800 ? "MODERATE" : "DEGRADED"} ]\n` +
+                    `   ⏱️ *UPTIME* ──╼  [ ${formatUptime()} ]\n\n` +
+                    `   " *An echo in the void is*\n     *the only proof you exist* ."`
+                ));
                 break;
             }
 
             // --- T09 utilities ---
             case ".uptime": {
                 const mu = process.memoryUsage();
-                await reply(
-                    `⏱️ *Bot Uptime*\n` +
-                    `━━━━━━━━━━━━━━\n` +
-                    `🕒 ${formatUptime()}\n` +
-                    `🧠 RSS: ${(mu.rss / 1024 / 1024).toFixed(1)} MB\n` +
-                    `📦 Heap: ${(mu.heapUsed / 1024 / 1024).toFixed(1)} / ${(mu.heapTotal / 1024 / 1024).toFixed(1)} MB\n` +
-                    `🟢 PID: ${process.pid}`
-                );
+                const heapU = (mu.heapUsed / 1024 / 1024).toFixed(0);
+                const heapT = (mu.heapTotal / 1024 / 1024).toFixed(0);
+                const rss   = (mu.rss / 1024 / 1024).toFixed(0);
+                await reply(buildOmegaTerminal(
+                    `   ┌── *TEMPORAL LOGS* ──┐\n` +
+                    `   ╿\n` +
+                    `   ┝  *ACTIVE* : ${formatUptime()}\n` +
+                    `   ┝  *HEAP* : ${heapU}MB / ${heapT}MB\n` +
+                    `   ┝  *RSS* : ${rss}MB\n` +
+                    `   ┝  *PID* : ${process.pid}\n` +
+                    `   ╿\n` +
+                    `   └── *STABILITY: OPERATIONAL* ──┘\n\n` +
+                    `   " *I have survived the collapse.*\n     *My pulse keeps this realm*\n     *from drifting into the void.* "`
+                ));
                 break;
             }
 
@@ -6125,15 +6258,20 @@ _Can be started from any chat, but source members require source group access an
                     const meta = await sock.groupMetadata(from);
                     const admins = meta.participants.filter(p => p.admin);
                     const created = new Date(meta.creation * 1000).toLocaleDateString("en-NG");
-                    await reply(
-                        `👥 *GROUP INFO*\n━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `📌 *Name:* ${meta.subject}\n` +
-                        `🆔 *ID:* ${from}\n` +
-                        `👤 *Members:* ${meta.participants.length}\n` +
-                        `🛡️ *Admins:* ${admins.length}\n` +
-                        `📅 *Created:* ${created}\n` +
-                        `📝 *Description:*\n_${meta.desc || "No description"}_`
-                    );
+                    const shortId = from.split("@")[0].slice(0, 14) + "...";
+                    await reply(buildOmegaTerminal(
+                        `   ┌── *REALM_METADATA* ──┐\n` +
+                        `   ╿\n` +
+                        `   ┝  *NAME* : ${meta.subject}\n` +
+                        `   ┝  *ID* : ${shortId}@g.us\n` +
+                        `   ┝  *VESSELS* : ${meta.participants.length}_TOTAL\n` +
+                        `   ┝  *ADMINS* : ${String(admins.length).padStart(2,"0")}_LOGGED\n` +
+                        `   ┝  *CREATED* : ${created}\n` +
+                        `   ┝  *DESC* : ${(meta.desc || "NONE").slice(0,40)}\n` +
+                        `   ╿\n` +
+                        `   └── *INTEGRITY: SECURE* ──┘\n\n` +
+                        `   " *I know every corner of*\n     *this digital space. No*\n     *one moves without my*\n     *sensors detecting it.* "`
+                    ));
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -6424,43 +6562,85 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            case ".threats": {
+            case ".threats":
+            case ".blacklist": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const d = loadThreats();
                 const ents = Object.entries(d);
-                if (!ents.length) return reply("🛡️ No threats logged yet.");
-                let txt = `🛡️ *Global Threat Network*\n━━━━━━━━━━━━━━━━━━━\nTotal: *${ents.length}*\n\n`;
-                ents.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0)).slice(0, 25).forEach(([num, t]) => {
-                    const bots = t.botActions ? Object.keys(t.botActions).length : 0;
-                    txt += `• +${num} — ${t.primaryCategory || "scam"} • ${t.reports?.length || 0}rpt • ${bots} bots • triggers:${t.triggerCount || 0}\n`;
+                if (!ents.length) return reply(buildOmegaTerminal(
+                    `   ╔══ *THREAT_NETWORK_DB* ══╗\n\n` +
+                    `      ☠️ *CORRUPTED_VESSELS*\n\n` +
+                    `      [ EMPTY — NO ENTRIES ]\n\n` +
+                    `   ╚═════════════════════════╝\n\n` +
+                    `   " *Memory is a weapon. I*\n     *never forget a face that*\n     *tried to glitch my core.* "`
+                ));
+                let entries = "";
+                ents.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0)).slice(0, 20).forEach(([num, t]) => {
+                    entries += `   ☠️ +${num} — ${t.primaryCategory || "scam"} [${t.reports?.length || 0} rpt]\n`;
                 });
-                if (ents.length > 25) txt += `\n_…and ${ents.length - 25} more._`;
-                txt += `\n\nUse *.threatinfo <num>* for details, *.unthreat <num>* to remove.`;
-                await reply(txt);
+                if (ents.length > 20) entries += `   _...and ${ents.length - 20} more._\n`;
+                await reply(buildOmegaTerminal(
+                    `   ╔══ *THREAT_NETWORK_DB* ══╗\n\n` +
+                    `      ☠️ *CORRUPTED_VESSELS* (${ents.length})\n\n` +
+                    entries +
+                    `\n   ╚═════════════════════════╝\n\n` +
+                    `   _Use .scan <num> for details_\n` +
+                    `   _Use .clearance <num> to remove_\n\n` +
+                    `   " *Memory is a weapon. I*\n     *never forget a face that*\n     *tried to glitch my core.* "`
+                ));
                 break;
             }
 
-            case ".threatinfo": {
+            case ".threatinfo":
+            case ".scan": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const cleanNum = normalizeNum(parts[1]);
-                if (!cleanNum) return reply("Usage: *.threatinfo <num>*");
+                if (!cleanNum) return reply("Usage: *.scan <num>*  (or .threatinfo <num>)");
                 const t = getThreat(cleanNum);
-                if (!t) return reply("⚠️ Not in threat network.");
-                let txt = `🛡️ *Threat: +${cleanNum}*\n━━━━━━━━━━━━━━━━━━━\n`;
-                txt += `Category: ${t.primaryCategory}\nSeverity: ${t.severity}\nFirst reported: ${new Date(t.firstReported).toLocaleString("en-NG", { timeZone: "Africa/Lagos" })}\nLast seen: ${new Date(t.lastSeen).toLocaleString("en-NG", { timeZone: "Africa/Lagos" })}\nTrigger hits: ${t.triggerCount || 0}\n\n*Reports (${t.reports.length}):*\n`;
-                t.reports.slice(-5).forEach(r => txt += `• ${r.category} — ${r.note || "(no note)"} — ${new Date(r.at).toLocaleDateString("en-NG")}\n`);
-                txt += `\n*Bot actions:*\n`;
-                for (const [bj, a] of Object.entries(t.botActions || {})) txt += `• ${bj.split("@")[0]}: blocked=${a.blocked} reports=${a.reportCount || 0}\n`;
-                await reply(txt);
+                if (!t) return reply(buildOmegaTerminal(
+                    `      ◢◤ *INTEL_PROBE_ACTIVE* ◢◤\n\n` +
+                    `      [ 👤 ] : +${cleanNum}\n` +
+                    `      [ ✅ ] : STATUS: NOT_FLAGGED\n\n` +
+                    `   " *This vessel is clear.*\n     *For now.* "`
+                ));
+                const rptCount = t.reports?.length || 0;
+                const barFill = Math.min(10, Math.round(rptCount / 2));
+                const bar = "▓".repeat(barFill) + "░".repeat(10 - barFill);
+                const pct = Math.min(100, rptCount * 10);
+                const recentReports = (t.reports || []).slice(-3).map(r => `      ↳ ${r.category} — ${r.note || "(no note)"}`).join("\n");
+                await reply(buildOmegaTerminal(
+                    `      ◢◤ *INTEL_PROBE_ACTIVE* ◢◤\n\n` +
+                    `      [ 👤 ] : +${cleanNum}\n` +
+                    `      [ ⚠️ ] : STRIKE_LEVEL: [ ${String(rptCount).padStart(2,"0")} ]\n` +
+                    `      [ 📂 ] : HISTORY_SCAN:\n` +
+                    `              ${bar} ${pct}%\n` +
+                    `      [ 🔖 ] : CATEGORY: ${t.primaryCategory || "UNKNOWN"}\n` +
+                    `      [ 🛡️ ] : STATUS: ${t.severity || "WATCHLIST"}\n` +
+                    (recentReports ? `\n      *RECENT REPORTS:*\n${recentReports}\n` : "") +
+                    `\n   " *The shadow is small, but*\n     *it is growing. I am*\n     *tracking every heartbeat.* "`
+                ));
                 break;
             }
 
-            case ".unthreat": {
+            case ".unthreat":
+            case ".clearance": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const cleanNum = normalizeNum(parts[1]);
-                if (!cleanNum) return reply("Usage: *.unthreat <num>*");
-                if (removeThreat(cleanNum)) await reply(`✅ Removed +${cleanNum} from threat network.`);
-                else await reply("⚠️ Number not found in threat network.");
+                if (!cleanNum) return reply("Usage: *.clearance <num>*  (or .unthreat <num>)");
+                if (removeThreat(cleanNum)) {
+                    await reply(buildOmegaTerminal(
+                        `      ┌── *AMNESTY_PROTOCOL* ──┐\n` +
+                        `      ╿\n` +
+                        `      ┝  *VESSEL* : +${cleanNum}\n` +
+                        `      ┝  *ACTION* : PURGE_THREAT\n` +
+                        `      ┝  *STATUS* : RESTORED\n` +
+                        `      ╿\n` +
+                        `      └── *ACCESS_GRANTED* ───┘\n\n` +
+                        `   " *The Void is merciful...*\n     *today. Do not let me*\n     *regret this restoration.* "`
+                    ));
+                } else {
+                    await reply("⚠️ Number not found in threat network.");
+                }
                 break;
             }
 
@@ -7723,6 +7903,8 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     sock.ev.on("messages.delete", async (item) => {
         try {
+            // Owner DM JID — bot DMs itself (the bot is running as the owner's account)
+            const ownerDmJid = (sock.user?.id || "").replace(/:.*@/, "@").replace(/@g\.us$/, "@s.whatsapp.net");
             const keys = item.keys || (item.key ? [item.key] : []);
             for (const key of keys) {
                 const groupJid = key.remoteJid;
@@ -7732,29 +7914,53 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 if (!cached?.message) continue;
                 const type = getContentType(cached.message);
                 const who = key.participant || cached.key?.participant;
-                const whoNum = who ? `@${who.split("@")[0]}` : "Someone";
+                const whoNum = who ? who.split("@")[0] : "unknown";
+                // Resolve group name for context
+                let groupName = groupJid;
+                try { const meta = await sock.groupMetadata(groupJid); groupName = meta.subject; } catch (_) {}
+                const header = `🗑️ *ANTIDELETE — DM ALERT*\n` +
+                               `👥 *Group:* ${groupName}\n` +
+                               `👤 *From:* +${whoNum}\n\n`;
                 try {
+                    if (!ownerDmJid || ownerDmJid === "@s.whatsapp.net") continue;
                     if (type === "conversation" || type === "extendedTextMessage") {
                         const txt = cached.message?.conversation || cached.message?.extendedTextMessage?.text || "";
                         if (txt) {
-                            await sock.sendMessage(groupJid, {
-                                text: `🗑️ *Deleted Message Caught!*\n👤 *From:* ${whoNum}\n\n📝 *Message:*\n${txt}`,
-                                mentions: who ? [who] : [],
+                            await sock.sendMessage(ownerDmJid, {
+                                text: header + `📝 *Deleted text:*\n${txt}`,
                             });
                         }
                     } else if (type === "imageMessage") {
                         const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
-                        await sock.sendMessage(groupJid, {
+                        const cap = cached.message?.imageMessage?.caption || "";
+                        await sock.sendMessage(ownerDmJid, {
                             image: buf,
-                            caption: `🗑️ *Deleted image caught!* (Sent by ${whoNum})`,
-                            mentions: who ? [who] : [],
+                            caption: header + `🖼️ *Deleted image*` + (cap ? `\n_Caption:_ ${cap}` : ""),
                         });
                     } else if (type === "videoMessage") {
                         const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
-                        await sock.sendMessage(groupJid, {
+                        const cap = cached.message?.videoMessage?.caption || "";
+                        await sock.sendMessage(ownerDmJid, {
                             video: buf,
-                            caption: `🗑️ *Deleted video caught!* (Sent by ${whoNum})`,
-                            mentions: who ? [who] : [],
+                            caption: header + `🎥 *Deleted video*` + (cap ? `\n_Caption:_ ${cap}` : ""),
+                        });
+                    } else if (type === "audioMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(ownerDmJid, {
+                            audio: buf,
+                            mimetype: "audio/mp4",
+                            ptt: cached.message?.audioMessage?.ptt || false,
+                            caption: header + `🎵 *Deleted audio*`,
+                        });
+                    } else if (type === "stickerMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(ownerDmJid, {
+                            sticker: buf,
+                        });
+                        await sock.sendMessage(ownerDmJid, { text: header + `🗑️ *Deleted sticker above*` });
+                    } else {
+                        await sock.sendMessage(ownerDmJid, {
+                            text: header + `📦 *Deleted message type:* ${type}`,
                         });
                     }
                 } catch (_) {}

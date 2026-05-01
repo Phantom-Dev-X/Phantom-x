@@ -1,3 +1,13 @@
+# Eclipse / Phantom X — EVENTIDE OMEGA TERMINAL Build (2026-05-01)
+
+## Changes — EVENTIDE OMEGA TERMINAL batch
+- Added `buildOmegaTerminal(body)` helper: unified styled reply wrapper used by all major commands.
+- EVENTIDE-styled replies for: `.ping`, `.uptime`, `.mode`/`.public`/`.owner`, `.info`, `.dev`, `.setpp`/`.setmenupic`, `.add`, `.kick`, `.promote`, `.demote`, `.mute`, `.unmute`, `.groupinfo`, `.clone` start, `.threats`/`.blacklist`, `.threatinfo`/`.scan`, `.unthreat`/`.clearance`.
+- Command aliases added: `.blacklist` (≡ `.threats`), `.scan` (≡ `.threatinfo`), `.clearance` (≡ `.unthreat`).
+- Anti-delete: now forwards deleted messages to OWNER DM (self-chat) instead of back into the group. Includes text, image, video, audio, sticker support with group name + sender context.
+- `.ai`/`.ask`/`.gemini`: refactored to use shared `callGemini()` with automatic model fallback chain (`gemini-2.0-flash` → `gemini-1.5-flash` → `gemini-1.5-flash-8b`). Better error messages for invalid keys, quota limits, and model-not-found.
+- `.setpp` / `.setmenupic`: added buffer size validation (min 1000 bytes) to catch silent download failures before writing to disk.
+
 # Eclipse (formerly Phantom-X)
 
 ## Eclipse personality (Build Log — 2026-04-24)
