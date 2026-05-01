@@ -44,3 +44,4 @@ run = ["node", "index.js"]
 [userenv]
 
 [userenv.shared]
+PORT = "3000"
