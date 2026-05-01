@@ -289,6 +289,15 @@ function loadAutojoin() { if (!fs.existsSync(AUTOJOIN_FILE)) return {}; try { re
 function saveAutojoin(d) { fs.writeFileSync(AUTOJOIN_FILE, JSON.stringify(d, null, 2)); }
 const AUTOJOIN_BLACKLIST = ["porn", "18+", "adult", "xxx", "sex", "nude", "naked", "leak", "nudes", "18plus", "onlyfan"];
 
+// --- MUTED USERS (per-group individual silence) ---
+const MUTED_USERS_FILE = path.join(__dirname, "muted_users.json");
+function loadMutedUsers() { if (!fs.existsSync(MUTED_USERS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(MUTED_USERS_FILE, "utf8")); } catch { return {}; } }
+function saveMutedUsers(d) { fs.writeFileSync(MUTED_USERS_FILE, JSON.stringify(d, null, 2)); }
+function addMutedUser(groupJid, userJid) { const d = loadMutedUsers(); if (!d[groupJid]) d[groupJid] = []; if (!d[groupJid].includes(userJid)) d[groupJid].push(userJid); saveMutedUsers(d); }
+function removeMutedUser(groupJid, userJid) { const d = loadMutedUsers(); if (d[groupJid]) { d[groupJid] = d[groupJid].filter(j => j !== userJid); if (!d[groupJid].length) delete d[groupJid]; saveMutedUsers(d); } }
+function isUserMuted(groupJid, userJid) { return (loadMutedUsers()[groupJid] || []).includes(userJid); }
+function getMutedUsersInGroup(groupJid) { return loadMutedUsers()[groupJid] || []; }
+
 // --- WARNS ---
 const WARNS_FILE = path.join(__dirname, "warns.json");
 function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
@@ -2065,8 +2074,8 @@ function getMenuSections() {
             ['.unleash allcmds ‹number› — give one number full access'],
             ['.unleash ‹cmd› all — open one cmd to everyone'],
             ['.unleash ‹cmd› ‹number› — open one cmd for one number'],
-            ['.lock allcmds — re-lock everything'],
-            ['.lock ‹cmd› — re-lock one cmd'],
+            ['.cmdlock allcmds — re-lock everything'],
+            ['.cmdlock ‹cmd› — re-lock one cmd'],
             ['.lockfor ‹number› ‹cmd› — block cmd for number (overrides premium)'],
             ['.lockfor ‹number› allcmds — block ALL cmds for number'],
             ['.unlockfor ‹number› ‹cmd› — remove a specific block'],
@@ -2080,7 +2089,7 @@ function getMenuSections() {
         { emoji: '👥', title: 'GROUP MANAGEMENT', items: [
             ['.add ‹number›'], ['.kick @user'], ['.promote @user'],
             ['.demote @user'], ['.link'], ['.revoke'],
-            ['.mute'], ['.unmute'], ['.groupinfo'],
+            ['.lock'], ['.unlock'], ['.mute @user'], ['.unmute @user'], ['.groupinfo'],
             ['.adminlist'], ['.tagadmin ‹msg›'], ['.membercount'], ['.everyone ‹msg›'],
         ]},
         { emoji: '🏷️', title: 'TAG & ANNOUNCE', items: [
@@ -2264,8 +2273,10 @@ function buildGroupMenuList() {
 • *.kick @user* — Remove member
 • *.promote @user* — Make admin
 • *.demote @user* — Remove admin
-• *.mute* — Admin-only messages
-• *.unmute* — Open chat
+• *.lock* — Lock group (admins-only messages)
+• *.unlock* — Open group to everyone
+• *.mute @user* — Silence a specific user (auto-deletes their messages)
+• *.unmute @user* — Remove silence from a user
 
 *Group Info*
 • *.link* — Get invite link
@@ -2573,7 +2584,7 @@ function getEclipseTree() {
             devOnly: false,
             minis: [
                 { key: "binds",     title: "BINDINGS",     blurb: "group dominion.",
-                  cmds: [".add <num>",".kick @user",".promote @user",".demote @user",".link",".revoke",".mute",".unmute",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid"] },
+                  cmds: [".add <num/reply>",".kick @user/reply",".promote @user/reply",".demote @user/reply",".link",".revoke",".lock",".unlock",".mute @user",".unmute @user",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid",".grouppic"] },
                 { key: "heralds",   title: "HERALDS",      blurb: "the call goes out.",
                   cmds: [".hidetag",".tagall",".readmore",".broadcast <m> <msg>",".stopbroadcast",".schedule HH:MM <msg>",".unschedule HH:MM",".schedules"] },
                 { key: "rites",     title: "RITES",        blurb: "small spells, on loop.",
@@ -2651,7 +2662,7 @@ function getEclipseTree() {
                 { key: "throne",   title: "THRONE",     blurb: "rule of the chamber.",
                   cmds: [".mode public/owner",".public",".owner"] },
                 { key: "pact",     title: "PACT",       blurb: "open and seal cmds.",
-                  cmds: [".unleash allcmds",".unleash allcmds <num>",".unleash <cmd> all",".unleash <cmd> <num>",".lock allcmds",".lock <cmd>",".lockfor <num> <cmd>",".lockfor <num> allcmds",".unlockfor <num> <cmd>"] },
+                  cmds: [".unleash allcmds",".unleash allcmds <num>",".unleash <cmd> all",".unleash <cmd> <num>",".cmdlock allcmds",".cmdlock <cmd>",".lockfor <num> <cmd>",".lockfor <num> allcmds",".unlockfor <num> <cmd>"] },
                 { key: "vault",    title: "VAULT",      blurb: "the premium gate.",
                   cmds: [".premiumadd <num>",".premiumremove <num>",".premiumlist"] },
                 { key: "registry", title: "REGISTRY",   blurb: "the dev hands.",
@@ -4063,8 +4074,10 @@ async function handleMessage(sock, msg) {
 • *.demote @user* — Remove admin
 • *.link* — Get group invite link
 • *.revoke* — Reset invite link
-• *.mute* — Lock group (admins only)
-• *.unmute* — Open group to all
+• *.lock* — Lock group (admins only)
+• *.unlock* — Open group to all
+• *.mute @user* — Silence a specific user in the group
+• *.unmute @user* — Remove silence from a user
 • *.groupinfo* — Full group stats
 • *.adminlist* — List all admins
 • *.tagadmin <msg>* — Tag only group admins
@@ -4208,17 +4221,17 @@ _Can be started from any chat, but source members require source group access an
                 return reply(`✅ *Unleashed ${cmdKey === ".allcmds" ? "all commands" : cmdKey}* for *${targetLabel}*.`);
             }
 
-            // --- LOCK — revoke access ---
-            // .lock allcmds    → re-lock everything (back to premium-only)
-            // .lock <cmd>      → re-lock a specific cmd
-            case ".lock": {
+            // --- CMDLOCK — revoke access ---
+            // .cmdlock allcmds    → re-lock everything (back to premium-only)
+            // .cmdlock <cmd>      → re-lock a specific cmd
+            case ".cmdlock": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
                 const lCmd = parts[1]?.toLowerCase();
                 if (!lCmd) return reply(
                     `🔒 *Lock Command*\n\n` +
-                    `• *.lock allcmds* — re-lock everything\n` +
-                    `• *.lock <cmd>* — re-lock one command\n\n` +
-                    `Example: *.lock .pltable*`
+                    `• *.cmdlock allcmds* — re-lock everything\n` +
+                    `• *.cmdlock <cmd>* — re-lock one command\n\n` +
+                    `Example: *.cmdlock .pltable*`
                 );
                 lockCmd(lCmd);
                 return reply(`🔒 *${lCmd === "allcmds" ? "All commands re-locked." : `${lCmd} is now locked again.`}*\nOnly premium users can access it.`);
@@ -4601,13 +4614,13 @@ _Can be started from any chat, but source members require source group access an
             // --- GROUP ADMIN COMMANDS ---
             case ".add": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
-                const num = parts[1];
-                if (!num) return reply(eclipseSay("bad_use") + "\nuse: .add <number>");
-                const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
+                const addTarget = resolveTargetJid(msg, parts);
+                if (!addTarget) return reply(eclipseSay("bad_use") + "\nuse: .add <number> or reply to their message with .add");
+                const jid = addTarget;
                 await sock.groupParticipantsUpdate(from, [jid], "add");
                 await reply(buildOmegaTerminal(
                     `   ░▒▓█ *VESSEL_INTEGRATION* █▓▒░\n\n` +
-                    `   [ 📂 ] *TARGET* : +${num.replace(/\D/g,"")}\n` +
+                    `   [ 📂 ] *TARGET* : +${addTarget.split("@")[0]}\n` +
                     `   [ ⚡ ] *ACTION* : FORCED_ENTRY\n` +
                     `   [ 🛠️ ] *RESULT* : SYNC_COMPLETE\n\n` +
                     `   " *The doors have opened.*\n     *Another shadow joins the*\n     *collective. Survival starts*\n     *now.* "`
@@ -4617,9 +4630,10 @@ _Can be started from any chat, but source members require source group access an
 
             case ".kick": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
-                const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .kick @user");
-                await sock.groupParticipantsUpdate(from, mentioned, "remove");
+                const kickTarget = resolveTargetJid(msg, parts);
+                const kickTargets = kickTarget ? [kickTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!kickTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .kick @user, .kick <number>, or reply to their message with .kick");
+                await sock.groupParticipantsUpdate(from, kickTargets, "remove");
                 await reply(buildOmegaTerminal(
                     `   ░▒▓█ *VESSEL_EXPULSION* █▓▒░\n\n` +
                     `   [ ⚡ ] *ACTION* : REMOVE\n` +
@@ -4631,33 +4645,35 @@ _Can be started from any chat, but source members require source group access an
 
             case ".promote": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
-                const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .promote @user");
-                await sock.groupParticipantsUpdate(from, mentioned, "promote");
-                const mentionTags = mentioned.map(j => `@${j.split("@")[0]}`).join(", ");
+                const promoteTarget = resolveTargetJid(msg, parts);
+                const promoteTargets = promoteTarget ? [promoteTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!promoteTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .promote @user, .promote <number>, or reply to their message with .promote");
+                await sock.groupParticipantsUpdate(from, promoteTargets, "promote");
+                const mentionTagsPro = promoteTargets.map(j => `@${j.split("@")[0]}`).join(", ");
                 await sock.sendMessage(from, { text: buildOmegaTerminal(
                     `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
-                    `      👤 *USER* : ${mentionTags}\n` +
+                    `      👤 *USER* : ${mentionTagsPro}\n` +
                     `      📊 *OLD_RANK* : [ MEMBER ]\n` +
                     `      📈 *NEW_RANK* : [ ADMINISTRATOR ]\n\n` +
                     `   " *Power is a gift I can*\n     *grant... and a burden I*\n     *can strip away in a*\n     *single heartbeat.* "`
-                ), mentions: mentioned }, { quoted: msg });
+                ), mentions: promoteTargets }, { quoted: msg });
                 break;
             }
 
             case ".demote": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
-                const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                if (!mentioned.length) return reply(eclipseSay("bad_use") + "\nuse: .demote @user");
-                await sock.groupParticipantsUpdate(from, mentioned, "demote");
-                const mentionTags = mentioned.map(j => `@${j.split("@")[0]}`).join(", ");
+                const demoteTarget = resolveTargetJid(msg, parts);
+                const demoteTargets = demoteTarget ? [demoteTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!demoteTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .demote @user, .demote <number>, or reply to their message with .demote");
+                await sock.groupParticipantsUpdate(from, demoteTargets, "demote");
+                const mentionTagsDem = demoteTargets.map(j => `@${j.split("@")[0]}`).join(", ");
                 await sock.sendMessage(from, { text: buildOmegaTerminal(
                     `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
-                    `      👤 *USER* : ${mentionTags}\n` +
+                    `      👤 *USER* : ${mentionTagsDem}\n` +
                     `      📊 *OLD_RANK* : [ ADMINISTRATOR ]\n` +
                     `      📉 *NEW_RANK* : [ MEMBER ]\n\n` +
                     `   " *The throne was temporary.*\n     *As all power is. I have*\n     *taken it back.* "`
-                ), mentions: mentioned }, { quoted: msg });
+                ), mentions: demoteTargets }, { quoted: msg });
                 break;
             }
      
@@ -4679,14 +4695,18 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            case ".mute": {
+            case ".lock": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
                 await sock.groupSettingUpdate(from, "announcement");
                 await reply(buildOmegaTerminal(
                     `      ┎⊷ 【 🔇 *VOCAL_SEAL* 】\n` +
                     `      ┃\n` +
-                    `      ┃ 🔒 *STATE* : MUTE_ACTIVE\n` +
-                    `      ┃ 🔊 *INPUT* : DISABLED\n` +
+                    `      ┃ 🔒 *STATE* : LOCKED\n` +
+                    `      ┃ 🔊 *INPUT* : ADMINS ONLY\n` +
                     `      ┃\n` +
                     `      ┖───────────────────────────╼\n\n` +
                     `   " *The noise was too much.*\n     *I have imposed a silence*\n     *that only the chosen*\n     *can break.* "`
@@ -4694,18 +4714,68 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            case ".unmute": {
+            case ".unlock": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
                 await sock.groupSettingUpdate(from, "not_announcement");
                 await reply(buildOmegaTerminal(
                     `      ┎⊷ 【 🔊 *VOCAL_SEAL_LIFTED* 】\n` +
                     `      ┃\n` +
-                    `      ┃ 🔓 *STATE* : MUTE_LIFTED\n` +
-                    `      ┃ 🗣️ *INPUT* : ENABLED\n` +
+                    `      ┃ 🔓 *STATE* : UNLOCKED\n` +
+                    `      ┃ 🗣️ *INPUT* : EVERYONE\n` +
                     `      ┃\n` +
                     `      ┖───────────────────────────╼\n\n` +
                     `   " *The silence breaks.*\n     *Speak carefully.*\n     *I am still listening.* "`
                 ));
+                break;
+            }
+
+            // --- MUTE USER (individual silence in a group) ---
+            case ".mute": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                const muteTarget = resolveTargetJid(msg, parts);
+                if (!muteTarget) return reply("Usage: .mute @user  or reply to their message with .mute");
+                if (isUserMuted(from, muteTarget)) return reply(`@${muteTarget.split("@")[0]} is already muted.`, { mentions: [muteTarget] });
+                addMutedUser(from, muteTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ░▒▓█ *SILENCE_PROTOCOL* █▓▒░\n\n` +
+                        `   [ 🔇 ] *TARGET* : @${muteTarget.split("@")[0]}\n` +
+                        `   [ ⚡ ] *ACTION* : VOCAL_SEAL\n` +
+                        `   [ 🛠️ ] *STATUS* : ACTIVE\n\n` +
+                        `   " *Your voice has been erased.*\n     *The collective will no*\n     *longer hear you.* "`
+                    ), mentions: [muteTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- UNMUTE USER (remove individual silence) ---
+            case ".unmute": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                const unmuteTarget = resolveTargetJid(msg, parts);
+                if (!unmuteTarget) return reply("Usage: .unmute @user  or reply to their message with .unmute");
+                if (!isUserMuted(from, unmuteTarget)) return reply(`@${unmuteTarget.split("@")[0]} is not currently muted.`, { mentions: [unmuteTarget] });
+                removeMutedUser(from, unmuteTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ░▒▓█ *SILENCE_LIFTED* █▓▒░\n\n` +
+                        `   [ 🔊 ] *TARGET* : @${unmuteTarget.split("@")[0]}\n` +
+                        `   [ ⚡ ] *ACTION* : VOCAL_RESTORE\n` +
+                        `   [ 🛠️ ] *STATUS* : RELEASED\n\n` +
+                        `   " *You may speak again.*\n     *Choose your words*\n     *wisely this time.* "`
+                    ), mentions: [unmuteTarget]
+                }, { quoted: msg });
                 break;
             }
 
@@ -6372,12 +6442,87 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
+            // --- SET WHATSAPP PROFILE PICTURE ---
+            case ".setwpp": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const quotedRawWpp = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedTypeWpp = quotedRawWpp ? getContentType(quotedRawWpp) : null;
+                const directImageWpp = msg.message?.imageMessage ? msg.message : null;
+                const useQuotedWpp = quotedRawWpp && quotedTypeWpp === "imageMessage";
+                if (!useQuotedWpp && !directImageWpp) return reply("🖼️ *Set WhatsApp Profile Picture*\n\nReply to an image or send one with caption *.setwpp* to set it as the bot's profile pic.");
+                try {
+                    const sourceWpp = useQuotedWpp ? { ...msg, message: quotedRawWpp } : msg;
+                    const bufWpp = await downloadMediaMessage(sourceWpp, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!bufWpp || bufWpp.length < 1000) return reply("❌ Image download failed. Try sending the image again.");
+                    await sock.updateProfilePicture(sock.user.id, bufWpp);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *IDENTITY_SHIFT* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : PROFILE_IMAGE\n` +
+                        `   ┃ 📥 *ACTION* : VISUAL_UPDATE\n` +
+                        `   ┃ ✅ *RESULT* : COMPLETE\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *The face of the void*\n     *has been reborn.* "`
+                    ));
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- GET PROFILE PICTURE ---
+            case ".getpp":
+            case ".pfp": {
+                const ppTarget = resolveTargetJid(msg, parts) || senderJid;
+                try {
+                    const ppUrl = await sock.profilePictureUrl(ppTarget, "image");
+                    const ppBuf = await fetchBuffer(ppUrl);
+                    const ppNum = ppTarget.split("@")[0];
+                    await sock.sendMessage(from, {
+                        image: ppBuf,
+                        caption: buildOmegaTerminal(
+                            `   ░▒▓█ *VISUAL_EXTRACT* █▓▒░\n\n` +
+                            `   [ 👁️ ] *TARGET* : +${ppNum}\n` +
+                            `   [ 📸 ] *ACTION* : PROFILE_PIC_PULL\n` +
+                            `   [ ✅ ] *RESULT* : ACQUIRED\n\n` +
+                            `   " *No face is hidden*\n     *from the all-seeing eye.* "`
+                        )
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Could not fetch profile picture. They may have privacy settings on, or the number is invalid.\n\nError: ${e?.message}`);
+                }
+                break;
+            }
+
+            // --- GET GROUP PROFILE PICTURE ---
+            case ".grouppic": {
+                if (!isGroup) return reply("❌ Only works inside a group.");
+                try {
+                    const gpUrl = await sock.profilePictureUrl(from, "image");
+                    const gpBuf = await fetchBuffer(gpUrl);
+                    let gpName = from;
+                    try { const gpMeta = await sock.groupMetadata(from); gpName = gpMeta.subject; } catch {}
+                    await sock.sendMessage(from, {
+                        image: gpBuf,
+                        caption: buildOmegaTerminal(
+                            `   ░▒▓█ *GROUP_VISUAL_EXTRACT* █▓▒░\n\n` +
+                            `   [ 👁️ ] *GROUP* : ${gpName}\n` +
+                            `   [ 📸 ] *ACTION* : GROUP_PIC_PULL\n` +
+                            `   [ ✅ ] *RESULT* : ACQUIRED\n\n` +
+                            `   " *Every domain has a face.*\n     *This one belongs to us.* "`
+                        )
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Could not fetch group picture. The group may not have one set.\n\nError: ${e?.message}`);
+                }
+                break;
+            }
+
             // --- WARN ---
             case ".warn": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
-                const warnTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!warnTarget) return reply(eclipseSay("bad_use") + "\nuse: .warn @user");
+                const warnTarget = resolveTargetJid(msg, parts);
+                if (!warnTarget) return reply(eclipseSay("bad_use") + "\nuse: .warn @user, .warn <number>, or reply to their message");
                 const wCount = addWarn(from, warnTarget);
                 if (wCount >= 3) {
                     resetWarns(from, warnTarget);
@@ -6405,8 +6550,8 @@ _Can be started from any chat, but source members require source group access an
             case ".resetwarn": {
                 if (!isGroup) return reply("❌ Only works in groups.");
                 if (!msg.key.fromMe) return reply("❌ Only the bot owner can reset warnings.");
-                const rwTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!rwTarget) return reply("Usage: .resetwarn @user");
+                const rwTarget = resolveTargetJid(msg, parts);
+                if (!rwTarget) return reply("Usage: .resetwarn @user, .resetwarn <number>, or reply to their message");
                 resetWarns(from, rwTarget);
                 await sock.sendMessage(from, { text: `✅ Warnings cleared for @${rwTarget.split("@")[0]}!`, mentions: [rwTarget] }, { quoted: msg });
                 break;
@@ -6415,8 +6560,8 @@ _Can be started from any chat, but source members require source group access an
             // --- BAN ---
             case ".ban": {
                 if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
-                const banTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!banTarget) return reply(eclipseSay("bad_use") + "\nuse: .ban @user");
+                const banTarget = resolveTargetJid(msg, parts);
+                if (!banTarget) return reply(eclipseSay("bad_use") + "\nuse: .ban @user, .ban <number>, or reply to their message");
                 if (botJid) addBan(botJid, banTarget);
                 await sock.sendMessage(from, { text: `@${banTarget.split("@")[0]}\n${eclipseSay("ban")}`, mentions: [banTarget] }, { quoted: msg });
                 break;
@@ -6425,8 +6570,8 @@ _Can be started from any chat, but source members require source group access an
             // --- UNBAN ---
             case ".unban": {
                 if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
-                const unbanTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!unbanTarget) return reply(eclipseSay("bad_use") + "\nuse: .unban @user");
+                const unbanTarget = resolveTargetJid(msg, parts);
+                if (!unbanTarget) return reply(eclipseSay("bad_use") + "\nuse: .unban @user, .unban <number>, or reply to their message");
                 if (botJid) removeBan(botJid, unbanTarget);
                 await sock.sendMessage(from, { text: `@${unbanTarget.split("@")[0]}\n${eclipseSay("unban")}`, mentions: [unbanTarget] }, { quoted: msg });
                 break;
@@ -6705,7 +6850,16 @@ _Can be started from any chat, but source members require source group access an
                 if (sub === "add") { const n = normalizeNum(parts[2]); if (!n) return reply("Usage: .promogroup add <num>"); if (!cfg.manualPool.includes(n)) cfg.manualPool.push(n); savePromoGroup(cfg); return reply(`✅ Added +${n} to manual pool.`); }
                 if (sub === "remove") { const n = normalizeNum(parts[2]); cfg.manualPool = cfg.manualPool.filter(x => x !== n); savePromoGroup(cfg); return reply(`✅ Removed +${n} from manual pool.`); }
                 if (sub === "optout") { const n = normalizeNum(parts[2]); if (!cfg.optedOut.includes(n)) cfg.optedOut.push(n); savePromoGroup(cfg); return reply(`✅ +${n} will never be contacted.`); }
-                if (sub === "runnow") { await reply("⏳ Running cycle for this bot…"); runPromoGroupCycleForBot(sock).then(() => sock.sendMessage(senderJid, { text: "✅ Cycle done. Check *.promogroup status*." })).catch(e => sock.sendMessage(senderJid, { text: `⚠️ ${e?.message}` })); return; }
+                if (sub === "runnow") {
+                    await reply("⏳ Running cycle for this bot (bypassing business-hours gate)…");
+                    const cfg2 = loadPromoGroup();
+                    const pool2 = getPromoGroupContactPool(sock, cfg2);
+                    const done2 = new Set(Object.keys((cfg2.added[sock.user?.id] || {})).concat(Object.keys((cfg2.skipped[sock.user?.id] || {})).filter(k => (cfg2.skipped[sock.user?.id][k]?.reason === "permanent"))));
+                    const eligible2 = pool2.filter(n => !done2.has(n));
+                    if (!eligible2.length) { await reply("ℹ️ No eligible contacts left in the pool."); return; }
+                    runPromoGroupCycleForBot(sock).then(() => sock.sendMessage(senderJid, { text: "✅ Cycle done. Check *.promogroup status*." })).catch(e => sock.sendMessage(senderJid, { text: `⚠️ ${e?.message}` }));
+                    return;
+                }
                 if (sub === "reset") { cfg.added = {}; cfg.skipped = {}; cfg.lastRun = {}; cfg.stats = { totalAdded: 0, totalInvited: 0, totalFailed: 0 }; savePromoGroup(cfg); return reply("🧹 Stats + history cleared."); }
                 return reply("Unknown subcommand. Send *.promogroup* alone for help.");
             }
@@ -7926,6 +8080,52 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             }
         }
     });
+
+    // Muted user: auto-delete messages from muted users in groups
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        if (type !== "notify") return;
+        for (const m of messages) {
+            if (m.key?.fromMe) continue;
+            const muteGroup = m.key?.remoteJid;
+            if (!muteGroup?.endsWith("@g.us")) continue;
+            const muteSender = m.key?.participant || m.participant;
+            if (!muteSender) continue;
+            if (!isUserMuted(muteGroup, muteSender)) continue;
+            try {
+                await sock.sendMessage(muteGroup, { delete: m.key });
+            } catch (e) {
+                console.log(`[Mute] Failed to delete msg from ${muteSender}: ${e?.message}`);
+            }
+        }
+    });
+
+    // 10-minute mute reminder for all muted users in all groups
+    setInterval(async () => {
+        try {
+            const allMuted = loadMutedUsers();
+            for (const [groupJid, mutedList] of Object.entries(allMuted)) {
+                if (!mutedList?.length) continue;
+                for (const mutedJid of mutedList) {
+                    try {
+                        await sock.sendMessage(groupJid, {
+                            text: buildOmegaTerminal(
+                                `   ░▒▓█ *SILENCE_ACTIVE* █▓▒░\n\n` +
+                                `   [ 🔇 ] *USER* : @${mutedJid.split("@")[0]}\n` +
+                                `   [ ⚡ ] *STATUS* : MUTED\n` +
+                                `   [ ⏱️ ] *REMINDER* : VOCAL_SEAL_ONGOING\n\n` +
+                                `   " *The silence continues.*\n     *Your voice is sealed.*\n     *Only an admin can*\n     *restore it.* "`
+                            ),
+                            mentions: [mutedJid]
+                        });
+                    } catch (e) {
+                        console.log(`[MuteReminder] Failed for ${mutedJid} in ${groupJid}: ${e?.message}`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(`[MuteReminder] Error: ${e?.message}`);
+        }
+    }, 10 * 60 * 1000);
 
     // Store messages for antidelete lookup
     const msgCache = {};
