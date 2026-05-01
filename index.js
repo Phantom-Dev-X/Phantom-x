@@ -4701,11 +4701,16 @@ _Can be started from any chat, but source members require source group access an
                     } catch (e) {
                         return reply(`❌ Could not read destination group.\n\nThe linked WhatsApp number must be *inside* the destination group.\n\nReason: ${e?.message || "unknown"}`);
                     }
-                    const myNum = (sock.user?.id || "").split(":")[0].split("@")[0];
-                    const meInDest = (destInfo.participants || []).find(p => {
-                        const idNum = String(p.id).split(":")[0].split("@")[0];
-                        return idNum === myNum;
-                    });
+                    // Build all possible JIDs the bot could appear as in participants
+                    const botJids = [];
+                    if (sock.user?.id) botJids.push(sock.user.id);
+                    if (sock.user?.lid) botJids.push(sock.user.lid);
+                    const botBaseNum = jidLocal(sock.user?.id || "");
+                    if (botBaseNum) botJids.push(botBaseNum + "@s.whatsapp.net");
+
+                    const meInDest = (destInfo.participants || []).find(p =>
+                        botJids.some(bj => isSameUser(bj, p.id))
+                    );
                     if (!meInDest) {
                         return reply(`❌ The linked WhatsApp number is *not in the destination group* (${destInfo.subject || destJid}).\n\nFix: join that group first, then make yourself admin, then re-run *.clone*.`);
                     }
