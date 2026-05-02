@@ -101,6 +101,9 @@ const cloneJobs = {};
 // Broadcast jobs: { botJid: { intervalId, groups, index, total } }
 const broadcastJobs = {};
 
+// AI Help mode: { "senderJid::chatJid": { timer } }
+const helpModeUsers = {};
+
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
 
@@ -846,7 +849,7 @@ async function callGemini(prompt, opts = {}) {
     // Try preferred model first, fall back to stable model on failure
     const models = opts.model
         ? [opts.model]
-        : ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+        : ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash"];
     const sys = opts.system ? [{ text: opts.system }] : [];
     let lastErr = null;
     for (const model of models) {
@@ -880,11 +883,13 @@ async function callGemini(prompt, opts = {}) {
             return result;
         } catch (e) {
             lastErr = e;
-            // Only try next model if this one is not found or not authorized
             const msg = e?.message || "";
-            if (!msg.includes("not found") && !msg.includes("NOT_FOUND") && !msg.includes("404") && !msg.includes("permission") && !msg.includes("PERMISSION_DENIED")) {
-                throw e; // real error (quota, network, etc.) — don't retry other models
+            const isUnavailable = msg.includes("not found") || msg.includes("NOT_FOUND") || msg.includes("404") || msg.includes("permission") || msg.includes("PERMISSION_DENIED");
+            const isRateLimited = msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429") || msg.includes("quota") || msg.includes("rate") || msg.includes("too many");
+            if (!isUnavailable && !isRateLimited) {
+                throw e; // real error (network, parse, auth) — don't retry
             }
+            // model unavailable OR quota/rate-limit — fall through to next model
         }
     }
     throw lastErr || new Error("All Gemini models failed");
@@ -3232,6 +3237,88 @@ async function handleMessage(sock, msg) {
         // --- SILENCE CHECK — dev can mute a number from any specific bot ---
         if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
 
+        // --- AI HELP MODE interceptor ---
+        {
+            const helpKey = `${senderJid}::${from}`;
+            if (!msg.key.fromMe && helpModeUsers[helpKey] && rawBody && !rawBody.startsWith(".")) {
+                clearTimeout(helpModeUsers[helpKey].timer);
+                helpModeUsers[helpKey].timer = setTimeout(async () => {
+                    delete helpModeUsers[helpKey];
+                    try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
+                }, 10 * 60 * 1000);
+                if (process.env.GEMINI_API_KEY) {
+                    const helpSystem =
+                        `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
+                        `RULES:\n` +
+                        `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
+                        `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
+                        `3. Always show the exact command syntax.\n` +
+                        `4. If you're unsure, say so honestly.\n\n` +
+                        `FULL COMMAND LIST:\n` +
+                        `.menu — main menu\n` +
+                        `.ai / .ask <q> — ask AI\n` +
+                        `.ping — bot latency\n` +
+                        `.uptime — how long bot has been online\n` +
+                        `.add <number> — add member to group\n` +
+                        `.kick @user — remove member\n` +
+                        `.promote @user — make admin\n` +
+                        `.demote @user — remove admin\n` +
+                        `.ban @user — ban member\n` +
+                        `.unban @user — unban member\n` +
+                        `.warn @user — issue warning (3 = auto kick)\n` +
+                        `.warnlist — see all warnings\n` +
+                        `.resetwarn @user — clear warnings\n` +
+                        `.antilink on/off — block invite links from non-admins\n` +
+                        `.antispam on/off — block spam messages\n` +
+                        `.antimention on/off — block mass mentions\n` +
+                        `.antidemote on/off — stop non-owners demoting the bot\n` +
+                        `.lock / .unlock — group announcement mode\n` +
+                        `.mute @user — silence a specific user\n` +
+                        `.unmute @user — restore their voice\n` +
+                        `.tagall — tag all members\n` +
+                        `.hidetag — tag all silently\n` +
+                        `.admins — tag all admins\n` +
+                        `.welcome on/off — welcome message for new members\n` +
+                        `.goodbye on/off — goodbye message for leaving members\n` +
+                        `.groupinfo — group details\n` +
+                        `.adminlist — list all admins\n` +
+                        `.membercount — number of members\n` +
+                        `.link — get group invite link\n` +
+                        `.revoke — reset invite link\n` +
+                        `.mode owner/public — public or owner-only mode\n` +
+                        `.broadcast <mins> <msg> — send to all groups on interval\n` +
+                        `.stopbroadcast — stop broadcast\n` +
+                        `.schedule HH:MM <msg> — schedule daily message\n` +
+                        `.persona — set bot personality\n` +
+                        `.setpp — set menu banner image\n` +
+                        `.setwpp — set WhatsApp profile picture\n` +
+                        `.sticker — convert image to sticker\n` +
+                        `.toimg — convert sticker to image\n` +
+                        `.ocr — extract text from image\n` +
+                        `.translate <text> — translate text\n` +
+                        `.weather <city> — weather info\n` +
+                        `.tts <text> — text to speech\n` +
+                        `.lyrics <song> — get song lyrics\n` +
+                        `.song <name> — download song\n` +
+                        `.imagine <prompt> — AI image generation\n` +
+                        `.solve — solve a question (text or image)\n` +
+                        `.truth / .dare — truth or dare game\n` +
+                        `.ttt — tic-tac-toe\n` +
+                        `.cmdlock — lock/unlock commands for premium\n` +
+                        `.premiumadd / .premiumremove — manage premium users`;
+                    try {
+                        const aiReply = await callGemini(rawBody, { system: helpSystem, temperature: 0.5 });
+                        await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
+                    } catch (e) {
+                        await reply(`❌ Help AI error: ${e?.message}`);
+                    }
+                } else {
+                    await reply(`⚠️ *Help AI not configured.*\nContact the bot owner to set up the Gemini API key.`);
+                }
+                return;
+            }
+        }
+
         // --- PREMIUM CHECK — only blocks if dev has explicitly .lock'd a command ---
         // Otherwise everyone gets every command. Premium system stays available via .lock/.unleash.
         if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
@@ -3973,14 +4060,13 @@ async function handleMessage(sock, msg) {
                     );
                     let idx = 0;
                     let totalSent = 0;
-                    const intervalId = setInterval(async () => {
+                    const doTick = async () => {
                         if (idx >= groupIds.length) {
                             clearInterval(intervalId);
                             delete broadcastJobs[botJid];
                             try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSuccessfully sent to *${totalSent}/${totalGroups}* groups.` }); } catch (_) {}
                             return;
                         }
-                        // Try groups one by one until one succeeds for this tick
                         let sentThisTick = false;
                         while (!sentThisTick && idx < groupIds.length) {
                             const gid = groupIds[idx];
@@ -3991,7 +4077,6 @@ async function handleMessage(sock, msg) {
                                 sentThisTick = true;
                                 await sock.sendMessage(from, { text: `📤 Sent (${totalSent}/${totalGroups}): ${allGroups[gid]?.subject || gid}` });
                             } catch (e) {
-                                // Group failed (locked/closed at runtime) — silently skip and try next
                                 await sock.sendMessage(from, { text: `⏭️ Skipped: ${allGroups[gid]?.subject || gid} — ${e?.message || "error"}` });
                             }
                         }
@@ -4000,7 +4085,10 @@ async function handleMessage(sock, msg) {
                             delete broadcastJobs[botJid];
                             try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSuccessfully sent to *${totalSent}/${totalGroups}* groups.` }); } catch (_) {}
                         }
-                    }, intervalMs);
+                    };
+                    // Fire first send immediately, then continue at interval
+                    doTick();
+                    const intervalId = setInterval(doTick, intervalMs);
                     broadcastJobs[botJid] = { intervalId, total: totalGroups };
                 } catch (e) {
                     await reply(`❌ Broadcast failed: ${e?.message || "error"}`);
@@ -4041,7 +4129,41 @@ async function handleMessage(sock, msg) {
             }
 
             case ".help": {
-                await reply(buildEclipseHelp());
+                const helpKey = `${senderJid}::${from}`;
+                if (helpModeUsers[helpKey]) {
+                    clearTimeout(helpModeUsers[helpKey].timer);
+                    delete helpModeUsers[helpKey];
+                    await reply(buildOmegaTerminal(
+                        `   ╾━━━ HELP_MODE — OFFLINE ━━━╼\n\n` +
+                        `   🔇  AI guide deactivated.\n\n` +
+                        `   " The oracle steps back.\n     You walk alone again. "`
+                    ));
+                } else {
+                    if (!process.env.GEMINI_API_KEY) {
+                        return reply(
+                            `⚠️ *Help AI needs a Gemini key.*\n\n` +
+                            `Add *GEMINI_API_KEY* in your environment secrets.\n` +
+                            `Get a free key at: https://aistudio.google.com/app/apikey`
+                        );
+                    }
+                    const timer = setTimeout(async () => {
+                        delete helpModeUsers[helpKey];
+                        try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
+                    }, 10 * 60 * 1000);
+                    helpModeUsers[helpKey] = { timer };
+                    await reply(buildOmegaTerminal(
+                        `   ╔══ HELP_PROTOCOL — ACTIVE ══╗\n\n` +
+                        `   ✨  *AI help mode is ON*\n\n` +
+                        `   Ask me anything about the bot:\n` +
+                        `   • _"how do I use antilink?"_\n` +
+                        `   • _"antilinnk on"_ ← typos OK!\n` +
+                        `   • _"what mutes someone?"_\n` +
+                        `   • _"how does broadcast work?"_\n\n` +
+                        `   🔄 Auto-exits after 10 min silence.\n` +
+                        `   Type *.help* again to turn off.\n\n` +
+                        `   " The oracle is listening. "`
+                    ));
+                }
                 break;
             }
             case ".__legacyhelp_disabled": {
@@ -4687,13 +4809,24 @@ _Can be started from any chat, but source members require source group access an
                     const meta = await sock.groupMetadata(from);
                     groupNames[from] = meta.subject;
                 } catch (_) {}
-                await reply(`https://chat.whatsapp.com/${inv}`);
+                await reply(buildOmegaTerminal(
+                    `   〔 BOND_EXTRACT 〕\n\n` +
+                    `   🔗  LINK   →  ACTIVE\n` +
+                    `   🌐  SCOPE  →  PUBLIC_INVITE\n\n` +
+                    `   https://chat.whatsapp.com/${inv}\n\n` +
+                    `   " The door is open.\n     Who enters is your\n     responsibility now. "`
+                ));
                 break;
             }
             case ".revoke": {
                 if (!isGroup) return reply(eclipseSay("not_group"));
                 await sock.groupRevokeInvite(from);
-                await reply(eclipseSay("revoke"));
+                await reply(buildOmegaTerminal(
+                    `   ╾━━━ BOND_SEVERED ━━━╼\n\n` +
+                    `   🔗  OLD LINK  →  DEAD\n` +
+                    `   🔒  NEW LINK  →  GENERATED\n\n` +
+                    `   " The old path is closed.\n     A new bond will form\n     only on your terms. "`
+                ));
                 break;
             }
 
@@ -4790,7 +4923,18 @@ _Can be started from any chat, but source members require source group access an
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antilink on/off");
                 setGroupSetting(from, "antilink", val === "on");
                 if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
-                await reply(eclipseSay(val === "on" ? "antilink_on" : "antilink_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ╾━━━ WARD_RAISED ━━━╼\n\n` +
+                          `   🔗  ANTILINK   →  ACTIVE\n` +
+                          `   🚫  LINKS      →  BLOCKED\n` +
+                          `   👥  SCOPE      →  NON-ADMINS\n\n` +
+                          `   " The ward has been raised.\n     No uninvited paths lead\n     into this realm. "`
+                        : `   ╾━━━ WARD_FALLEN ━━━╼\n\n` +
+                          `   🔗  ANTILINK   →  INACTIVE\n` +
+                          `   ✅  LINKS      →  ALLOWED\n\n` +
+                          `   " The ward has fallen.\n     The paths are open again. "`
+                ));
                 break;
             }
 
@@ -4802,7 +4946,17 @@ _Can be started from any chat, but source members require source group access an
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antispam on/off");
                 setGroupSetting(from, "antispam", val === "on");
                 if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
-                await reply(eclipseSay(val === "on" ? "antispam_on" : "antispam_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ∷∷∷ SILENCE_GUARD — ACTIVE ∷∷∷\n\n` +
+                          `   🛡️  ANTISPAM   →  ON\n` +
+                          `   🚫  RAPID MSGS →  BLOCKED\n\n` +
+                          `   " The silence guard wakes.\n     It watches every pulse\n     of message traffic. "`
+                        : `   ∷∷∷ SILENCE_GUARD — DORMANT ∷∷∷\n\n` +
+                          `   🛡️  ANTISPAM   →  OFF\n` +
+                          `   ✅  MESSAGES   →  UNRESTRICTED\n\n` +
+                          `   " The guard sleeps.\n     Use it wisely. "`
+                ));
                 break;
             }
 
@@ -4814,7 +4968,17 @@ _Can be started from any chat, but source members require source group access an
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antimention on/off");
                 setGroupSetting(from, "antimention", val === "on");
                 if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
-                await reply(eclipseSay(val === "on" ? "antimention_on" : "antimention_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   〔 MENTION_SHIELD — SEALED 〕\n\n` +
+                          `   👁️  ANTIMENTION →  ACTIVE\n` +
+                          `   🚫  MASS TAGS   →  BLOCKED\n\n` +
+                          `   " The silence holds.\n     Mass mentions will be\n     erased before they land. "`
+                        : `   〔 MENTION_SHIELD — OPEN 〕\n\n` +
+                          `   👁️  ANTIMENTION →  INACTIVE\n` +
+                          `   ✅  MASS TAGS   →  ALLOWED\n\n` +
+                          `   " The silence breaks. "`
+                ));
                 break;
             }
 
@@ -4826,7 +4990,17 @@ _Can be started from any chat, but source members require source group access an
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .antidemote on/off");
                 setGroupSetting(from, "antidemote", val === "on");
                 if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
-                await reply(eclipseSay(val === "on" ? "antidemote_on" : "antidemote_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ▓▓▓ THRONE_SEALED ▓▓▓\n\n` +
+                          `   👑  ANTIDEMOTE  →  ACTIVE\n` +
+                          `   🔒  BOT ADMIN   →  PROTECTED\n\n` +
+                          `   " The throne is sealed.\n     No unauthorised hand\n     may touch the crown. "`
+                        : `   ▓▓▓ THRONE_OPEN ▓▓▓\n\n` +
+                          `   👑  ANTIDEMOTE  →  INACTIVE\n` +
+                          `   🔓  BOT ADMIN   →  UNGUARDED\n\n` +
+                          `   " The throne is open.\n     Re-enable when needed. "`
+                ));
                 break;
             }
 
@@ -4855,7 +5029,17 @@ _Can be started from any chat, but source members require source group access an
                 const val = parts[1]?.toLowerCase();
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .welcome on/off");
                 setGroupSetting(from, "welcome", val === "on");
-                await reply(eclipseSay(val === "on" ? "welcome_on" : "welcome_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ░▒▓ THRESHOLD_GREETS ▓▒░\n\n` +
+                          `   🚪  WELCOME MSG  →  ACTIVE\n` +
+                          `   ✨  NEW MEMBERS  →  GREETED\n\n` +
+                          `   " The threshold greets.\n     Every new soul that\n     crosses will be seen. "`
+                        : `   ░▒▓ THRESHOLD_SILENT ▓▒░\n\n` +
+                          `   🚪  WELCOME MSG  →  INACTIVE\n` +
+                          `   🔇  NEW MEMBERS  →  SILENT ENTRY\n\n` +
+                          `   " The threshold is silent.\n     New arrivals pass\n     unannounced. "`
+                ));
                 break;
             }
 
@@ -4864,7 +5048,17 @@ _Can be started from any chat, but source members require source group access an
                 const val = parts[1]?.toLowerCase();
                 if (!["on", "off"].includes(val)) return reply(eclipseSay("bad_use") + "\nuse: .goodbye on/off");
                 setGroupSetting(from, "goodbye", val === "on");
-                await reply(eclipseSay(val === "on" ? "goodbye_on" : "goodbye_off"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ░▒▓ FAREWELL_PROTOCOL ▓▒░\n\n` +
+                          `   🚪  GOODBYE MSG  →  ACTIVE\n` +
+                          `   👋  DEPARTURES   →  NOTED\n\n` +
+                          `   " Farewells will be spoken.\n     Every departure leaves\n     a mark on the void. "`
+                        : `   ░▒▓ FAREWELL_SILENCED ▓▒░\n\n` +
+                          `   🚪  GOODBYE MSG  →  INACTIVE\n` +
+                          `   🔇  DEPARTURES   →  UNANNOUNCED\n\n` +
+                          `   " Farewells silenced.\n     They leave without\n     a sound. "`
+                ));
                 break;
             }
 
@@ -6389,9 +6583,20 @@ _Can be started from any chat, but source members require source group access an
                     const meta = await sock.groupMetadata(from);
                     const admins = meta.participants.filter(p => p.admin);
                     if (!admins.length) return reply("No admins found.");
-                    let txt = `🛡️ *Admin List — ${meta.subject}*\n━━━━━━━━━━━━━━━━━━━\n\n`;
-                    admins.forEach((a, i) => { txt += `${i+1}. @${a.id.split("@")[0]} ${a.admin === "superadmin" ? "👑" : "🛡️"}\n`; });
-                    await sock.sendMessage(from, { text: txt, mentions: admins.map(a => a.id) }, { quoted: msg });
+                    let rows = ``;
+                    admins.forEach((a, i) => {
+                        rows += `   ${i + 1 < 10 ? "0" + (i+1) : i+1}. @${a.id.split("@")[0]} ${a.admin === "superadmin" ? "👑" : "🛡️"}\n`;
+                    });
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ◈━━━ THRONE_REGISTER ━━━◈\n\n` +
+                            `   📍 REALM : ${meta.subject}\n` +
+                            `   🛡️ TOTAL : ${String(admins.length).padStart(2,"0")}_LOGGED\n\n` +
+                            rows.trimEnd() + `\n\n` +
+                            `   " Power is given to those\n     who already earned it\n     in silence. "`
+                        ),
+                        mentions: admins.map(a => a.id)
+                    }, { quoted: msg });
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -6401,7 +6606,14 @@ _Can be started from any chat, but source members require source group access an
                 if (!isGroup) return reply("❌ This command only works in groups.");
                 try {
                     const meta = await sock.groupMetadata(from);
-                    await reply(`👥 *Member Count:* *${meta.participants.length}* members in *${meta.subject}*`);
+                    const admins = meta.participants.filter(p => p.admin).length;
+                    await reply(buildOmegaTerminal(
+                        `   〔 CENSUS_PROTOCOL 〕\n\n` +
+                        `   👥  VESSELS   ──  ${meta.participants.length}_TOTAL\n` +
+                        `   👑  THRONES   ──  ${String(admins).padStart(2,"0")}_LOGGED\n` +
+                        `   🌐  REALM     ──  ${meta.subject}\n\n` +
+                        `   " The collective knows\n     every soul within\n     its walls. "`
+                    ));
                 } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
                 break;
             }
@@ -6529,9 +6741,27 @@ _Can be started from any chat, but source members require source group access an
                 if (wCount >= 3) {
                     resetWarns(from, warnTarget);
                     try { await sock.groupParticipantsUpdate(from, [warnTarget], "remove"); } catch (_) {}
-                    await sock.sendMessage(from, { text: `@${warnTarget.split("@")[0]}\n${eclipseSay("warn_kicked")}`, mentions: [warnTarget] }, { quoted: msg });
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ⛓️ EXILE_TRIGGERED\n\n` +
+                            `   🎯  TARGET   →  @${warnTarget.split("@")[0]}\n` +
+                            `   ⚠️  WARNS    →  3/3 REACHED\n` +
+                            `   🚫  ACTION   →  EXPELLED\n\n` +
+                            `   " Three strikes.\n     The collective has\n     spoken. You are done. "`
+                        ),
+                        mentions: [warnTarget]
+                    }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(from, { text: `@${warnTarget.split("@")[0]}\n${eclipseSay("warn")} ${wCount}/3.`, mentions: [warnTarget] }, { quoted: msg });
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ⚠️ WARNING_ISSUED\n\n` +
+                            `   🎯  TARGET   →  @${warnTarget.split("@")[0]}\n` +
+                            `   📊  TALLY    →  ${wCount}/3 MARKS\n` +
+                            `   ⚡  STATUS   →  MARKED\n\n` +
+                            `   " Marked. ${"█".repeat(wCount)}${"░".repeat(3 - wCount)} — ${wCount === 2 ? "one more and you are cast out." : "consider this a shadow."} "`
+                        ),
+                        mentions: [warnTarget]
+                    }, { quoted: msg });
                 }
                 break;
             }
@@ -6541,10 +6771,23 @@ _Can be started from any chat, but source members require source group access an
                 if (!isGroup) return reply("❌ Only works in groups.");
                 const warnData = getAllWarns(from);
                 const entries = Object.entries(warnData).filter(([, v]) => v > 0);
-                if (!entries.length) return reply("✅ No active warnings in this group.");
-                let wTxt = `⚠️ *Warning List*\n━━━━━━━━━━━━━━━━━━━\n\n`;
-                entries.forEach(([jid, count]) => { wTxt += `• @${jid.split("@")[0]}: *${count}/3* warns\n`; });
-                await sock.sendMessage(from, { text: wTxt, mentions: entries.map(([j]) => j) }, { quoted: msg });
+                if (!entries.length) return reply(buildOmegaTerminal(
+                    `   ✅ WARNING_LEDGER — CLEAN\n\n` +
+                    `   📋  MARKS  →  NONE_RECORDED\n\n` +
+                    `   " No shadows hang here.\n     This realm is clear. "`
+                ));
+                let wRows = "";
+                entries.forEach(([jid, count]) => {
+                    wRows += `   @${jid.split("@")[0]} — ${"█".repeat(count)}${"░".repeat(3-count)} ${count}/3\n`;
+                });
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ⚠️ WARNING_LEDGER\n\n` +
+                        wRows.trimEnd() + `\n\n` +
+                        `   " Marks collect in silence.\n     Three and they are\n     cast from the void. "`
+                    ),
+                    mentions: entries.map(([j]) => j)
+                }, { quoted: msg });
                 break;
             }
 
@@ -6555,7 +6798,16 @@ _Can be started from any chat, but source members require source group access an
                 const rwTarget = resolveTargetJid(msg, parts);
                 if (!rwTarget) return reply("Usage: .resetwarn @user, .resetwarn <number>, or reply to their message");
                 resetWarns(from, rwTarget);
-                await sock.sendMessage(from, { text: `✅ Warnings cleared for @${rwTarget.split("@")[0]}!`, mentions: [rwTarget] }, { quoted: msg });
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ✦ MARK_ERASED\n\n` +
+                        `   🎯  TARGET  →  @${rwTarget.split("@")[0]}\n` +
+                        `   🗑️  WARNS   →  CLEARED\n` +
+                        `   📊  TALLY   →  0/3\n\n` +
+                        `   " The mark is gone.\n     A second chance given\n     at the void's discretion. "`
+                    ),
+                    mentions: [rwTarget]
+                }, { quoted: msg });
                 break;
             }
 
@@ -6565,7 +6817,16 @@ _Can be started from any chat, but source members require source group access an
                 const banTarget = resolveTargetJid(msg, parts);
                 if (!banTarget) return reply(eclipseSay("bad_use") + "\nuse: .ban @user, .ban <number>, or reply to their message");
                 if (botJid) addBan(botJid, banTarget);
-                await sock.sendMessage(from, { text: `@${banTarget.split("@")[0]}\n${eclipseSay("ban")}`, mentions: [banTarget] }, { quoted: msg });
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ▓▓▓▓ EXILE_PROTOCOL ▓▓▓▓\n\n` +
+                        `   ⛓️  TARGET   →  @${banTarget.split("@")[0]}\n` +
+                        `   🚫  ACTION   →  BANISHED\n` +
+                        `   🔐  SCOPE    →  PERMANENT\n\n` +
+                        `   " Some are cast out not\n     as punishment — but as\n     protection for the rest. "`
+                    ),
+                    mentions: [banTarget]
+                }, { quoted: msg });
                 break;
             }
 
@@ -6575,7 +6836,16 @@ _Can be started from any chat, but source members require source group access an
                 const unbanTarget = resolveTargetJid(msg, parts);
                 if (!unbanTarget) return reply(eclipseSay("bad_use") + "\nuse: .unban @user, .unban <number>, or reply to their message");
                 if (botJid) removeBan(botJid, unbanTarget);
-                await sock.sendMessage(from, { text: `@${unbanTarget.split("@")[0]}\n${eclipseSay("unban")}`, mentions: [unbanTarget] }, { quoted: msg });
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ✦ EXILE_LIFTED\n\n` +
+                        `   🔓  TARGET   →  @${unbanTarget.split("@")[0]}\n` +
+                        `   ♻️  ACTION   →  RESTORED\n` +
+                        `   🌐  STATUS   →  FREE\n\n` +
+                        `   " The exile is over.\n     The void grants passage\n     once more. Walk wisely. "`
+                    ),
+                    mentions: [unbanTarget]
+                }, { quoted: msg });
                 break;
             }
 
@@ -8336,11 +8606,18 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             const reason = lastDisconnect?.error?.message || "unknown";
             console.log(`User ${userId} disconnected (${statusCode}): ${reason}`);
 
+            // connectionReplaced = another WA Web session bumped us — just silently reconnect
+            if (statusCode === DisconnectReason.connectionReplaced) {
+                console.log(`User ${userId}: connection replaced — reconnecting in 6s...`);
+                await delay(6000);
+                startBot(userId, phoneNumber, ctx, true);
+                return;
+            }
+
             const shouldNotReconnect = [
                 DisconnectReason.loggedOut,
                 DisconnectReason.forbidden,
                 DisconnectReason.badSession,
-                DisconnectReason.connectionReplaced,
             ].includes(statusCode);
 
             if (shouldNotReconnect) {
