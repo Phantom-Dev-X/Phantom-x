@@ -3181,6 +3181,57 @@ function buildOmegaTerminal(body) {
     );
 }
 
+// ─── INTERACTIVE MESSAGE HELPERS ─────────────────────────────────────────────
+// Sends an eclipse-styled message with tap-able quick-reply buttons.
+// If WhatsApp rejects the interactive format, falls back to numbered plain text.
+async function sendInteractiveButtons(sock, jid, quotedMsg, bodyText, buttons) {
+    try {
+        await sock.sendMessage(jid, {
+            interactiveMessage: {
+                header: { title: "", hasMediaAttachment: false },
+                body: { text: bodyText },
+                footer: { text: "— EVENTIDE OMEGA · 👁" },
+                nativeFlowMessage: {
+                    buttons: buttons.map(b => ({
+                        name: "quick_reply",
+                        buttonParamsJson: JSON.stringify({ display_text: b.label, id: b.id })
+                    }))
+                }
+            }
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+    } catch (_) {
+        const opts = buttons.map((b, i) => `*${i + 1}.* ${b.label}`).join("\n");
+        await sock.sendMessage(jid, {
+            text: bodyText + "\n\n" + opts + "\n\n_Reply 1 or 2 to choose._"
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+    }
+}
+
+// Sends an eclipse-styled list message (tap opens a popup chooser).
+// Falls back to lettered plain text if the list format is rejected.
+async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
+    try {
+        await sock.sendMessage(jid, {
+            listMessage: {
+                title: "EVENTIDE OMEGA",
+                text: bodyText,
+                footer: "— EVENTIDE OMEGA · 👁",
+                buttonText: buttonLabel || "TAP TO SELECT",
+                listType: 1,
+                sections: [{
+                    title: "Select an action",
+                    rows: rows.map(r => ({ rowId: r.id, title: r.title, description: r.desc || "" }))
+                }]
+            }
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+    } catch (_) {
+        const opts = rows.map(r => `  *${r.id.split("_")[1]?.toUpperCase() || "·"}* — ${r.title}${r.desc ? `\n     _${r.desc}_` : ""}`).join("\n");
+        await sock.sendMessage(jid, {
+            text: bodyText + "\n\n" + opts + "\n\n_Reply A, B or C to choose._"
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+    }
+}
+
 function buildMenuText(mode, themeNum, isDev) {
     const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
     const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
@@ -3265,7 +3316,22 @@ async function handleMessage(sock, msg) {
             (type === "buttonsMessage" && msg.message.buttonsMessage?.contentText) ||
             (type === "templateMessage" && (msg.message.templateMessage?.hydratedTemplate?.hydratedContentText || msg.message.templateMessage?.fourRowTemplate?.bodyText)) ||
             (type === "listMessage" && msg.message.listMessage?.description) ||
+            (type === "buttonsResponseMessage" && msg.message.buttonsResponseMessage?.selectedDisplayText) ||
+            (type === "listResponseMessage" && (msg.message.listResponseMessage?.title || msg.message.listResponseMessage?.singleSelectReply?.selectedRowId || "")) ||
+            (type === "interactiveResponseMessage" && (() => { try { return JSON.parse(msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || "{}").id || ""; } catch { return ""; } })()) ||
+            (type === "templateButtonReplyMessage" && msg.message.templateButtonReplyMessage?.selectedId) ||
             "";
+
+        // ID of tapped button or list row — empty string if message is not a tap/button response
+        const buttonId = (() => {
+            if (type === "interactiveResponseMessage") {
+                try { return JSON.parse(msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || "{}").id || ""; } catch { return ""; }
+            }
+            if (type === "listResponseMessage") return msg.message.listResponseMessage?.singleSelectReply?.selectedRowId || "";
+            if (type === "buttonsResponseMessage") return msg.message.buttonsResponseMessage?.selectedButtonId || "";
+            if (type === "templateButtonReplyMessage") return msg.message.templateButtonReplyMessage?.selectedId || "";
+            return "";
+        })();
 
         const senderJid = isGroup
             ? msg.key.participant || msg.participant
@@ -3398,8 +3464,9 @@ async function handleMessage(sock, msg) {
         {
             const sessKey = `${senderJid}::${from}`;
             const sessState = sessionCmdState[sessKey];
-            if (sessState && rawBody && !rawBody.startsWith(".")) {
-                const input = rawBody.trim();
+            if (sessState && (buttonId.startsWith("sess_") || (rawBody && !rawBody.startsWith(".")))) {
+                // buttonId like "sess_a" → extract "a"; otherwise use typed text
+                const input = buttonId.startsWith("sess_") ? buttonId.replace("sess_", "") : rawBody.trim();
                 if (sessState.step === "action") {
                     const choice = input.toLowerCase();
                     if (choice === "a" || choice === "b" || choice === "c") {
@@ -3917,17 +3984,17 @@ async function handleMessage(sock, msg) {
         {
             const typoKey = `${senderJid}::${from}`;
             const typoState = typoSuggestionState[typoKey];
-            if (typoState && rawBody && !rawBody.startsWith(".")) {
-                const r = rawBody.trim().toLowerCase();
+            if (typoState && (buttonId === "typo_yes" || buttonId === "typo_no" || (rawBody && !rawBody.startsWith(".")))) {
+                const isConfirm = buttonId === "typo_yes" || ["yes", "y", "1"].includes(rawBody.trim().toLowerCase());
                 delete typoSuggestionState[typoKey];
-                if (r === "yes" || r === "y" || r === "1") {
+                if (isConfirm) {
                     // Re-route to suggested command — fall through to switch below
                     rawBody = typoState.rawBody;
                     body = typoState.rawBody;
                     parts = typoState.parts;
                     cmd = typoState.cmd;
                 } else {
-                    // User dismissed the suggestion
+                    // User dismissed the suggestion (or tapped "no" button)
                     return;
                 }
             }
@@ -4044,30 +4111,35 @@ async function handleMessage(sock, msg) {
 
             case ".session": {
                 if (!isDevJid(senderJid) && !msg.key.fromMe) {
-                    return reply("🔒 *This command is for developers only.*");
+                    return reply(buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   This command is restricted to developers only.`));
                 }
                 const sessKey = `${senderJid}::${from}`;
-                // List all active sessions
                 const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
-                let sessionList = `📱 *ACTIVE SESSIONS*\n━━━━━━━━━━━━━━━\n`;
+                let sessionLines = ``;
                 if (!activeSess.length) {
-                    sessionList += `_No active sessions found._\n`;
+                    sessionLines = `   _No active sessions._\n`;
                 } else {
                     activeSess.forEach(([uid, s], i) => {
                         const num = (s.user.id || "").split(":")[0].split("@")[0];
                         const name = s.user.name || "Unknown";
-                        sessionList += `${i + 1}. *${num}* (${name}) ✅\n`;
+                        sessionLines += `   ${i + 1}. *${num}* _(${name})_ ✅\n`;
                     });
                 }
-                sessionList += `━━━━━━━━━━━━━━━\n`;
-                sessionList += `*Total:* ${activeSess.length} session(s)\n\n`;
-                sessionList += `*Select an action:*\n`;
-                sessionList += `*A* — All sessions join a group\n`;
-                sessionList += `*B* — All sessions follow a channel\n`;
-                sessionList += `*C* — All sessions add contacts to a group\n\n`;
-                sessionList += `_Reply A, B or C to choose._`;
+                const sessBodyText = buildOmegaTerminal(
+                    `   ┎⊷ 【 📱 *ACTIVE_SESSIONS* 】\n` +
+                    `   ┃\n` +
+                    sessionLines +
+                    `   ┃\n` +
+                    `   ┃ *Total:* ${activeSess.length} session(s)\n` +
+                    `   ┃\n` +
+                    `   ┖──── *Select an action below* ──╼`
+                );
                 sessionCmdState[sessKey] = { step: "action", action: null };
-                await reply(sessionList);
+                await sendListSelect(sock, from, msg, sessBodyText, "⚡ SELECT ACTION", [
+                    { id: "sess_a", title: "🔗 Join a group", desc: "All sessions join via invite link" },
+                    { id: "sess_b", title: "📡 Follow a channel", desc: "All sessions subscribe to a channel" },
+                    { id: "sess_c", title: "👥 Add contacts to a group", desc: "Each session adds N random contacts" }
+                ]);
                 break;
             }
 
@@ -8189,7 +8261,6 @@ _Can be started from any chat, but source members require source group access an
                         const score = bigramSimilarity(cmd, matchCmd);
                         if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
                     }
-                    // Also try matching the full rawBody against displays (catches ".antilink o" → ".antilink on")
                     for (const [display, matchCmd] of KNOWN_CMDS) {
                         const score = bigramSimilarity(rawBody.trim().toLowerCase(), display);
                         if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
@@ -8198,13 +8269,20 @@ _Can be started from any chat, but source members require source group access an
                         const suggestedRaw = bestDisplay.replace(/ <[^>]+>/g, "").replace(/ @\w+/g, "").trim();
                         const suggestedParts = suggestedRaw.split(" ");
                         typoSuggestionState[typoKey] = { rawBody: suggestedRaw, cmd: suggestedParts[0], parts: suggestedParts };
-                        await reply(
-                            `❓ Unknown command: *${cmd}*\n\n` +
-                            `Did you mean: *${bestDisplay}*?\n\n` +
-                            `Reply *yes* to run it.`
+                        const typoBody = buildOmegaTerminal(
+                            `   ⚠️  *COMMAND_NOT_FOUND*\n` +
+                            `   ━━━━━━━━━━━━━━━\n\n` +
+                            `   ╔╦══ INPUT    ──╼  *${cmd}*\n` +
+                            `   ║╠══ STATUS   ──╼  _UNRECOGNISED_\n` +
+                            `   ╚╩══ CLOSEST  ──╼  *${bestDisplay}*\n\n` +
+                            `   _Tap the button below to execute it._`
                         );
+                        await sendInteractiveButtons(sock, from, msg, typoBody, [
+                            { id: "typo_yes", label: `✅ Run  ${bestDisplay.split(" ")[0]}` },
+                            { id: "typo_no",  label: "❌ Dismiss" }
+                        ]);
                     } else if (isSelfChat && body) {
-                        await reply(`👋 I'm active! Type *.menu* to see all commands.`);
+                        await reply(buildOmegaTerminal(`   👁  *SCANNING...*\n\n   Type *.menu* to access all commands.`));
                     }
                 } else if (isSelfChat && body) {
                     await reply(`👋 I'm active! Type *.menu* to see all commands.`);
