@@ -1,3 +1,28 @@
+# Eclipse / Phantom X — Build Log (2026-05-04)
+
+## Changes — 3-Panel Menu + Stability Fixes
+
+### New: Tap-able 3-Panel Menu System
+- `getNewMenuTree()` defines three top-level panels: Owner Menu 🔑, Group Menu 🛡, Bug Terminal ☠ (+ Dev Menu 🔴 for devs).
+- Each panel has sub-sections with full command lists (NEXUS, WORKSHOP, NEURAL, SYSTEM, FUN / CITADEL, ARCADE / OVERSIGHT, NETWORK, PROMO ENGINE).
+- `handleMenuNavigation()` intercepts all list/button responses with IDs starting `menu_`, `owner_`, `group_`, `dev_`, or `back_to_main`.
+- `sendPersonaMenuNav()` re-renders the main menu list (used by "Navigate the Void" back button).
+- `sendFinal()` inside `sendPersonaMenu` now ends the animation by sending a `listMessage` with "🌑 ⟢ NAVIGATE THE VOID ⟣ 🌑" tap button. Banner image sent separately if available.
+- Main menu text no longer includes the static section list at the bottom ("RITUALS OF THE VOID" / "COURT OF JUDGMENT" removed from both Eclipse and Astraea builds).
+- Bug Terminal panel shows "UNDER MAINTENANCE — coming soon" for all users.
+
+### Fixes
+- `.clone` interval: added `!sock.user?.id` alive check; silently clears job if socket disconnected.
+- `.broadcast` doTick: added `!sock.user?.id` alive check; silently clears job if socket disconnected.
+- `.session`: now shows only session count (not numbers/names). Use `.sessionlist` for details.
+- `.sessionlist`: new command — lists all active session numbers and WhatsApp display names (dev only).
+- Session execution loop: added 3–5 s human-like delay between each session action + skips dead sockets.
+
+### Removed Bug Tool Commands
+`.zalgo`, `.bigtext`, `.invisible`, `.rtl`, `.mock`, `.aesthetic`, `.reverse`, `.clap` — all removed from codebase.
+
+---
+
 # Eclipse / Phantom X — EVENTIDE OMEGA TERMINAL Build (2026-05-01)
 
 ## Changes — EVENTIDE OMEGA TERMINAL batch

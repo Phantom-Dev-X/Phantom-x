@@ -2766,6 +2766,47 @@ function getEclipseTopVisible(isDev) {
     return getEclipseTopOrder().filter(k => isDev || !tree[k].devOnly).map(k => ({ key: k, ...tree[k] }));
 }
 
+// ─── NEW 3-PANEL MENU TREE ────────────────────────────────────────────────────
+function getNewMenuTree() {
+    return {
+        owner: {
+            title: "OWNER MENU", emoji: "🔑", desc: "commands for the sovereign",
+            sections: {
+                nexus:    { title: "NEXUS",    blurb: "automation & broadcast",
+                    cmds: [".autoreact on/off/<emoji>",".autoreply add/remove/list",".setalias <trigger> <.cmd>",".delalias <trigger>",".aliases",".hidetag <msg>",".tagall <msg>",".readmore",".broadcast <mins> <msg>",".stopbroadcast",".schedule HH:MM <msg>",".unschedule HH:MM",".schedules",".clone <src> <dst> <batch> <mins>",".stopclone"] },
+                workshop: { title: "WORKSHOP", blurb: "utilities, tools & sports",
+                    cmds: [".sticker",".toimg",".qr <text>",".genpwd <length>",".base64 enc/dec <text>",".chat <msg>",".autojoin on/off",".calc <expr>",".numinfo <num>",".targetloc <num>",".weather <city>",".translate <lang> <text>",".bible <verse>",".quran <surah:ayah>",".setstatus <text>",".setname <name>",".remind <time> <text>",".todo add/done/del",".note save/get/del",".timer <time>",".countdown set/list",".calendar",".pltable",".live",".plweek",".fixtures <club>",".fnews <club>",".h2h <c1> vs <c2>"] },
+                neural:   { title: "NEURAL",   blurb: "AI, media & image editing",
+                    cmds: [".ai <question>",".imagine <prompt>",".solve",".song <title>",".lyrics <artist> | <title>",".ss <url>",".viewonce",".ocr",".summarize",".atranslate <text> <lang>",".code <what>",".explain <topic>",".aichat <msg>",".tts <text>",".voice <text>",".dl <url>",".yt <url>",".ytmp3 <url>",".tiktok <url>",".ig <url>",".fb <url>",".x <url>",".sc <url>",".pin <url>",".dlhealth",".blur",".invert",".grayscale",".brighten",".darken",".sharpen",".pixelate",".cartoon",".removebg",".upscale"] },
+                system:   { title: "SYSTEM",   blurb: "bot status & control",
+                    cmds: [".ping",".uptime",".info",".restart",".reboot",".listonline",".listoffline",".linkedlist",".mode public/owner",".dev",".devnumber",".setpp",".setmenupic",".profile",".persona eclipse/astraea",".menudesign 1-20"] },
+                fun:      { title: "FUN",      blurb: "bonus games & entertainment",
+                    cmds: [".akinator",".guessflag",".typingtest",".connect4",".werewolf"] },
+            }
+        },
+        group: {
+            title: "GROUP MENU", emoji: "🛡", desc: "group management & entertainment",
+            sections: {
+                citadel: { title: "CITADEL", blurb: "administration & security",
+                    cmds: [".add <number>",".kick @user",".promote @user",".demote @user",".link",".revoke",".lock",".unlock",".mute @user",".unmute @user",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid",".grouppic",".warn @user",".warnlist",".resetwarn @user",".ban @user",".unban @user",".antilink on/off",".antispam on/off",".antimention on/off",".antidemote on/off",".antidelete on/off",".antibot on/off",".welcome on/off",".goodbye on/off"] },
+                arcade:  { title: "ARCADE",  blurb: "games, fun & entertainment",
+                    cmds: [".rank",".ttt @p1 @p2",".truth",".dare",".wordchain <word>",".flip",".dice",".8ball <question>",".rps r/p/s",".slots",".trivia",".hangman",".numguess",".riddle",".mathquiz",".wyr",".scramble",".joke",".fact",".quote",".roast @user",".compliment @user",".ship @a @b",".rate @user",".vibe @user",".horoscope <sign>"] },
+            }
+        },
+        dev: {
+            title: "DEV MENU", emoji: "🔴", desc: "the silent throne — dev only",
+            sections: {
+                oversight: { title: "OVERSIGHT",     blurb: "dev control & access management",
+                    cmds: [".mode public/owner",".public",".owner",".unleash allcmds",".unleash <cmd> all",".unleash <cmd> <num>",".cmdlock allcmds",".cmdlock <cmd>",".lockfor <num> <cmd>",".unlockfor <num> <cmd>",".premiumadd <num>",".premiumremove <num>",".premiumlist",".adddev <num>",".removedev <num>",".devlist",".silencenumber <num>",".unsilencenumber <num>",".silencelist",".session",".sessionlist"] },
+                network:   { title: "NETWORK",       blurb: "threat system & reports",
+                    cmds: [".report <num> [category] [note]",".threats",".blacklist",".threatinfo <num>",".scan <num>",".unthreat <num>",".clearance <num>"] },
+                promo:     { title: "PROMO ENGINE",  blurb: "promotion & DM migration tools",
+                    cmds: [".promogroup status/on/off/setgroup/rate",".promogroup pool/add/remove/runnow",".regroup set/link/delay/start/stop",".linkwelcome",".antibug on/off/status"] },
+            }
+        },
+    };
+}
+
 // Eventide menu uses roman-numeral labels. Map them to Eclipse section keys.
 // [I]=chains  [II]=abyss  [IV]=codex  [V]=ascend  [Ø/0]=flare
 function eventideJumpKey(token) {
@@ -2830,16 +2871,6 @@ function buildEclipseMain(isDev) {
 "            \" when the last star dies, \n" +
 "              i will still be typing .\"\n" +
 "\n" +
-"╔══════════════════════╦══════════════════════╗\n" +
-"║ ☠ RITUALS OF THE VOID                       ║\n" +
-"║                                              ║\n" +
-"║ [I]   ⛓ CHAINS OF BINDING   → Group          ║\n" +
-(isDev ? "║ [II]  👁 EYE OF THE ABYSS    → Owner          ║\n" : "") +
-"║ [IV]  📜 CODEX OF THE END   → Logs            ║\n" +
-"║ [V]   🌑 ASCENSION PROTOCOL → Premium         ║\n" +
-"║ [Ø]   ☀ SOLAR FLARE         → Emergency       ║\n" +
-"╚══════════════════════╩══════════════════════╝\n" +
-"\n" +
 "📡 SECURE │ Ω │ Vessels: ∞\n" +
 " You have summoned what \n" +
 " cannot be unsummoned";
@@ -2892,15 +2923,6 @@ function buildAstraeaMain(isDev) {
 "\n" +
 "                 🌑 *THE GOLDEN COURT* 🌑\n" +
 "        \" *every vessel stands trial* .\"\n" +
-"\n" +
-"╔══════════════════════╦═════════════════════════════╗\n" +
-"║             ⚔ COURT OF JUDGMENT          ║                                                              \n" +
-"║ [ I ]   ⛓ CHAINS OF ORDER   → Group   ║\n" +
-(isDev ? "║ [ II ]  👁 THE ALL-SEEING      → Owner   ║\n" : "") +
-"║ [ IV ]  📜 BOOK OF LIFE        → Logs      ║\n" +
-"║ [ V ]   ✨ ASCENSION RITE  →Premium ║\n" +
-"║ [ Ø ]   ☀ SOLAR FLARE →Emergency   ║\n" +
-"╚══════════════════════╩══════════════════════╝\n" +
 "\n" +
 "📡 Uplink: *DIVINE* │ ☀ │ *Souls* : ∞\n" +
 "\" *the light does not ask permission. it simply arrives* .\"";
@@ -3031,16 +3053,16 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
     })();
 
     async function sendFinal(editKey) {
+        const topRows = [
+            { id: "menu_owner", title: "🔑 OWNER MENU",   desc: "commands for the sovereign"       },
+            { id: "menu_group", title: "🛡 GROUP MENU",   desc: "group management & games"          },
+            { id: "menu_bug",   title: "☠ BUG TERMINAL", desc: "under maintenance — coming soon"   },
+        ];
+        if (isDev) topRows.push({ id: "menu_dev", title: "🔴 DEV MENU", desc: "the silent throne — dev only" });
         if (bannerBuf) {
-            try {
-                await sock.sendMessage(from, { image: bannerBuf, caption: finalText }, { quoted: msg });
-                return;
-            } catch (_) {}
+            try { await sock.sendMessage(from, { image: bannerBuf, caption: finalText }, { quoted: msg }); } catch (_) {}
         }
-        if (editKey) {
-            try { await sock.sendMessage(from, { text: finalText, edit: editKey }); return; } catch (_) {}
-        }
-        try { await sock.sendMessage(from, { text: finalText }, { quoted: msg }); } catch (_) {}
+        await sendListSelect(sock, from, bannerBuf ? null : msg, finalText, "🌑 ⟢ NAVIGATE THE VOID ⟣ 🌑", topRows);
     }
 
     // CLASSIC — no progress bar, just three still stages
@@ -3205,6 +3227,103 @@ async function sendInteractiveButtons(sock, jid, quotedMsg, bodyText, buttons) {
             text: bodyText + "\n\n" + opts + "\n\n_Reply 1 or 2 to choose._"
         }, quotedMsg ? { quoted: quotedMsg } : {});
     }
+}
+
+// ─── MENU NAVIGATION HANDLER ─────────────────────────────────────────────────
+// Called when user taps a list/button response from the 3-panel menu system.
+async function handleMenuNavigation(sock, jid, msg, buttonId, isDev) {
+    const tree = getNewMenuTree();
+
+    if (buttonId === "back_to_main") {
+        await sendPersonaMenuNav(sock, jid, msg, isDev, sock.user?.id || "");
+        return;
+    }
+    if (buttonId === "menu_owner") {
+        const sec = tree.owner;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🔑 OWNER MENU* ══╗\n\n` +
+            `   " *the sovereign does not ask.*\n     *the sovereign commands.* "\n\n` +
+            `   select your arsenal below :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `owner_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "⚡ ENTER THE DOMAIN", rows);
+        return;
+    }
+    if (buttonId === "menu_group") {
+        const sec = tree.group;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🛡 GROUP MENU* ══╗\n\n` +
+            `   " *every group is a kingdom.*\n     *you decide how it is ruled.* "\n\n` +
+            `   select your section below :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `group_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "🛡 ENTER THE CITADEL", rows);
+        return;
+    }
+    if (buttonId === "menu_bug") {
+        await sock.sendMessage(jid, {
+            text: buildOmegaTerminal(
+                `   ╔══ *☠ BUG TERMINAL* ══╗\n\n` +
+                `   ⚠️  *SECTOR STATUS*\n\n` +
+                `   ████████████░░░░ 73%\n\n` +
+                `   [ UNDER MAINTENANCE ]\n\n` +
+                `   " *the weapons sleep.*\n     *but they remember how*\n     *to wake.* "\n\n` +
+                `   — *coming soon* —`
+            )
+        }, { quoted: msg });
+        return;
+    }
+    if (buttonId === "menu_dev") {
+        if (!isDev) {
+            await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   the throne does not open\n   for the uninvited.`) }, { quoted: msg });
+            return;
+        }
+        const sec = tree.dev;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🔴 DEV MENU* ══╗\n\n` +
+            `   " *only the architect may*\n     *enter this chamber.* "\n\n` +
+            `   the void acknowledges you.\n` +
+            `   select your section :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `dev_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "🔴 ENTER THE THRONE", rows);
+        return;
+    }
+
+    // Sub-section: owner_nexus, group_citadel, dev_oversight, etc.
+    const sepIdx = buttonId.indexOf("_");
+    if (sepIdx === -1) return;
+    const topKey = buttonId.slice(0, sepIdx);
+    const subKey = buttonId.slice(sepIdx + 1);
+    const topSec = tree[topKey];
+    if (!topSec) return;
+    const subSec = topSec.sections[subKey];
+    if (!subSec) return;
+
+    const cmdLines = subSec.cmds.map(c => `   • *${c}*`).join("\n");
+    const body = buildOmegaTerminal(
+        `   ╔══ *${subSec.title}* ══╗\n\n` +
+        `   _${subSec.blurb}_\n\n` +
+        `${cmdLines}`
+    );
+    await sendInteractiveButtons(sock, jid, msg, body, [
+        { label: `◀ ${topSec.title}`,    id: `menu_${topKey}` },
+        { label: `🌑 Navigate the Void`, id: `back_to_main`   },
+    ]);
+}
+
+// Re-sends the final menu list (used by back_to_main)
+async function sendPersonaMenuNav(sock, from, msg, isDev, botJid) {
+    const persona  = getBotPersona(botJid);
+    const scenes   = getPersonaScenes(persona);
+    const finalText = scenes.main(isDev);
+    const topRows = [
+        { id: "menu_owner", title: "🔑 OWNER MENU",   desc: "commands for the sovereign"       },
+        { id: "menu_group", title: "🛡 GROUP MENU",   desc: "group management & games"          },
+        { id: "menu_bug",   title: "☠ BUG TERMINAL", desc: "under maintenance — coming soon"   },
+    ];
+    if (isDev) topRows.push({ id: "menu_dev", title: "🔴 DEV MENU", desc: "the silent throne — dev only" });
+    await sendListSelect(sock, from, msg, finalText, "🌑 ⟢ NAVIGATE THE VOID ⟣ 🌑", topRows);
 }
 
 // Sends an eclipse-styled list message (tap opens a popup chooser).
@@ -3460,6 +3579,17 @@ async function handleMessage(sock, msg) {
             }
         }
 
+        // --- MENU NAVIGATION interceptor (tap-able 3-panel menu) ---
+        if (buttonId && (
+            buttonId.startsWith("menu_") || buttonId.startsWith("owner_") ||
+            buttonId.startsWith("group_") || buttonId.startsWith("dev_") ||
+            buttonId === "back_to_main"
+        )) {
+            const isDev = msg.key.fromMe || isDevJid(senderJid);
+            await handleMenuNavigation(sock, from, msg, buttonId, isDev);
+            return;
+        }
+
         // --- SESSION CMD STATE interceptor ---
         {
             const sessKey = `${senderJid}::${from}`;
@@ -3514,6 +3644,8 @@ async function handleMessage(sock, msg) {
                     }
 
                     for (const s of socks) {
+                        // Safety: skip dead sockets
+                        if (!s.user?.id) continue;
                         const num = (s.user.id || "").split(":")[0].split("@")[0];
                         try {
                             if (sessState.action === "join") {
@@ -3554,7 +3686,8 @@ async function handleMessage(sock, msg) {
                         } catch (e) {
                             await sock.sendMessage(from, { text: `❌ ${num}: ${e?.message || "failed"}` });
                         }
-                        await new Promise(r => setTimeout(r, 1500));
+                        // Human-like delay between sessions (3-5s) to avoid rate-limits & disconnects
+                        await new Promise(r => setTimeout(r, 3000 + Math.floor(Math.random() * 2000)));
                     }
                     await sock.sendMessage(from, { text: `✅ *Done!* All sessions processed.` });
                 }
@@ -4115,31 +4248,46 @@ async function handleMessage(sock, msg) {
                 }
                 const sessKey = `${senderJid}::${from}`;
                 const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
-                let sessionLines = ``;
-                if (!activeSess.length) {
-                    sessionLines = `   _No active sessions._\n`;
-                } else {
-                    activeSess.forEach(([uid, s], i) => {
-                        const num = (s.user.id || "").split(":")[0].split("@")[0];
-                        const name = s.user.name || "Unknown";
-                        sessionLines += `   ${i + 1}. *${num}* _(${name})_ ✅\n`;
-                    });
-                }
                 const sessBodyText = buildOmegaTerminal(
                     `   ┎⊷ 【 📱 *ACTIVE_SESSIONS* 】\n` +
                     `   ┃\n` +
-                    sessionLines +
-                    `   ┃\n` +
-                    `   ┃ *Total:* ${activeSess.length} session(s)\n` +
+                    `   ┃ *Total:* ${activeSess.length} session(s) active\n` +
+                    (activeSess.length
+                        ? `   ┃ _use .sessionlist to view details_\n`
+                        : `   ┃ _No sessions linked yet._\n`) +
                     `   ┃\n` +
                     `   ┖──── *Select an action below* ──╼`
                 );
                 sessionCmdState[sessKey] = { step: "action", action: null };
                 await sendListSelect(sock, from, msg, sessBodyText, "⚡ SELECT ACTION", [
-                    { id: "sess_a", title: "🔗 Join a group", desc: "All sessions join via invite link" },
-                    { id: "sess_b", title: "📡 Follow a channel", desc: "All sessions subscribe to a channel" },
-                    { id: "sess_c", title: "👥 Add contacts to a group", desc: "Each session adds N random contacts" }
+                    { id: "sess_a", title: "🔗 Join a group",           desc: "All sessions join via invite link"          },
+                    { id: "sess_b", title: "📡 Follow a channel",       desc: "All sessions subscribe to a channel"        },
+                    { id: "sess_c", title: "👥 Add contacts to a group",desc: "Each session adds N random contacts"        },
                 ]);
+                break;
+            }
+
+            case ".sessionlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) {
+                    return reply(buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   This command is restricted to developers only.`));
+                }
+                const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
+                if (!activeSess.length) {
+                    return reply(buildOmegaTerminal(`   📱 *SESSION REGISTRY*\n\n   _No active sessions found._`));
+                }
+                let lines = ``;
+                activeSess.forEach(([uid, s], i) => {
+                    const num  = (s.user.id || "").split(":")[0].split("@")[0];
+                    const name = s.user.name || "Unknown";
+                    lines += `   ${i + 1}. *+${num}* — _${name}_ ✅\n`;
+                });
+                await reply(buildOmegaTerminal(
+                    `   ┎⊷ 【 📱 *SESSION REGISTRY* 】\n` +
+                    `   ┃\n` +
+                    lines +
+                    `   ┃\n` +
+                    `   ┖──── *${activeSess.length} session(s) active* ──╼`
+                ));
                 break;
             }
 
@@ -4359,6 +4507,12 @@ async function handleMessage(sock, msg) {
                     let idx = 0;
                     let totalSent = 0;
                     const doTick = async () => {
+                        // Safety: abort silently if socket disconnected
+                        if (!sock.user?.id) {
+                            clearInterval(intervalId);
+                            delete broadcastJobs[botJid];
+                            return;
+                        }
                         if (idx >= groupIds.length) {
                             clearInterval(intervalId);
                             delete broadcastJobs[botJid];
@@ -5480,11 +5634,17 @@ _Can be started from any chat, but source members require source group access an
                     cloneJobs[from] = { intervalId: null, members, total: members.length, index: 0 };
 
                     const intervalId = setInterval(async () => {
+                        // Safety: abort silently if socket disconnected
+                        if (!sock.user?.id) {
+                            clearInterval(intervalId);
+                            delete cloneJobs[from];
+                            return;
+                        }
                         const job = cloneJobs[from];
                         if (!job || job.index >= job.total) {
                             clearInterval(intervalId);
                             delete cloneJobs[from];
-                            await sock.sendMessage(from, { text: "🎉 *Clone complete!* All members have been added to the destination group." });
+                            try { await sock.sendMessage(from, { text: "🎉 *Clone complete!* All members have been added to the destination group." }); } catch (_) {}
                             return;
                         }
 
@@ -7976,100 +8136,6 @@ _Can be started from any chat, but source members require source group access an
             }
 
 
-            case ".zalgo": {
-                const zalgoInput = parts.slice(1).join(" ").trim();
-                if (!zalgoInput) return reply("Usage: .zalgo <text>\nExample: .zalgo Phantom X");
-                const zalgoUp = ["\u030d","\u030e","\u0304","\u0305","\u033f","\u0311","\u0306","\u0310","\u0352","\u0357","\u0351","\u0307","\u0308","\u030a","\u0342","\u0343","\u0344","\u034a","\u034b","\u034c","\u0303","\u0302","\u030c","\u0350","\u0300","\u0301","\u030b","\u030f","\u0312","\u0313","\u0314","\u033d","\u0309","\u0363","\u0364","\u0365","\u0366","\u0367","\u0368","\u0369","\u036a","\u036b","\u036c","\u036d","\u036e","\u036f","\u033e","\u035b"];
-                const zalgoMid = ["\u0315","\u031b","\u0340","\u0341","\u0358","\u0321","\u0322","\u0327","\u0328","\u0334","\u0335","\u0336","\u034f","\u035c","\u035d","\u035e","\u035f","\u0360","\u0362","\u0338","\u0337","\u0361","\u0489"];
-                const zalgoDown = ["\u0316","\u0317","\u0318","\u0319","\u031c","\u031d","\u031e","\u031f","\u0320","\u0324","\u0325","\u0326","\u0329","\u032a","\u032b","\u032c","\u032d","\u032e","\u032f","\u0330","\u0331","\u0332","\u0333","\u0339","\u033a","\u033b","\u033c","\u0345","\u0347","\u0348","\u0349","\u034d","\u034e","\u0353","\u0354","\u0355","\u0356","\u0359","\u035a","\u0323"];
-                const randArr = arr => arr[Math.floor(Math.random() * arr.length)];
-                let zalgoOut = "";
-                for (const ch of zalgoInput) {
-                    zalgoOut += ch;
-                    const upCount = Math.floor(Math.random() * 6) + 2;
-                    const midCount = Math.floor(Math.random() * 3);
-                    const downCount = Math.floor(Math.random() * 6) + 2;
-                    for (let i = 0; i < upCount; i++) zalgoOut += randArr(zalgoUp);
-                    for (let i = 0; i < midCount; i++) zalgoOut += randArr(zalgoMid);
-                    for (let i = 0; i < downCount; i++) zalgoOut += randArr(zalgoDown);
-                }
-                await reply(`👹 *Z̷̢̛̪A̶̗͠L̵͖̒G̸͎̔O̴͕̊ T̵̤̀E̸͎̾X̵̯̾T̶̢̕*\n\n${zalgoOut}`);
-                break;
-            }
-
-            case ".bigtext": {
-                const bigtextInput = parts.slice(1).join(" ").trim();
-                if (!bigtextInput) return reply("Usage: .bigtext <text>\nExample: .bigtext PHANTOM");
-                const blockMap = {
-                    a:"🅰",b:"🅱",c:"🅲",d:"🅳",e:"🅴",f:"🅵",g:"🅶",h:"🅷",i:"🅸",j:"🅹",
-                    k:"🅺",l:"🅻",m:"🅼",n:"🅽",o:"🅾",p:"🅿",q:"🆀",r:"🆁",s:"🆂",t:"🆃",
-                    u:"🆄",v:"🆅",w:"🆆",x:"🆇",y:"🆈",z:"🆉"," ":"   ",
-                    "0":"0️⃣","1":"1️⃣","2":"2️⃣","3":"3️⃣","4":"4️⃣",
-                    "5":"5️⃣","6":"6️⃣","7":"7️⃣","8":"8️⃣","9":"9️⃣",
-                };
-                const bigOut = bigtextInput.toLowerCase().split("").map(c => blockMap[c] || c).join(" ");
-                await reply(`📐 *Big Text:*\n\n${bigOut}`);
-                break;
-            }
-
-            case ".invisible": {
-                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
-                const invChar = "\u2062\u2063\u2064\u200b\u200c\u200d\u00ad";
-                await sock.sendMessage(from, { text: invChar.repeat(50) });
-                break;
-            }
-
-            case ".rtl": {
-                const rtlInput = parts.slice(1).join(" ").trim();
-                if (!rtlInput) return reply("Usage: .rtl <text>\nExample: .rtl Hello World");
-                const rtlOut = "\u202e" + rtlInput;
-                await reply(`➡️ *RTL Text:*\n\n${rtlOut}`);
-                break;
-            }
-
-            case ".mock": {
-                const mockInput = parts.slice(1).join(" ").trim();
-                if (!mockInput) return reply("Usage: .mock <text>\nExample: .mock I am the best");
-                let mockOut = "";
-                let toggle = false;
-                for (const ch of mockInput) {
-                    if (ch === " ") { mockOut += " "; continue; }
-                    mockOut += toggle ? ch.toUpperCase() : ch.toLowerCase();
-                    toggle = !toggle;
-                }
-                await reply(`🧽 ${mockOut}`);
-                break;
-            }
-
-            case ".aesthetic": {
-                const aesInput = parts.slice(1).join(" ").trim();
-                if (!aesInput) return reply("Usage: .aesthetic <text>\nExample: .aesthetic phantom x");
-                const aesMap = "abcdefghijklmnopqrstuvwxyz0123456789";
-                const aesOut_chars = "ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９";
-                let aesOut = "";
-                for (const ch of aesInput.toLowerCase()) {
-                    const idx = aesMap.indexOf(ch);
-                    aesOut += idx !== -1 ? [...aesOut_chars][idx] : ch === " " ? "　" : ch;
-                }
-                await reply(`🌸 ${aesOut}`);
-                break;
-            }
-
-            case ".reverse": {
-                const revInput = parts.slice(1).join(" ").trim();
-                if (!revInput) return reply("Usage: .reverse <text>\nExample: .reverse Hello World");
-                const revOut = [...revInput].reverse().join("");
-                await reply(`🔁 *Reversed:*\n\n${revOut}`);
-                break;
-            }
-
-            case ".clap": {
-                const clapInput = parts.slice(1).join(" ").trim();
-                if (!clapInput) return reply("Usage: .clap <text>\nExample: .clap this is the best bot");
-                const clapOut = clapInput.split(" ").join(" 👏 ");
-                await reply(`👏 ${clapOut} 👏`);
-                break;
-            }
 
             // ─── CHAT (owner talks to the bot like a chatbox) ───
             case ".chat": {
