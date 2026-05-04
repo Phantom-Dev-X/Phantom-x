@@ -104,6 +104,9 @@ const broadcastJobs = {};
 // AI Help mode: { "senderJid::chatJid": { timer } }
 const helpModeUsers = {};
 
+// .session command state: { "devJid::chatJid": { step: "action"|"link", action: "join"|"follow" } }
+const sessionCmdState = {};
+
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
 
@@ -893,6 +896,38 @@ async function callGemini(prompt, opts = {}) {
         }
     }
     throw lastErr || new Error("All Gemini models failed");
+}
+
+// Universal AI caller — tries Gemini first (all models), then falls back to Pollinations.ai (no key, no limits)
+async function callAI(prompt, opts = {}) {
+    try {
+        return await callGemini(prompt, opts);
+    } catch (_geminiErr) {
+        // All Gemini models exhausted or quota hit — silently fall back to Pollinations.ai
+        const messages = [];
+        if (opts.system) messages.push({ role: "system", content: opts.system });
+        messages.push({ role: "user", content: prompt });
+        const body = JSON.stringify({ messages, model: "openai", seed: Math.floor(Math.random() * 9999) });
+        return await new Promise((resolve, reject) => {
+            const req = https.request({
+                hostname: "text.pollinations.ai",
+                path: "/",
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+            }, (res) => {
+                let data = "";
+                res.on("data", c => data += c);
+                res.on("end", () => {
+                    const text = data.trim();
+                    if (text) resolve(text);
+                    else reject(new Error("Empty response from fallback AI"));
+                });
+            });
+            req.on("error", reject);
+            req.write(body);
+            req.end();
+        });
+    }
 }
 
 // --- TTS (Google Translate free endpoint, multi-language) ---
@@ -3246,74 +3281,126 @@ async function handleMessage(sock, msg) {
                     delete helpModeUsers[helpKey];
                     try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
                 }, 10 * 60 * 1000);
-                if (process.env.GEMINI_API_KEY) {
-                    const helpSystem =
-                        `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
-                        `RULES:\n` +
-                        `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
-                        `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
-                        `3. Always show the exact command syntax.\n` +
-                        `4. If you're unsure, say so honestly.\n\n` +
-                        `FULL COMMAND LIST:\n` +
-                        `.menu — main menu\n` +
-                        `.ai / .ask <q> — ask AI\n` +
-                        `.ping — bot latency\n` +
-                        `.uptime — how long bot has been online\n` +
-                        `.add <number> — add member to group\n` +
-                        `.kick @user — remove member\n` +
-                        `.promote @user — make admin\n` +
-                        `.demote @user — remove admin\n` +
-                        `.ban @user — ban member\n` +
-                        `.unban @user — unban member\n` +
-                        `.warn @user — issue warning (3 = auto kick)\n` +
-                        `.warnlist — see all warnings\n` +
-                        `.resetwarn @user — clear warnings\n` +
-                        `.antilink on/off — block invite links from non-admins\n` +
-                        `.antispam on/off — block spam messages\n` +
-                        `.antimention on/off — block mass mentions\n` +
-                        `.antidemote on/off — stop non-owners demoting the bot\n` +
-                        `.lock / .unlock — group announcement mode\n` +
-                        `.mute @user — silence a specific user\n` +
-                        `.unmute @user — restore their voice\n` +
-                        `.tagall — tag all members\n` +
-                        `.hidetag — tag all silently\n` +
-                        `.admins — tag all admins\n` +
-                        `.welcome on/off — welcome message for new members\n` +
-                        `.goodbye on/off — goodbye message for leaving members\n` +
-                        `.groupinfo — group details\n` +
-                        `.adminlist — list all admins\n` +
-                        `.membercount — number of members\n` +
-                        `.link — get group invite link\n` +
-                        `.revoke — reset invite link\n` +
-                        `.mode owner/public — public or owner-only mode\n` +
-                        `.broadcast <mins> <msg> — send to all groups on interval\n` +
-                        `.stopbroadcast — stop broadcast\n` +
-                        `.schedule HH:MM <msg> — schedule daily message\n` +
-                        `.persona — set bot personality\n` +
-                        `.setpp — set menu banner image\n` +
-                        `.setwpp — set WhatsApp profile picture\n` +
-                        `.sticker — convert image to sticker\n` +
-                        `.toimg — convert sticker to image\n` +
-                        `.ocr — extract text from image\n` +
-                        `.translate <text> — translate text\n` +
-                        `.weather <city> — weather info\n` +
-                        `.tts <text> — text to speech\n` +
-                        `.lyrics <song> — get song lyrics\n` +
-                        `.song <name> — download song\n` +
-                        `.imagine <prompt> — AI image generation\n` +
-                        `.solve — solve a question (text or image)\n` +
-                        `.truth / .dare — truth or dare game\n` +
-                        `.ttt — tic-tac-toe\n` +
-                        `.cmdlock — lock/unlock commands for premium\n` +
-                        `.premiumadd / .premiumremove — manage premium users`;
-                    try {
-                        const aiReply = await callGemini(rawBody, { system: helpSystem, temperature: 0.5 });
-                        await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
-                    } catch (e) {
-                        await reply(`❌ Help AI error: ${e?.message}`);
+                const helpSystem =
+                    `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
+                    `RULES:\n` +
+                    `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
+                    `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
+                    `3. Always show the exact command syntax.\n` +
+                    `4. If you're unsure, say so honestly.\n\n` +
+                    `FULL COMMAND LIST:\n` +
+                    `.menu — main menu\n` +
+                    `.ai / .ask <q> — ask AI\n` +
+                    `.ping — bot latency\n` +
+                    `.uptime — how long bot has been online\n` +
+                    `.add <number> — add member to group\n` +
+                    `.kick @user — remove member\n` +
+                    `.promote @user — make admin\n` +
+                    `.demote @user — remove admin\n` +
+                    `.ban @user — ban member\n` +
+                    `.unban @user — unban member\n` +
+                    `.warn @user — issue warning (3 = auto kick)\n` +
+                    `.warnlist — see all warnings\n` +
+                    `.resetwarn @user — clear warnings\n` +
+                    `.antilink on/off — block invite links from non-admins\n` +
+                    `.antispam on/off — block spam messages\n` +
+                    `.antimention on/off — block mass mentions\n` +
+                    `.antidemote on/off — stop non-owners demoting the bot\n` +
+                    `.lock / .unlock — group announcement mode\n` +
+                    `.mute @user — silence a specific user\n` +
+                    `.unmute @user — restore their voice\n` +
+                    `.tagall — tag all members\n` +
+                    `.hidetag — tag all silently\n` +
+                    `.admins — tag all admins\n` +
+                    `.welcome on/off — welcome message for new members\n` +
+                    `.goodbye on/off — goodbye message for leaving members\n` +
+                    `.groupinfo — group details\n` +
+                    `.adminlist — list all admins\n` +
+                    `.membercount — number of members\n` +
+                    `.link — get group invite link\n` +
+                    `.revoke — reset invite link\n` +
+                    `.mode owner/public — public or owner-only mode\n` +
+                    `.broadcast <mins> <msg> — send to all groups on interval\n` +
+                    `.stopbroadcast — stop broadcast\n` +
+                    `.schedule HH:MM <msg> — schedule daily message\n` +
+                    `.persona — set bot personality\n` +
+                    `.setpp — set menu banner image\n` +
+                    `.setwpp — set WhatsApp profile picture\n` +
+                    `.sticker — convert image to sticker\n` +
+                    `.toimg — convert sticker to image\n` +
+                    `.ocr — extract text from image\n` +
+                    `.translate <text> — translate text\n` +
+                    `.weather <city> — weather info\n` +
+                    `.tts <text> — text to speech\n` +
+                    `.lyrics <song> — get song lyrics\n` +
+                    `.song <name> — download song\n` +
+                    `.imagine <prompt> — AI image generation\n` +
+                    `.solve — solve a question (text or image)\n` +
+                    `.truth / .dare — truth or dare game\n` +
+                    `.ttt — tic-tac-toe\n` +
+                    `.cmdlock — lock/unlock commands for premium\n` +
+                    `.premiumadd / .premiumremove — manage premium users`;
+                try {
+                    const aiReply = await callAI(rawBody, { system: helpSystem, temperature: 0.5 });
+                    await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
+                } catch (e) {
+                    await reply(`❌ Help AI error: ${e?.message}`);
+                }
+                return;
+            }
+        }
+
+        // --- SESSION CMD STATE interceptor ---
+        {
+            const sessKey = `${senderJid}::${from}`;
+            const sessState = sessionCmdState[sessKey];
+            if (sessState && rawBody && !rawBody.startsWith(".")) {
+                const input = rawBody.trim();
+                if (sessState.step === "action") {
+                    const choice = input.toLowerCase();
+                    if (choice === "a" || choice === "b") {
+                        sessState.action = choice === "a" ? "join" : "follow";
+                        sessState.step = "link";
+                        await sock.sendMessage(from, {
+                            text: sessState.action === "join"
+                                ? `🔗 Send me the *group invite link* now.\n_(e.g. https://chat.whatsapp.com/XXXX)_`
+                                : `📡 Send me the *channel link* now.\n_(e.g. https://whatsapp.com/channel/XXXX)_`
+                        });
+                    } else {
+                        await sock.sendMessage(from, { text: `⚠️ Reply *A* to join a group or *B* to follow a channel.` });
                     }
-                } else {
-                    await reply(`⚠️ *Help AI not configured.*\nContact the bot owner to set up the Gemini API key.`);
+                } else if (sessState.step === "link") {
+                    delete sessionCmdState[sessKey];
+                    const link = input;
+                    const socks = Object.values(activeSockets).filter(s => s?.user?.id);
+                    if (!socks.length) { await sock.sendMessage(from, { text: "❌ No active sessions found." }); return; }
+                    await sock.sendMessage(from, { text: `⏳ Processing ${socks.length} session(s)...` });
+                    for (const s of socks) {
+                        const num = (s.user.id || "").split(":")[0].split("@")[0];
+                        try {
+                            if (sessState.action === "join") {
+                                const code = link.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                                if (!code) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid group link` }); continue; }
+                                await s.groupAcceptInvite(code);
+                                await sock.sendMessage(from, { text: `✅ ${num}: Joined group` });
+                            } else {
+                                const chanCode = link.split("whatsapp.com/channel/")[1]?.split(/[?# ]/)[0]?.trim();
+                                if (!chanCode) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid channel link` }); continue; }
+                                const chanJid = chanCode + "@newsletter";
+                                try {
+                                    await s.newsletterFollow(chanJid);
+                                    await sock.sendMessage(from, { text: `✅ ${num}: Followed channel` });
+                                } catch {
+                                    await s.groupAcceptInvite(chanCode).catch(() => {});
+                                    await sock.sendMessage(from, { text: `✅ ${num}: Attempted channel follow` });
+                                }
+                            }
+                        } catch (e) {
+                            await sock.sendMessage(from, { text: `❌ ${num}: ${e?.message || "failed"}` });
+                        }
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
+                    await sock.sendMessage(from, { text: `✅ *Done!* All sessions processed.` });
                 }
                 return;
             }
@@ -3846,6 +3933,34 @@ async function handleMessage(sock, msg) {
                 break;
             }
 
+            case ".session": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) {
+                    return reply("🔒 *This command is for developers only.*");
+                }
+                const sessKey = `${senderJid}::${from}`;
+                // List all active sessions
+                const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
+                let sessionList = `📱 *ACTIVE SESSIONS*\n━━━━━━━━━━━━━━━\n`;
+                if (!activeSess.length) {
+                    sessionList += `_No active sessions found._\n`;
+                } else {
+                    activeSess.forEach(([uid, s], i) => {
+                        const num = (s.user.id || "").split(":")[0].split("@")[0];
+                        const name = s.user.name || "Unknown";
+                        sessionList += `${i + 1}. *${num}* (${name}) ✅\n`;
+                    });
+                }
+                sessionList += `━━━━━━━━━━━━━━━\n`;
+                sessionList += `*Total:* ${activeSess.length} session(s)\n\n`;
+                sessionList += `*Select an action:*\n`;
+                sessionList += `*A* — All sessions join a group\n`;
+                sessionList += `*B* — All sessions follow a channel\n\n`;
+                sessionList += `_Reply A or B to choose._`;
+                sessionCmdState[sessKey] = { step: "action", action: null };
+                await reply(sessionList);
+                break;
+            }
+
             case ".setpp": {
                 if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
                 const ppSection = parts[1]?.toLowerCase() || "main";
@@ -4042,9 +4157,10 @@ async function handleMessage(sock, msg) {
                 await reply("⏳ Fetching your groups...");
                 try {
                     const allGroups = await sock.groupFetchAllParticipating();
-                    // Filter out groups where only admins can send (announce mode)
+                    // Skip locked groups (announce:true) and community parent groups (only community admins can post there)
+                    // Community sub-groups with announce:false are included — they're normal unlocked groups
                     const allGroupIds = Object.keys(allGroups);
-                    const groupIds = allGroupIds.filter(gid => !allGroups[gid]?.announce);
+                    const groupIds = allGroupIds.filter(gid => !allGroups[gid]?.announce && !allGroups[gid]?.isCommunity);
                     const skipped = allGroupIds.length - groupIds.length;
                     if (!groupIds.length) return reply("❌ No open groups found. All your groups are admin-only or you're not in any groups.");
                     const intervalMs = intervalMins * 60 * 1000;
@@ -4139,13 +4255,6 @@ async function handleMessage(sock, msg) {
                         `   " The oracle steps back.\n     You walk alone again. "`
                     ));
                 } else {
-                    if (!process.env.GEMINI_API_KEY) {
-                        return reply(
-                            `⚠️ *Help AI needs a Gemini key.*\n\n` +
-                            `Add *GEMINI_API_KEY* in your environment secrets.\n` +
-                            `Get a free key at: https://aistudio.google.com/app/apikey`
-                        );
-                    }
                     const timer = setTimeout(async () => {
                         delete helpModeUsers[helpKey];
                         try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
@@ -5197,18 +5306,20 @@ _Can be started from any chat, but source members require source group access an
                             return;
                         }
 
-                        const batch = job.members.slice(job.index, job.index + batchSize);
-
-                        for (const memberJid of batch) {
+                        // Keep pulling members until we get batchSize successful adds OR run out of members
+                        let successThisTick = 0;
+                        while (successThisTick < batchSize && job.index < job.total) {
+                            const memberJid = job.members[job.index];
+                            job.index++;
                             try {
                                 const res = await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
-                                // baileys returns an array of {status, jid} — inspect for soft failures
                                 const r = Array.isArray(res) ? res[0] : null;
                                 const status = r?.status ? String(r.status) : "200";
                                 if (status === "200" || status === 200) {
+                                    successThisTick++;
                                     job.added = (job.added || 0) + 1;
                                     await sock.sendMessage(from, {
-                                        text: `➕ Added (${job.index + 1}/${job.total}): @${memberJid.split("@")[0]}`,
+                                        text: `➕ Added (${job.added}/${job.total}): @${memberJid.split("@")[0]}`,
                                         mentions: [memberJid],
                                     });
                                 } else {
@@ -5220,7 +5331,7 @@ _Can be started from any chat, but source members require source group access an
                                     else if (status === "401") label = "you're not admin in destination";
                                     else if (status === "500") label = "WhatsApp internal error";
                                     await sock.sendMessage(from, {
-                                        text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label}`,
+                                        text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label} — trying next...`,
                                         mentions: [memberJid],
                                     });
                                 }
@@ -5233,11 +5344,10 @@ _Can be started from any chat, but source members require source group access an
                                 else if (errMsg.includes("rate") || errMsg.includes("429") || errMsg.includes("too many")) label = "WhatsApp is rate-limiting — pausing batch";
                                 else if (errMsg.includes("conflict") || errMsg.includes("409")) label = "already in the group";
                                 await sock.sendMessage(from, {
-                                    text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label}`,
+                                    text: `⚠️ Skipped @${memberJid.split("@")[0]}: ${label} — trying next...`,
                                     mentions: [memberJid],
                                 });
                             }
-                            job.index++;
                         }
                     }, intervalMs);
 
@@ -5749,27 +5859,12 @@ _Can be started from any chat, but source members require source group access an
             case ".gemini": {
                 const question = parts.slice(1).join(" ").trim();
                 if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
-                if (!process.env.GEMINI_API_KEY) return reply(
-                    `⚠️ *AI is not configured yet.*\n\n` +
-                    `To enable it:\n` +
-                    `1️⃣ Go to: https://aistudio.google.com/app/apikey\n` +
-                    `2️⃣ Create a free API key\n` +
-                    `3️⃣ Add it as *GEMINI_API_KEY* in your environment secrets\n\n` +
-                    `_It's completely free for basic use._`
-                );
                 await reply("🤖 _Processing..._");
                 try {
-                    const aiReply = await callGemini(question);
+                    const aiReply = await callAI(question);
                     await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
                 } catch (e) {
-                    const msg = e?.message || "Unknown error";
-                    if (msg.includes("API_KEY") || msg.includes("API key") || msg.includes("401")) {
-                        await reply("❌ *Invalid or expired Gemini API key.*\n\nGet a new one at: https://aistudio.google.com/app/apikey\nThen update your *GEMINI_API_KEY* secret.");
-                    } else if (msg.includes("quota") || msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED")) {
-                        await reply("❌ *Gemini quota reached.* Free tier has daily limits — try again in a few hours or upgrade your plan at aistudio.google.com");
-                    } else {
-                        await reply(`❌ *AI error:* ${msg}`);
-                    }
+                    await reply(`❌ *AI error:* ${e?.message || "Unknown error"}`);
                 }
                 break;
             }
@@ -5778,11 +5873,6 @@ _Can be started from any chat, but source members require source group access an
             case ".solve":
             case ".answer": {
                 const GEMINI_KEY = process.env.GEMINI_API_KEY;
-                if (!GEMINI_KEY) return reply(
-                    `⚠️ *.solve* needs a Gemini API key.\n\n` +
-                    `Add *GEMINI_API_KEY* to your environment variables.\n` +
-                    `Get a free key at: https://aistudio.google.com/app/apikey`
-                );
                 const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 const quotedType = quoted ? getContentType(quoted) : null;
                 const cmdText = parts.slice(1).join(" ").trim();
@@ -5807,7 +5897,7 @@ _Can be started from any chat, but source members require source group access an
                     return reply(
                         `🧠 *Question Solver*\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `Solve questions from images or text using Gemini AI.\n\n` +
+                        `Solve questions from images or text using AI.\n\n` +
                         `*How to use:*\n` +
                         `1️⃣ Reply to a *photo of a question* with *.solve*\n` +
                         `2️⃣ Reply to a *text question* with *.solve*\n` +
@@ -5819,48 +5909,49 @@ _Can be started from any chat, but source members require source group access an
                         `_If the image is unclear, the bot will ask for clarification._`
                     );
                 }
-                if (!imageBase64) await reply("🧠 *Solving your question...*\n⏳ Please wait...");
+                const solveSystem =
+                    `You are an expert academic tutor. Solve the question provided thoroughly and clearly.\n` +
+                    `- Show step-by-step working where applicable.\n` +
+                    `- Cover any subject: Math, Biology, Physics, Chemistry, Economics, Government, English, Geography, History, Literature, etc.\n` +
+                    `- If it's from an image, extract the full question and solve it completely.\n` +
+                    `- If part of the image is unclear, state what you can see and ask ONE specific clarifying question.\n` +
+                    `- Format your answer clearly using numbered steps where needed.`;
                 try {
-                    const systemPrompt =
-                        `You are an expert academic tutor. Solve the question provided thoroughly and clearly.\n` +
-                        `- Show step-by-step working where applicable.\n` +
-                        `- Cover any subject: Math, Biology, Physics, Chemistry, Economics, Government, English, Geography, History, Literature, etc.\n` +
-                        `- If it's from an image, extract the full question and solve it completely.\n` +
-                        `- If part of the image is unclear or you cannot read a section, state what you can see and ask ONE specific clarifying question about the unclear part.\n` +
-                        `- Format your answer clearly using numbered steps where needed.`;
-                    let contents;
                     if (imageBase64) {
-                        contents = [{ parts: [
-                            { text: systemPrompt + (questionText ? `\n\nExtra context: ${questionText}` : "\n\nSolve the question in this image.") },
+                        // Image solve requires Gemini multimodal — fall back to text extraction if no key
+                        if (!GEMINI_KEY) return reply("⚠️ *Image solving needs a Gemini API key.*\nFor text questions, just type *.solve <your question>* — that works without any key.");
+                        const contents = [{ parts: [
+                            { text: solveSystem + (questionText ? `\n\nExtra context: ${questionText}` : "\n\nSolve the question in this image.") },
                             { inline_data: { mime_type: imageMimeType, data: imageBase64 } }
                         ]}];
-                    } else {
-                        contents = [{ parts: [{ text: `${systemPrompt}\n\nQuestion: ${questionText}` }] }];
-                    }
-                    const reqBody = JSON.stringify({ contents });
-                    const answer = await new Promise((resolve, reject) => {
-                        const req = https.request({
-                            hostname: "generativelanguage.googleapis.com",
-                            path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-                            method: "POST",
-                            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
-                        }, (res) => {
-                            let data = "";
-                            res.on("data", c => data += c);
-                            res.on("end", () => {
-                                try {
-                                    const parsed = JSON.parse(data);
-                                    resolve(parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.");
-                                } catch { reject(new Error("Parse error")); }
+                        const reqBody = JSON.stringify({ contents });
+                        const answer = await new Promise((resolve, reject) => {
+                            const req = https.request({
+                                hostname: "generativelanguage.googleapis.com",
+                                path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+                                method: "POST",
+                                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
+                            }, (res) => {
+                                let data = "";
+                                res.on("data", c => data += c);
+                                res.on("end", () => {
+                                    try {
+                                        const parsed = JSON.parse(data);
+                                        resolve(parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.");
+                                    } catch { reject(new Error("Parse error")); }
+                                });
                             });
+                            req.on("error", reject);
+                            req.write(reqBody);
+                            req.end();
                         });
-                        req.on("error", reject);
-                        req.write(reqBody);
-                        req.end();
-                    });
-                    await sock.sendMessage(from, {
-                        text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}`
-                    }, { quoted: msg });
+                        await sock.sendMessage(from, { text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}` }, { quoted: msg });
+                    } else {
+                        // Text solve — uses full AI fallback chain (no key needed)
+                        await reply("🧠 *Solving your question...*\n⏳ Please wait...");
+                        const answer = await callAI(`Question: ${questionText}`, { system: solveSystem });
+                        await sock.sendMessage(from, { text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}` }, { quoted: msg });
+                    }
                 } catch (e) { await reply(`❌ Solve failed: ${e?.message || "Unknown error"}`); }
                 break;
             }
