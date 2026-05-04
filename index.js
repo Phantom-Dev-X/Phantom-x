@@ -104,8 +104,11 @@ const broadcastJobs = {};
 // AI Help mode: { "senderJid::chatJid": { timer } }
 const helpModeUsers = {};
 
-// .session command state: { "devJid::chatJid": { step: "action"|"link", action: "join"|"follow" } }
+// .session command state: { "devJid::chatJid": { step: "action"|"count"|"link", action: "join"|"follow"|"addcontacts", count: N } }
 const sessionCmdState = {};
+
+// Typo suggestion state: { "senderJid::chatJid": { rawBody, cmd, parts } }
+const typoSuggestionState = {};
 
 // Saved group invite links for auto-rejoin: { groupJid: inviteCode }
 const savedGroupLinks = {};
@@ -115,6 +118,47 @@ const savedGroupLinks = {};
 const DEV_NUMBERS = (process.env.DEV_NUMBERS || "2348102756072")
     .split(",").map(n => n.trim().replace(/\D/g, "")).filter(n => n.length > 5);
 const DEV_NUMBER = DEV_NUMBERS[0] || "2348102756072"; // primary dev (backward compat)
+
+// Full list of known commands for typo suggestion (bigram fuzzy matching)
+const KNOWN_CMDS = [
+    [".menu", ".menu"], [".ai <question>", ".ai"], [".ask <question>", ".ask"],
+    [".gemini <question>", ".gemini"], [".help", ".help"], [".ping", ".ping"],
+    [".uptime", ".uptime"], [".info", ".info"], [".restart", ".restart"],
+    [".antilink on", ".antilink"], [".antilink off", ".antilink"],
+    [".antispam on", ".antispam"], [".antispam off", ".antispam"],
+    [".antimention on", ".antimention"], [".antimention off", ".antimention"],
+    [".antidemote on", ".antidemote"], [".antidemote off", ".antidemote"],
+    [".antidelete on", ".antidelete"], [".antidelete off", ".antidelete"],
+    [".antibot on", ".antibot"], [".antibot off", ".antibot"],
+    [".warn @user", ".warn"], [".warnlist", ".warnlist"], [".resetwarn @user", ".resetwarn"],
+    [".ban @user", ".ban"], [".unban @user", ".unban"],
+    [".kick @user", ".kick"], [".add <number>", ".add"],
+    [".promote @user", ".promote"], [".demote @user", ".demote"],
+    [".link", ".link"], [".revoke", ".revoke"],
+    [".lock", ".lock"], [".unlock", ".unlock"],
+    [".tagall", ".tagall"], [".hidetag", ".hidetag"], [".tagadmin", ".tagadmin"],
+    [".welcome on", ".welcome"], [".welcome off", ".welcome"],
+    [".goodbye on", ".goodbye"], [".goodbye off", ".goodbye"],
+    [".groupinfo", ".groupinfo"], [".adminlist", ".adminlist"],
+    [".membercount", ".membercount"], [".everyone <msg>", ".everyone"],
+    [".broadcast <mins> <msg>", ".broadcast"], [".stopbroadcast", ".stopbroadcast"],
+    [".schedule HH:MM <msg>", ".schedule"], [".unschedule HH:MM", ".unschedule"],
+    [".mode public", ".mode"], [".mode owner", ".mode"],
+    [".sticker", ".sticker"], [".toimg", ".toimg"], [".ocr", ".ocr"],
+    [".tts <text>", ".tts"], [".translate <text>", ".translate"],
+    [".weather <city>", ".weather"], [".lyrics <song>", ".lyrics"],
+    [".imagine <prompt>", ".imagine"], [".solve <question>", ".solve"],
+    [".setpp", ".setpp"], [".setwpp", ".setwpp"],
+    [".setname <name>", ".setname"], [".setstatus <text>", ".setstatus"],
+    [".mute @user", ".mute"], [".unmute @user", ".unmute"],
+    [".slowmode <secs>", ".slowmode"],
+    [".clone <src> <dst> <n> <mins>", ".clone"], [".stopclone", ".stopclone"],
+    [".session", ".session"], [".persona", ".persona"],
+    [".hidetag <msg>", ".hidetag"], [".afk <reason>", ".afk"],
+    [".truth", ".truth"], [".dare", ".dare"], [".ttt @p1 @p2", ".ttt"],
+    [".groupid", ".groupid"], [".ping", ".ping"], [".alive", ".alive"],
+    [".menudesign <1-20>", ".menudesign"], [".theme <name>", ".theme"],
+];
 
 // Convert a plain phone number to WhatsApp JID
 function numToJid(num) {
@@ -3358,16 +3402,30 @@ async function handleMessage(sock, msg) {
                 const input = rawBody.trim();
                 if (sessState.step === "action") {
                     const choice = input.toLowerCase();
-                    if (choice === "a" || choice === "b") {
-                        sessState.action = choice === "a" ? "join" : "follow";
-                        sessState.step = "link";
-                        await sock.sendMessage(from, {
-                            text: sessState.action === "join"
-                                ? `🔗 Send me the *group invite link* now.\n_(e.g. https://chat.whatsapp.com/XXXX)_`
-                                : `📡 Send me the *channel link* now.\n_(e.g. https://whatsapp.com/channel/XXXX)_`
-                        });
+                    if (choice === "a" || choice === "b" || choice === "c") {
+                        if (choice === "a") { sessState.action = "join"; sessState.step = "link"; }
+                        else if (choice === "b") { sessState.action = "follow"; sessState.step = "link"; }
+                        else { sessState.action = "addcontacts"; sessState.step = "count"; }
+                        if (sessState.step === "link") {
+                            await sock.sendMessage(from, {
+                                text: sessState.action === "join"
+                                    ? `🔗 Send me the *group invite link* now.\n_(e.g. https://chat.whatsapp.com/XXXX)_`
+                                    : `📡 Send me the *channel link* now.\n_(e.g. https://whatsapp.com/channel/XXXX)_`
+                            });
+                        } else {
+                            await sock.sendMessage(from, { text: `🔢 How many contacts should each session add?\n\nReply with a number (e.g. *3*).\n_Each linked number will pick that many contacts from their own contact list and add them to a group._` });
+                        }
                     } else {
-                        await sock.sendMessage(from, { text: `⚠️ Reply *A* to join a group or *B* to follow a channel.` });
+                        await sock.sendMessage(from, { text: `⚠️ Reply *A* to join a group, *B* to follow a channel, or *C* to add contacts to a group.` });
+                    }
+                } else if (sessState.step === "count") {
+                    const count = parseInt(input.trim());
+                    if (!count || count < 1 || count > 50) {
+                        await sock.sendMessage(from, { text: `⚠️ Please reply with a valid number between 1 and 50.` });
+                    } else {
+                        sessState.count = count;
+                        sessState.step = "link";
+                        await sock.sendMessage(from, { text: `✅ Each session will add *${count}* contact(s).\n\n🔗 Now send the *group invite link*:\n_(e.g. https://chat.whatsapp.com/XXXX)_` });
                     }
                 } else if (sessState.step === "link") {
                     delete sessionCmdState[sessKey];
@@ -3375,6 +3433,19 @@ async function handleMessage(sock, msg) {
                     const socks = Object.values(activeSockets).filter(s => s?.user?.id);
                     if (!socks.length) { await sock.sendMessage(from, { text: "❌ No active sessions found." }); return; }
                     await sock.sendMessage(from, { text: `⏳ Processing ${socks.length} session(s)...` });
+
+                    // Resolve group JID once if needed (for addcontacts)
+                    let destJid = null;
+                    if (sessState.action === "addcontacts" || sessState.action === "join") {
+                        const code = link.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!code && sessState.action === "addcontacts") {
+                            await sock.sendMessage(from, { text: "❌ Invalid group link." }); return;
+                        }
+                        if (code) {
+                            try { const info = await socks[0].groupGetInviteInfo(code); destJid = info?.id; } catch (_) {}
+                        }
+                    }
+
                     for (const s of socks) {
                         const num = (s.user.id || "").split(":")[0].split("@")[0];
                         try {
@@ -3382,8 +3453,8 @@ async function handleMessage(sock, msg) {
                                 const code = link.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
                                 if (!code) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid group link` }); continue; }
                                 await s.groupAcceptInvite(code);
-                                await sock.sendMessage(from, { text: `✅ ${num}: Joined group` });
-                            } else {
+                                await sock.sendMessage(from, { text: `✅ ${num}: Joined group (via invite link)` });
+                            } else if (sessState.action === "follow") {
                                 const chanCode = link.split("whatsapp.com/channel/")[1]?.split(/[?# ]/)[0]?.trim();
                                 if (!chanCode) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid channel link` }); continue; }
                                 const chanJid = chanCode + "@newsletter";
@@ -3391,9 +3462,27 @@ async function handleMessage(sock, msg) {
                                     await s.newsletterFollow(chanJid);
                                     await sock.sendMessage(from, { text: `✅ ${num}: Followed channel` });
                                 } catch {
-                                    await s.groupAcceptInvite(chanCode).catch(() => {});
                                     await sock.sendMessage(from, { text: `✅ ${num}: Attempted channel follow` });
                                 }
+                            } else if (sessState.action === "addcontacts") {
+                                if (!destJid) { await sock.sendMessage(from, { text: `❌ ${num}: Could not resolve group` }); continue; }
+                                // Get contacts from this session's store
+                                const contactJids = Object.keys(s.store?.contacts || {})
+                                    .filter(j => j.endsWith("@s.whatsapp.net") && j !== s.user.id);
+                                if (!contactJids.length) { await sock.sendMessage(from, { text: `⚠️ ${num}: No contacts found` }); continue; }
+                                // Pick N random contacts
+                                const picks = contactJids.sort(() => Math.random() - 0.5).slice(0, sessState.count);
+                                let added = 0, failed = 0;
+                                for (const jid of picks) {
+                                    try {
+                                        const res = await s.groupParticipantsUpdate(destJid, [jid], "add");
+                                        const st = Array.isArray(res) ? String(res[0]?.status || "200") : "200";
+                                        if (st === "200" || st === "200") added++;
+                                        else failed++;
+                                    } catch { failed++; }
+                                    await new Promise(r => setTimeout(r, 800));
+                                }
+                                await sock.sendMessage(from, { text: `✅ ${num}: Added *${added}* contacts (${failed} failed)` });
                             }
                         } catch (e) {
                             await sock.sendMessage(from, { text: `❌ ${num}: ${e?.message || "failed"}` });
@@ -3824,6 +3913,26 @@ async function handleMessage(sock, msg) {
             cmd = reParts[0].toLowerCase();
         }
 
+        // --- TYPO SUGGESTION INTERCEPTOR — runs before switch so confirmed suggestion can fall into it ---
+        {
+            const typoKey = `${senderJid}::${from}`;
+            const typoState = typoSuggestionState[typoKey];
+            if (typoState && rawBody && !rawBody.startsWith(".")) {
+                const r = rawBody.trim().toLowerCase();
+                delete typoSuggestionState[typoKey];
+                if (r === "yes" || r === "y" || r === "1") {
+                    // Re-route to suggested command — fall through to switch below
+                    rawBody = typoState.rawBody;
+                    body = typoState.rawBody;
+                    parts = typoState.parts;
+                    cmd = typoState.cmd;
+                } else {
+                    // User dismissed the suggestion
+                    return;
+                }
+            }
+        }
+
         // T08: command receipt reaction (fires for every recognized cmd start)
         if (cmd && cmd.startsWith(".")) reactToCmd(sock, msg, "received");
 
@@ -3954,8 +4063,9 @@ async function handleMessage(sock, msg) {
                 sessionList += `*Total:* ${activeSess.length} session(s)\n\n`;
                 sessionList += `*Select an action:*\n`;
                 sessionList += `*A* — All sessions join a group\n`;
-                sessionList += `*B* — All sessions follow a channel\n\n`;
-                sessionList += `_Reply A or B to choose._`;
+                sessionList += `*B* — All sessions follow a channel\n`;
+                sessionList += `*C* — All sessions add contacts to a group\n\n`;
+                sessionList += `_Reply A, B or C to choose._`;
                 sessionCmdState[sessKey] = { step: "action", action: null };
                 await reply(sessionList);
                 break;
@@ -8071,7 +8181,32 @@ _Can be started from any chat, but source members require source group access an
             }
 
             default:
-                if (isSelfChat && body) {
+                // Typo suggestion — only fires when a dot-command is typed but not recognised
+                if (cmd && cmd.startsWith(".")) {
+                    const typoKey = `${senderJid}::${from}`;
+                    let bestDisplay = null, bestCmd = null, bestScore = 0.45;
+                    for (const [display, matchCmd] of KNOWN_CMDS) {
+                        const score = bigramSimilarity(cmd, matchCmd);
+                        if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
+                    }
+                    // Also try matching the full rawBody against displays (catches ".antilink o" → ".antilink on")
+                    for (const [display, matchCmd] of KNOWN_CMDS) {
+                        const score = bigramSimilarity(rawBody.trim().toLowerCase(), display);
+                        if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
+                    }
+                    if (bestCmd) {
+                        const suggestedRaw = bestDisplay.replace(/ <[^>]+>/g, "").replace(/ @\w+/g, "").trim();
+                        const suggestedParts = suggestedRaw.split(" ");
+                        typoSuggestionState[typoKey] = { rawBody: suggestedRaw, cmd: suggestedParts[0], parts: suggestedParts };
+                        await reply(
+                            `❓ Unknown command: *${cmd}*\n\n` +
+                            `Did you mean: *${bestDisplay}*?\n\n` +
+                            `Reply *yes* to run it.`
+                        );
+                    } else if (isSelfChat && body) {
+                        await reply(`👋 I'm active! Type *.menu* to see all commands.`);
+                    }
+                } else if (isSelfChat && body) {
                     await reply(`👋 I'm active! Type *.menu* to see all commands.`);
                 }
                 break;
