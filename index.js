@@ -76,7 +76,7 @@ if (!TELEGRAM_TOKEN) {
     );
 }
 const telBot = new Telegraf(TELEGRAM_TOKEN);
-const MAX_RETRIES = 5;
+const MAX_RETRIES = 30;
 const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = path.join(__dirname, "group_settings.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
@@ -9026,8 +9026,10 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 return;
             }
 
-            console.log(`User ${userId}: reconnecting (attempt ${retryCounts[userId]})...`);
-            await delay(4000);
+            // Exponential backoff: 4s → 8s → 16s → 32s → 60s (cap at 60s)
+            const backoffMs = Math.min(4000 * Math.pow(2, retryCounts[userId] - 1), 60000);
+            console.log(`User ${userId}: reconnecting (attempt ${retryCounts[userId]}/${MAX_RETRIES}) in ${backoffMs / 1000}s...`);
+            await delay(backoffMs);
             startBot(userId, phoneNumber, ctx, true);
         }
     });
