@@ -3213,9 +3213,8 @@ function buildOmegaTerminal(body) {
 async function sendInteractiveButtons(sock, jid, quotedMsg, bodyText, buttons) {
     try {
         await sock.sendMessage(jid, {
-            interactiveMessage: {
-                header: { title: "", hasMediaAttachment: false },
-                body: { text: bodyText },
+            interactive: {
+                body:   { text: bodyText },
                 footer: { text: "— EVENTIDE OMEGA · 👁" },
                 nativeFlowMessage: {
                     buttons: buttons.map(b => ({
@@ -3335,22 +3334,23 @@ async function sendPersonaMenuNav(sock, from, msg, isDev, botJid) {
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
     try {
         await sock.sendMessage(jid, {
-            listMessage: {
-                title: "EVENTIDE OMEGA",
-                text: bodyText,
-                footer: "— EVENTIDE OMEGA · 👁",
-                buttonText: buttonLabel || "TAP TO SELECT",
-                listType: 1,
-                sections: [{
-                    title: "Select an action",
-                    rows: rows.map(r => ({ rowId: r.id, title: r.title, description: r.desc || "" }))
-                }]
+            interactive: {
+                body:   { text: bodyText },
+                footer: { text: "— EVENTIDE OMEGA · 👁" },
+                listMessage: {
+                    title: "EVENTIDE OMEGA",
+                    sections: [{
+                        title: "Select an action",
+                        rows: rows.map(r => ({ id: r.id, title: r.title, description: r.desc || "" }))
+                    }],
+                    buttonText: buttonLabel || "TAP TO SELECT"
+                }
             }
         }, quotedMsg ? { quoted: quotedMsg } : {});
     } catch (_) {
-        const opts = rows.map(r => `  *${r.id.split("_")[1]?.toUpperCase() || "·"}* — ${r.title}${r.desc ? `\n     _${r.desc}_` : ""}`).join("\n");
+        const opts = rows.map((r, i) => `*${String.fromCharCode(65 + i)}.* ${r.title}${r.desc ? `\n   _${r.desc}_` : ""}`).join("\n");
         await sock.sendMessage(jid, {
-            text: bodyText + "\n\n" + opts + "\n\n_Reply A, B or C to choose._"
+            text: bodyText + "\n\n" + opts + "\n\n_Tap a letter to choose._"
         }, quotedMsg ? { quoted: quotedMsg } : {});
     }
 }
