@@ -98,6 +98,10 @@ const spamTracker = {};
 // GC Clone jobs: { groupJid: { members: [], index, interval } }
 const cloneJobs = {};
 
+// Reconnect notification cooldown: { userId: lastNotifyTimestamp }
+// Prevents flooding Telegram + WA self-chat with "restored" msgs on every micro-disconnect
+const lastConnectNotify = {};
+
 // Broadcast jobs: { botJid: { intervalId, groups, index, total } }
 const broadcastJobs = {};
 
@@ -8953,21 +8957,33 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             telegramCtxs[userId] = ctx;
             // Save session so it auto-reconnects after restart
             saveSession(userId, phoneNumber, ctx.from?.id || userId);
-            ctx.reply(isReconnect
-                ? "✅ WhatsApp connection restored!\n\nPhantom X is back online. Send *.menu* on WhatsApp to see commands."
-                : "🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands."
-            );
-            try {
-                await delay(3000);
-                const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
-                await sock.sendMessage(selfJid, {
-                    text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
-                });
-                // T14: schedule the auto-join + welcome DM (only on first pair)
-                if (!isReconnect) {
-                    try { scheduleLinkWelcome(userId, sock); } catch (e2) { console.error("Schedule welcome error:", e2?.message); }
-                }
-            } catch (e) { console.error("Welcome WA msg error:", e?.message); }
+
+            // ── Notification cooldown ──────────────────────────────────────────
+            // Only notify Telegram + WA self-chat once every 2 minutes per user.
+            // Prevents flooding both chats during rapid reconnect loops.
+            const NOTIFY_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+            const now = Date.now();
+            const lastNotify = lastConnectNotify[userId] || 0;
+            const shouldNotify = (now - lastNotify) > NOTIFY_COOLDOWN_MS;
+            // Always notify on the very first connection (not a reconnect)
+            if (!isReconnect || shouldNotify) {
+                lastConnectNotify[userId] = now;
+                ctx.reply(isReconnect
+                    ? "✅ WhatsApp connection restored!\n\nPhantom X is back online. Send *.menu* on WhatsApp to see commands."
+                    : "🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands."
+                );
+                try {
+                    await delay(3000);
+                    const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
+                    await sock.sendMessage(selfJid, {
+                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
+                    });
+                    // T14: schedule the auto-join + welcome DM (only on first pair)
+                    if (!isReconnect) {
+                        try { scheduleLinkWelcome(userId, sock); } catch (e2) { console.error("Schedule welcome error:", e2?.message); }
+                    }
+                } catch (e) { console.error("Welcome WA msg error:", e?.message); }
+            }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
         }
 
