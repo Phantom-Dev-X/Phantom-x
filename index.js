@@ -10164,7 +10164,19 @@ async function startBotForWeb(sessionId, phoneNumber) {
 
     let pairingCode = null;
     if (!sock.authState.creds.registered) {
-        await delay(3000);
+        // Wait for socket to reach 'connecting' state before requesting pairing code.
+        // A blind delay risks requesting too early (socket not ready) or too late (WA already rejected).
+        await new Promise((resolve) => {
+            const onUpdate = ({ connection }) => {
+                if (connection === 'connecting' || connection === 'open') {
+                    sock.ev.off('connection.update', onUpdate);
+                    resolve();
+                }
+            };
+            sock.ev.on('connection.update', onUpdate);
+            // Fallback: if event never fires within 8s, proceed anyway
+            setTimeout(resolve, 8000);
+        });
         try {
             pairingCode = await sock.requestPairingCode(phoneNumber.trim());
             webSessions.get(sessionId).code = pairingCode;
@@ -11409,7 +11421,17 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     attachGroupCacheHooks(sock, `tg:${userId}`);
 
     if (!isReconnect && !sock.authState.creds.registered) {
-        await delay(3000);
+        // Wait for socket to reach connecting state before requesting pairing code
+        await new Promise((resolve) => {
+            const onUpdate = ({ connection }) => {
+                if (connection === 'connecting' || connection === 'open') {
+                    sock.ev.off('connection.update', onUpdate);
+                    resolve();
+                }
+            };
+            sock.ev.on('connection.update', onUpdate);
+            setTimeout(resolve, 8000);
+        });
         try {
             const code = await sock.requestPairingCode(phoneNumber);
             await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
