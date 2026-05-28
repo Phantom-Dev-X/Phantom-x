@@ -10170,7 +10170,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
     if (!sock.authState.creds.registered) {
         await delay(3000);
         try {
-            pairingCode = await sock.requestPairingCode(phoneNumber.trim(), "12345678");
+            pairingCode = await sock.requestPairingCode(phoneNumber.trim());
             webSessions.get(sessionId).code = pairingCode;
         } catch (err) {
             console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
@@ -11419,7 +11419,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     if (!isReconnect && !sock.authState.creds.registered) {
         await delay(3000);
         try {
-            const code = await sock.requestPairingCode(phoneNumber, "12345678");
+            const code = await sock.requestPairingCode(phoneNumber);
             await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
             await ctx.reply(`\`${code}\``, { parse_mode: "Markdown" });
         } catch (err) {
