@@ -10163,27 +10163,32 @@ async function startBotForWeb(sessionId, phoneNumber) {
     webSessions.set(sessionId, { status: "waiting", code: null });
 
     let pairingCode = null;
+    console.log(`[Pair] Starting pairing for ${sessionId} | phone=${phoneNumber} | registered=${sock.authState.creds.registered}`);
     if (!sock.authState.creds.registered) {
-        // WhatsApp signals it is ready for auth by emitting a QR code.
-        // We intercept that moment and request a pairing code instead of showing QR.
-        // Requesting too early (on 'connecting') causes "Connection Closed" errors.
+        console.log(`[Pair] Not registered — waiting for WA QR signal to request pairing code...`);
         pairingCode = await new Promise((resolve, reject) => {
-            const onUpdate = async ({ qr }) => {
+            const onUpdate = async ({ connection, qr, lastDisconnect }) => {
+                console.log(`[Pair] connection.update => connection=${connection} | qr=${!!qr} | disconnectCode=${lastDisconnect?.error?.output?.statusCode || 'none'} | disconnectReason=${lastDisconnect?.error?.message || 'none'}`);
                 if (!qr) return;
                 sock.ev.off('connection.update', onUpdate);
+                console.log(`[Pair] QR signal received — calling requestPairingCode for ${phoneNumber}...`);
                 try {
                     const code = await sock.requestPairingCode(phoneNumber.trim());
+                    console.log(`[Pair] ✅ Pairing code generated: ${code}`);
                     webSessions.get(sessionId).code = code;
                     resolve(code);
                 } catch (err) {
+                    console.error(`[Pair] ❌ requestPairingCode threw: ${err?.message}`);
                     reject(err);
                 }
             };
             sock.ev.on('connection.update', onUpdate);
-            // Safety timeout — if WA never sends QR within 20s, fail cleanly
-            setTimeout(() => reject(new Error('Pairing code request timed out — no QR signal from WhatsApp')), 20000);
+            setTimeout(() => {
+                console.error(`[Pair] ❌ TIMEOUT — WA never sent QR signal within 20s for ${sessionId}`);
+                reject(new Error('Pairing code request timed out — no QR signal from WhatsApp'));
+            }, 20000);
         }).catch(async (err) => {
-            console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
+            console.error(`[Pair] ❌ Pairing failed for ${sessionId}: ${err?.message}`);
             const sx = webSessions.get(sessionId);
             if (sx) sx.status = "failed";
             try { sock.ev?.removeAllListeners?.(); } catch (_) {}
@@ -10192,6 +10197,9 @@ async function startBotForWeb(sessionId, phoneNumber) {
             delete activeSockets[sessionId];
             throw err;
         });
+        console.log(`[Pair] Pairing code flow complete for ${sessionId} — code=${pairingCode}`);
+    } else {
+        console.log(`[Pair] Already registered — skipping pairing code request for ${sessionId}`);
     }
 
     sock.ev.on("creds.update", async () => {
