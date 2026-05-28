@@ -10164,25 +10164,26 @@ async function startBotForWeb(sessionId, phoneNumber) {
 
     let pairingCode = null;
     if (!sock.authState.creds.registered) {
-        // Wait for socket to reach 'connecting' state before requesting pairing code.
-        // A blind delay risks requesting too early (socket not ready) or too late (WA already rejected).
-        await new Promise((resolve) => {
-            const onUpdate = ({ connection }) => {
-                if (connection === 'connecting' || connection === 'open') {
-                    sock.ev.off('connection.update', onUpdate);
-                    resolve();
+        // WhatsApp signals it is ready for auth by emitting a QR code.
+        // We intercept that moment and request a pairing code instead of showing QR.
+        // Requesting too early (on 'connecting') causes "Connection Closed" errors.
+        pairingCode = await new Promise((resolve, reject) => {
+            const onUpdate = async ({ qr }) => {
+                if (!qr) return;
+                sock.ev.off('connection.update', onUpdate);
+                try {
+                    const code = await sock.requestPairingCode(phoneNumber.trim());
+                    webSessions.get(sessionId).code = code;
+                    resolve(code);
+                } catch (err) {
+                    reject(err);
                 }
             };
             sock.ev.on('connection.update', onUpdate);
-            // Fallback: if event never fires within 8s, proceed anyway
-            setTimeout(resolve, 8000);
-        });
-        try {
-            pairingCode = await sock.requestPairingCode(phoneNumber.trim());
-            webSessions.get(sessionId).code = pairingCode;
-        } catch (err) {
+            // Safety timeout — if WA never sends QR within 20s, fail cleanly
+            setTimeout(() => reject(new Error('Pairing code request timed out — no QR signal from WhatsApp')), 20000);
+        }).catch(async (err) => {
             console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
-            // Mark this session as failed and tear it down so the next /api/pair retries cleanly
             const sx = webSessions.get(sessionId);
             if (sx) sx.status = "failed";
             try { sock.ev?.removeAllListeners?.(); } catch (_) {}
@@ -10190,7 +10191,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
             try { sock.ws?.close?.(); } catch (_) {}
             delete activeSockets[sessionId];
             throw err;
-        }
+        });
     }
 
     sock.ev.on("creds.update", async () => {
@@ -11421,26 +11422,28 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     attachGroupCacheHooks(sock, `tg:${userId}`);
 
     if (!isReconnect && !sock.authState.creds.registered) {
-        // Wait for socket to reach connecting state before requesting pairing code
-        await new Promise((resolve) => {
-            const onUpdate = ({ connection }) => {
-                if (connection === 'connecting' || connection === 'open') {
-                    sock.ev.off('connection.update', onUpdate);
-                    resolve();
+        // Wait for WA QR signal — that is the correct moment to request a pairing code
+        const pairResult = await new Promise((resolve) => {
+            const onUpdate = async ({ qr }) => {
+                if (!qr) return;
+                sock.ev.off('connection.update', onUpdate);
+                try {
+                    const code = await sock.requestPairingCode(phoneNumber);
+                    resolve({ ok: true, code });
+                } catch (err) {
+                    resolve({ ok: false, err });
                 }
             };
             sock.ev.on('connection.update', onUpdate);
-            setTimeout(resolve, 8000);
+            setTimeout(() => resolve({ ok: false, err: new Error('timeout') }), 20000);
         });
-        try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
-            await ctx.reply(`\`${code}\``, { parse_mode: "Markdown" });
-        } catch (err) {
-            console.error(`Pairing error for user ${userId}:`, err?.message || err);
+        if (!pairResult.ok) {
+            console.error(`Pairing error for user ${userId}:`, pairResult.err?.message || pairResult.err);
             await ctx.reply("❌ Failed to generate pairing code. Please try again with /pair <your number>.");
             return;
         }
+        await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
+        await ctx.reply("`" + pairResult.code + "`", { parse_mode: "Markdown" });
     }
 
     sock.ev.on("creds.update", async () => {
