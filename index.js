@@ -183,19 +183,24 @@ body: ${String(info.body || '').slice(0, 120)}`
 
 // Per-user state
 const activeSockets = {};
-async function kickSession(userId) {
+async function kickSession(userId, { wipeAuth = false } = {}) {
     const sock = activeSockets[userId];
     if (sock) {
-        console.log(`[ConflictFix] Kicking active session for ${userId}`);
+        console.log(`[ConflictFix] Kicking active socket for ${userId}`);
         try { sock.ev.removeAllListeners(); } catch (_) {}
         try { sock.end(new Error("terminated_for_new_pairing")); } catch (_) {}
         try { if (sock.ws) sock.ws.close(); } catch (_) {}
         delete activeSockets[userId];
     }
-    const authDir = getAuthDir(userId);
-    if (fs.existsSync(authDir)) {
-        console.log(`[ConflictFix] Wiping auth folder for ${userId}`);
-        fs.rmSync(authDir, { recursive: true, force: true });
+    // Only wipe auth when explicitly requested (logout/badSession).
+    // Do NOT wipe on reconnect — doing so destroys the pairing state that
+    // WhatsApp needs to validate the code the user just entered.
+    if (wipeAuth) {
+        const authDir = getAuthDir(userId);
+        if (fs.existsSync(authDir)) {
+            console.log(`[ConflictFix] Wiping auth folder for ${userId}`);
+            fs.rmSync(authDir, { recursive: true, force: true });
+        }
     }
 }
 const retryCounts = {};
@@ -10120,8 +10125,7 @@ async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
 // Start a bot session initiated from the web pairing page.
 // Returns the pairing code string, or throws on failure.
 async function startBotForWeb(sessionId, phoneNumber) {
-    await kickSession(sessionId);
-    await kickSession(sessionId);
+    await kickSession(sessionId);  // kick socket only, preserve auth
     if (isSocketLive(activeSockets[sessionId])) {
         debugLog(`[WebStart] ${sessionId} already live — skipping duplicate start`);
         return webSessions.get(sessionId)?.code || null;
@@ -10184,9 +10188,9 @@ async function startBotForWeb(sessionId, phoneNumber) {
             };
             sock.ev.on('connection.update', onUpdate);
             setTimeout(() => {
-                console.error(`[Pair] ❌ TIMEOUT — WA never sent QR signal within 20s for ${sessionId}`);
+                console.error(`[Pair] ❌ TIMEOUT — WA never sent QR signal within 120s for ${sessionId}`);
                 reject(new Error('Pairing code request timed out — no QR signal from WhatsApp'));
-            }, 20000);
+            }, 120000);
         }).catch(async (err) => {
             console.error(`[Pair] ❌ Pairing failed for ${sessionId}: ${err?.message}`);
             const sx = webSessions.get(sessionId);
@@ -10277,7 +10281,26 @@ async function startBotForWeb(sessionId, phoneNumber) {
                 clearAuthState(sessionId);
                 return;
             }
-            // Auto-reconnect
+            // code=408 = QR/pairing timeout — WA closed because nobody entered the code.
+            // Do NOT auto-reconnect in this case: it would just generate another code
+            // that nobody asked for, loop forever, and spam the logs.
+            // The user will hit "Generate" again on the pair page when they are ready.
+            if (code === 408) {
+                console.log(`[WebConn] session=${sessionId} closed with 408 (QR timeout) — not reconnecting. User must re-request pairing.`);
+                clearAuthState(sessionId);
+                retryCounts[sessionId] = 0;
+                return;
+            }
+            // Only auto-reconnect sessions that were previously fully connected.
+            // Never reconnect a session that was still in the pairing/waiting stage.
+            const wasConnected = session?.status === 'connected';
+            if (!wasConnected) {
+                console.log(`[WebConn] session=${sessionId} closed before connecting (code=${code||'?'}) — not reconnecting.`);
+                clearAuthState(sessionId);
+                retryCounts[sessionId] = 0;
+                return;
+            }
+            // Auto-reconnect previously connected sessions
             const retries = (retryCounts[sessionId] || 0) + 1;
             retryCounts[sessionId] = retries;
             if (retries <= MAX_RETRIES) {
@@ -10634,14 +10657,15 @@ function startKeepAliveServer(port) {
                     }));
                 }
 
-                // 2) Otherwise it's a stale/dead socket — tear it down and force fresh pair.
-                //    `force=true` on body wipes auth state so we always get a NEW 8-char code.
-                let forceFresh = !!body.force;
-                // If the stored auth says "registered" but socket is dead, the device was
-                // most likely unlinked from WhatsApp → auth is useless → wipe & re-pair.
-                if (liveSock || webSessions.has(sessionId)) {
-                    forceFresh = true;
-                }
+                // 2) Otherwise it's a stale/dead socket — tear it down cleanly.
+                //    Only wipe auth if explicitly forced via body.force=true OR the socket
+                //    was already connected (meaning it was previously linked and is now dead —
+                //    implying the device was unlinked from WA side).
+                //    Do NOT wipe auth just because a session object exists — that destroys
+                //    a pending pairing code the user hasn't entered yet.
+                const wasConnected = webSessions.get(sessionId)?.status === "connected";
+                const forceFresh = !!body.force || wasConnected;
+                console.log(`[Pair] teardown for ${sessionId} | wipeAuth=${forceFresh} | wasConnected=${wasConnected} | bodyForce=${!!body.force}`);
                 await tearDownWebSession(sessionId, { wipeAuth: forceFresh });
 
                 // 3) Start a new pairing session.
@@ -11400,7 +11424,6 @@ function migrateLegacySessionDataIfNeeded() {
 // --- WHATSAPP ENGINE ---
 async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     if (!isReconnect) await kickSession(userId);
-    if (!isReconnect) await kickSession(userId);
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
     const { version } = await fetchLatestBaileysVersion();
     const socketMsgStore = createMessageStore();
@@ -11443,7 +11466,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 }
             };
             sock.ev.on('connection.update', onUpdate);
-            setTimeout(() => resolve({ ok: false, err: new Error('timeout') }), 20000);
+            setTimeout(() => resolve({ ok: false, err: new Error('timeout') }), 120000);
         });
         if (!pairResult.ok) {
             console.error(`Pairing error for user ${userId}:`, pairResult.err?.message || pairResult.err);

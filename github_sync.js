@@ -282,27 +282,59 @@ function applySnapshot(snapshot) {
 async function restoreFromRemote() {
     if (!hasRequiredConfig()) {
         warnMissingConfig();
-        return { ok: false, restored: false, reason: 'Telegram backup is not configured (missing TELEGRAM_TOKEN and/or BACKUP_CHANNEL_ID).' };
+        return { ok: false, restored: false, reason: 'not configured' };
     }
 
+    const { backupChannelId } = getConfig();
+
     try {
-        const { backupChannelId } = getConfig();
         const chat = await telegramCall('getChat', { chat_id: backupChannelId });
         const pinned = chat?.pinned_message;
+
+        // ── No pinned message or pinned message is not a valid backup ──────────
+        // This happens when: pin was deleted, channel was reset, or first-ever deploy.
+        // In all these cases we start fresh — do NOT crash.
         if (!pinned) {
-            throw new Error('No pinned message found in BACKUP_CHANNEL_ID. Upload a backup first so startup restore can find it.');
+            console.log('[Telegram Backup] No pinned message found — starting fresh (no restore).');
+            try {
+                await telegramCall('sendMessage', {
+                    chat_id: backupChannelId,
+                    text: `ℹ️ Phantom-X started fresh — no pinned backup found. A new backup will be created shortly.`,
+                });
+            } catch (_) {}
+            return { ok: true, restored: false, reason: 'no pinned message — fresh start' };
         }
+
         if (!pinned.document) {
-            throw new Error('Pinned message exists, but it does not contain a backup document. Pin the latest backup document message in the channel.');
+            console.log('[Telegram Backup] Pinned message has no document — starting fresh.');
+            try {
+                await telegramCall('sendMessage', {
+                    chat_id: backupChannelId,
+                    text: `ℹ️ Pinned message is not a backup document — starting fresh. A new backup will be created shortly.`,
+                });
+            } catch (_) {}
+            return { ok: true, restored: false, reason: 'pinned message is not a document — fresh start' };
         }
+
         const caption = String(pinned.caption || '');
         if (!caption.includes(BACKUP_CAPTION_TAG)) {
-            throw new Error(`Pinned document is not a Phantom-X backup (missing caption tag ${BACKUP_CAPTION_TAG}).`);
+            console.log('[Telegram Backup] Pinned document is not a Phantom-X backup — starting fresh.');
+            try {
+                await telegramCall('sendMessage', {
+                    chat_id: backupChannelId,
+                    text: `ℹ️ Pinned document is not a recognised Phantom-X backup — starting fresh. A new backup will be created shortly.`,
+                });
+            } catch (_) {}
+            return { ok: true, restored: false, reason: 'pinned document missing backup tag — fresh start' };
         }
+
         const fileId = pinned.document.file_id;
         if (!fileId) {
-            throw new Error('Pinned backup document has no file_id. Telegram returned an unexpected message payload.');
+            console.log('[Telegram Backup] Pinned backup document has no file_id — starting fresh.');
+            return { ok: true, restored: false, reason: 'no file_id on pinned document — fresh start' };
         }
+
+        // ── Valid backup found — restore it ────────────────────────────────────
         const filePath = await telegramGetFilePath(fileId);
         const fileBuf = await telegramDownloadFile(filePath);
         const snapshot = decodeSnapshot(fileBuf);
@@ -317,16 +349,17 @@ async function restoreFromRemote() {
             });
         } catch (_) {}
         return { ok: true, restored: true, fileCount: count };
+
     } catch (e) {
+        // Network/API error — log and continue fresh, do NOT crash the bot
         const reason = e?.message || String(e);
+        console.error(`[Telegram Backup] Restore error (starting fresh): ${reason}`);
         try {
-            const { backupChannelId } = getConfig();
             await telegramCall('sendMessage', {
                 chat_id: backupChannelId,
-                text: `❌ Phantom-X restore failed\nReason: ${String(reason).slice(0, 3000)}`,
+                text: `⚠️ Phantom-X restore encountered an error — starting fresh.\nReason: ${String(reason).slice(0, 2000)}`,
             });
         } catch (_) {}
-        await notifyFailure('restore', reason);
         return { ok: false, restored: false, reason };
     }
 }
