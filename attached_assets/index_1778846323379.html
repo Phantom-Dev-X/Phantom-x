@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eventide Omega · Login</title>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        :root{
+            --bg:#06090f;--bg2:#0a0f1a;--bg3:#0d1424;
+            --card:#111827;--card2:#151f32;--input:#0f1729;
+            --border:#1a2540;--border2:#243352;
+            --accent:#06b6d4;--accent2:#22d3ee;--accent3:#67e8f9;
+            --glow:rgba(6,182,212,0.35);--glow2:rgba(6,182,212,0.15);
+            --success:#10b981;--error:#ef4444;--warn:#f59e0b;
+            --text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--white:#fff;
+        }
+        html{scroll-behavior:smooth}
+        body{font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+        
+        .navbar{position:fixed;top:0;left:0;right:0;z-index:100;padding:16px 32px;display:flex;align-items:center;justify-content:space-between;background:rgba(6,9,15,0.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+        .nav-brand{display:flex;align-items:center;gap:12px;text-decoration:none}
+        .nav-logo{width:36px;height:36px}
+        .nav-title{font-size:18px;font-weight:800;letter-spacing:1.5px;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .nav-links{display:flex;gap:28px;align-items:center}
+        .nav-links a{color:var(--text2);text-decoration:none;font-size:14px;font-weight:500;transition:color .2s}
+        .nav-links a:hover{color:var(--accent2)}
+        .nav-cta{padding:8px 22px;background:linear-gradient(135deg,var(--accent),#0891b2);color:var(--bg);font-weight:700;border-radius:10px;font-size:13px;text-decoration:none;transition:all .3s;border:none;cursor:pointer}
+        .nav-cta:hover{box-shadow:0 0 24px var(--glow);transform:translateY(-1px)}
+
+        .hero{min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;padding:100px 24px 60px}
+        .hero-bg{position:absolute;inset:0;overflow:hidden}
+        .hero-bg::before{content:'';position:absolute;top:-40%;left:-20%;width:80%;height:80%;background:radial-gradient(circle,rgba(6,182,212,0.07) 0%,transparent 70%);animation:drift1 25s ease-in-out infinite}
+        .hero-bg::after{content:'';position:absolute;bottom:-30%;right:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(6,182,212,0.05) 0%,transparent 70%);animation:drift2 20s ease-in-out infinite}
+        @keyframes drift1{0%,100%{transform:translate(0,0)}50%{transform:translate(5%,3%)}}
+        @keyframes drift2{0%,100%{transform:translate(0,0)}50%{transform:translate(-4%,-2%)}}
+        .grid-bg{position:absolute;inset:0;background-image:linear-gradient(rgba(6,182,212,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(6,182,212,0.03) 1px,transparent 1px);background-size:60px 60px;mask-image:radial-gradient(ellipse 80% 60% at 50% 40%,#000 20%,transparent 100%)}
+        
+        .hero-content{position:relative;z-index:2;display:flex;gap:80px;align-items:center;max-width:1200px;width:100%;flex-wrap:wrap;justify-content:center}
+        .hero-left{flex:1;min-width:320px;max-width:560px}
+        .hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;background:var(--glow2);border:1px solid var(--border2);border-radius:40px;font-size:12px;color:var(--accent2);font-weight:600;letter-spacing:1px;margin-bottom:24px}
+        .hero-badge .dot{width:6px;height:6px;background:var(--accent);border-radius:50%;animation:blink 2s ease-in-out infinite}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+        .hero-title{font-size:clamp(36px,5vw,56px);font-weight:900;line-height:1.1;margin-bottom:16px}
+        .hero-title .line1{color:var(--text)}
+        .hero-title .line2{background:linear-gradient(135deg,var(--accent2),var(--accent),#0891b2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .hero-desc{font-size:16px;color:var(--text2);line-height:1.7;margin-bottom:32px;max-width:460px}
+        .hero-features{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:36px}
+        .hero-feat{display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--card);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--text2)}
+        .hero-feat svg{width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2}
+        .hero-stats{display:flex;gap:40px}
+        .hero-stat-num{font-size:28px;font-weight:900;color:var(--accent2)}
+        .hero-stat-label{font-size:12px;color:var(--text3);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
+
+        .hero-right{flex:0 0 420px;min-width:0}
+        .login-card{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:36px 32px;position:relative;overflow:hidden;box-shadow:0 0 80px rgba(6,182,212,0.06),0 25px 50px rgba(0,0,0,0.4)}
+        .login-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:shimmer 3s ease-in-out infinite}
+        @keyframes shimmer{0%,100%{opacity:.3}50%{opacity:1}}
+        .login-header{text-align:center;margin-bottom:28px}
+        .login-icon{width:64px;height:64px;margin:0 auto 16px;background:var(--glow2);border:1px solid var(--border2);border-radius:20px;display:flex;align-items:center;justify-content:center;animation:iconFloat 4s ease-in-out infinite}
+        @keyframes iconFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+        .login-icon svg{width:32px;height:32px;stroke:var(--accent2);fill:none;stroke-width:1.5}
+        .login-title{font-size:22px;font-weight:800;margin-bottom:4px}
+        .login-sub{font-size:13px;color:var(--text3)}
+
+        .login-tabs{display:flex;gap:4px;background:var(--input);border-radius:12px;padding:4px;margin-bottom:24px}
+        .login-tab{flex:1;padding:10px;text-align:center;font-size:13px;font-weight:600;color:var(--text3);border-radius:9px;cursor:pointer;transition:all .3s;border:none;background:none}
+        .login-tab.active{background:var(--accent);color:var(--bg);box-shadow:0 2px 12px var(--glow)}
+
+        .form-group{margin-bottom:18px}
+        .form-label{display:block;font-size:12px;font-weight:600;color:var(--text3);letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px}
+        .input-wrap{display:flex;align-items:center;background:var(--input);border:1.5px solid var(--border);border-radius:12px;padding:0 14px;transition:all .3s}
+        .input-wrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 4px var(--glow2)}
+        .input-wrap .ico{width:18px;height:18px;stroke:var(--text3);fill:none;stroke-width:2;margin-right:10px;flex-shrink:0}
+        .input-wrap input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:15px;padding:13px 0;font-family:inherit}
+        .input-wrap input::placeholder{color:#3b4a6b}
+        .btn{width:100%;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;transition:all .3s;position:relative;overflow:hidden;letter-spacing:.5px}
+        .btn-primary{background:linear-gradient(135deg,var(--accent),#0891b2);color:var(--bg);box-shadow:0 4px 20px var(--glow)}
+        .btn-primary:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 30px var(--glow)}
+        .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+        .spinner{display:inline-block;width:18px;height:18px;border:2.5px solid rgba(0,0,0,.2);border-top-color:var(--bg);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+        @keyframes spin{to{transform:rotate(360deg)}}
+
+        .error-msg{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--error);margin-bottom:14px;display:none}
+        .login-footer{text-align:center;margin-top:20px;font-size:12px;color:var(--text3)}
+        .login-footer a{color:var(--accent2);text-decoration:none}
+
+        .login-section{display:none;animation:fadeIn .4s ease}
+        .login-section.active{display:block}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+        .code-display{text-align:center;margin:20px 0}
+        .code-box{display:inline-flex;gap:5px;padding:18px 24px;background:var(--input);border:2px solid var(--accent);border-radius:16px;box-shadow:0 0 40px var(--glow)}
+        .code-char{font-family:'Courier New',monospace;font-size:32px;font-weight:900;color:var(--accent2);min-width:24px;text-align:center;animation:charPop .4s ease backwards}
+        .code-char.sep{color:var(--text3);font-weight:400;min-width:10px}
+        @keyframes charPop{from{opacity:0;transform:scale(.3)}to{opacity:1;transform:scale(1)}}
+        .code-label{font-size:12px;color:var(--text3);margin-top:12px;letter-spacing:.5px}
+        .code-copy{margin-top:10px;padding:7px 18px;background:var(--glow2);border:1px solid var(--border);border-radius:8px;color:var(--accent2);font-size:12px;cursor:pointer;transition:all .2s}
+        .code-copy:hover{background:var(--accent);color:var(--bg)}
+
+        .status-bar{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:16px;padding:10px;border-radius:10px;font-size:13px;font-weight:600}
+        .status-bar.waiting{background:var(--glow2);color:var(--accent2);border:1px solid rgba(6,182,212,.2)}
+        .status-bar.connected{background:rgba(16,185,129,.15);color:var(--success);border:1px solid rgba(16,185,129,.2)}
+        .status-bar.err{background:rgba(239,68,68,.1);color:var(--error);border:1px solid rgba(239,68,68,.2)}
+        .pulse-dot{width:8px;height:8px;border-radius:50%;animation:pulse 1.5s ease-in-out infinite}
+        .waiting .pulse-dot{background:var(--accent)}
+        .connected .pulse-dot{background:var(--success);animation:none}
+        .err .pulse-dot{background:var(--error);animation:none}
+        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.4)}}
+
+        .mini-steps{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+        .mini-step{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text2)}
+        .mini-step .num{width:24px;height:24px;background:var(--glow2);border:1px solid var(--border);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--accent2);flex-shrink:0}
+        .btn-ghost{background:var(--input);color:var(--text2);border:1px solid var(--border);margin-top:14px;font-size:13px}
+        .btn-ghost:hover{border-color:var(--accent);color:var(--accent2)}
+
+        .success-icon{width:64px;height:64px;margin:0 auto 16px;background:rgba(16,185,129,.15);border-radius:50%;display:flex;align-items:center;justify-content:center;animation:popIn .5s ease}
+        .success-icon svg{width:32px;height:32px;stroke:var(--success);fill:none;stroke-width:2.5}
+        @keyframes popIn{0%{transform:scale(0)}60%{transform:scale(1.2)}100%{transform:scale(1)}}
+        .success-title{font-size:20px;font-weight:800;text-align:center;color:var(--success);margin-bottom:6px}
+        .success-text{text-align:center;font-size:13px;color:var(--text2);line-height:1.6}
+
+        .features-section{padding:80px 24px;max-width:1100px;margin:0 auto}
+        .section-title{text-align:center;font-size:32px;font-weight:900;margin-bottom:8px}
+        .section-sub{text-align:center;font-size:15px;color:var(--text2);margin-bottom:48px}
+        .features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+        .feat-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px 24px;transition:all .3s}
+        .feat-card:hover{border-color:var(--accent);box-shadow:0 0 30px var(--glow2);transform:translateY(-4px)}
+        .feat-icon{width:44px;height:44px;background:var(--glow2);border:1px solid var(--border2);border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:16px}
+        .feat-icon svg{width:22px;height:22px;stroke:var(--accent2);fill:none;stroke-width:1.5}
+        .feat-title{font-size:16px;font-weight:700;margin-bottom:6px}
+        .feat-desc{font-size:13px;color:var(--text3);line-height:1.6}
+
+        .site-footer{text-align:center;padding:40px 24px;border-top:1px solid var(--border)}
+        .site-footer p{font-size:12px;color:var(--text3);letter-spacing:.5px}
+        .site-footer a{color:var(--accent2);text-decoration:none}
+
+        @media(max-width:900px){.hero-content{flex-direction:column;gap:40px}.hero-right{flex:1;width:100%;max-width:420px}.hero-left{text-align:center}.hero-desc{margin:0 auto 32px}.hero-features{justify-content:center}.hero-stats{justify-content:center}.nav-links{display:none}}
+        @media(max-width:480px){.navbar{padding:12px 16px}.login-card{padding:28px 20px;border-radius:20px}.code-char{font-size:26px;min-width:20px}.code-box{padding:14px 18px}}
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <a href="#" class="nav-brand">
+        <svg class="nav-logo" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+            <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs>
+            <circle cx="18" cy="18" r="16" fill="none" stroke="url(#lg)" stroke-width="1.5" opacity="0.5"/>
+            <path d="M18 6 L18 18 L26 24" stroke="url(#lg)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+            <circle cx="18" cy="18" r="3" fill="url(#lg)" opacity="0.8"/>
+        </svg>
+        <span class="nav-title">EVENTIDE OMEGA</span>
+    </a>
+    <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="https://github.com/Phantom-Dev-X/Phantom-x" target="_blank">GitHub</a>
+        <button class="nav-cta" onclick="document.getElementById('phone-input').focus()">Get Started</button>
+    </div>
+</nav>
+
+<section class="hero">
+    <div class="hero-bg"><div class="grid-bg"></div></div>
+    <div class="hero-content">
+        <div class="hero-left">
+            <div class="hero-badge"><span class="dot"></span> POWERED BY BAILEYS</div>
+            <h1 class="hero-title">
+                <span class="line1">Next-Gen WhatsApp<br></span>
+                <span class="line2">Bot Platform.</span>
+            </h1>
+            <p class="hero-desc">Eventide Omega gives you full control of your WhatsApp bot from the web. Send messages, manage groups, broadcast, toggle security — all from one dashboard.</p>
+            <div class="hero-features">
+                <div class="hero-feat"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Live Chat</div>
+                <div class="hero-feat"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Anti-Bug Shield</div>
+                <div class="hero-feat"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Group Mgmt</div>
+                <div class="hero-feat"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Analytics</div>
+            </div>
+            <div class="hero-stats">
+                <div><div class="hero-stat-num">50+</div><div class="hero-stat-label">Commands</div></div>
+                <div><div class="hero-stat-num">24/7</div><div class="hero-stat-label">Uptime</div></div>
+                <div><div class="hero-stat-num">∞</div><div class="hero-stat-label">Groups</div></div>
+            </div>
+        </div>
+
+        <div class="hero-right">
+            <div class="login-card">
+                <div class="login-header">
+                    <div class="login-icon">
+                        <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                    </div>
+                    <div class="login-title">Connect Your Bot</div>
+                    <div class="login-sub">Link WhatsApp to access the dashboard</div>
+                </div>
+
+                <div class="login-tabs">
+                    <button class="login-tab active" onclick="switchTab('pair')" id="tab-pair">Pairing Code</button>
+                    <button class="login-tab" onclick="switchTab('session')" id="tab-session">Session ID</button>
+                </div>
+
+                <div class="login-section active" id="sec-pair">
+                    <div class="error-msg" id="err-pair"></div>
+                    <div class="form-group">
+                        <label class="form-label">WhatsApp Number</label>
+                        <div class="input-wrap">
+                            <svg class="ico" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                            <input type="tel" id="phone-input" placeholder="2348102756072" maxlength="15">
+                        </div>
+                        <p style="font-size:11px;color:var(--text3);margin-top:6px;padding-left:2px">Country code + number, no + or spaces</p>
+                    </div>
+                    <button class="btn btn-primary" id="btn-pair" onclick="requestPair()">⚡ Generate Pairing Code</button>
+                </div>
+
+                <div class="login-section" id="sec-session">
+                    <div class="error-msg" id="err-session"></div>
+                    <div class="form-group">
+                        <label class="form-label">Session ID</label>
+                        <div class="input-wrap">
+                            <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            <input type="text" id="session-input" placeholder="Enter your session ID">
+                        </div>
+                        <p style="font-size:11px;color:var(--text3);margin-top:6px;padding-left:2px">Paste the session ID from your previous pairing</p>
+                    </div>
+                    <button class="btn btn-primary" id="btn-session" onclick="loginSession()">🔑 Login with Session</button>
+                </div>
+
+                <div class="login-section" id="sec-code">
+                    <div class="code-display">
+                        <div class="code-box" id="code-box"></div>
+                        <p class="code-label">Enter this code in WhatsApp → Linked Devices</p>
+                        <button class="code-copy" onclick="copyCode()">📋 Copy Code</button>
+                    </div>
+                    <div class="status-bar waiting" id="status-bar">
+                        <div class="pulse-dot"></div>
+                        <span id="status-text">Waiting for WhatsApp to connect...</span>
+                    </div>
+                    <div class="mini-steps">
+                        <div class="mini-step"><span class="num">1</span> Open <strong>WhatsApp</strong> on your phone</div>
+                        <div class="mini-step"><span class="num">2</span> <strong>Settings → Linked Devices</strong></div>
+                        <div class="mini-step"><span class="num">3</span> Tap <strong>"Link a Device"</strong></div>
+                        <div class="mini-step"><span class="num">4</span> Enter the <strong>8-digit code</strong> above</div>
+                    </div>
+                    <button class="btn btn-ghost" onclick="resetLogin()">← Try Another Number</button>
+                </div>
+
+                <div class="login-section" id="sec-success">
+                    <div class="success-icon"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+                    <div class="success-title">Connected! 🎉</div>
+                    <p class="success-text">Your WhatsApp is linked to <strong>Eventide Omega</strong>.<br>Redirecting to dashboard...</p>
+                    <div class="status-bar connected" style="margin-top:16px">
+                        <div class="pulse-dot"></div>
+                        <span>WhatsApp Connected</span>
+                    </div>
+                </div>
+
+                <div class="login-footer">
+                    Don't have an account? <a href="signup.html">Create New Account</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="features-section" id="features">
+    <h2 class="section-title">Everything You Need</h2>
+    <p class="section-sub">Control your WhatsApp bot from one powerful dashboard</p>
+    <div class="features-grid">
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div><div class="feat-title">Live Messaging</div><div class="feat-desc">Send, receive, and delete messages in real-time from your browser. Full chat interface.</div></div>
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><div class="feat-title">Anti-Bug Shield</div><div class="feat-desc">Delete dangerous messages instantly. Protect your WhatsApp from crash bugs and exploits.</div></div>
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="feat-title">Group Management</div><div class="feat-desc">View all groups, manage members, toggle antilink, antispam, and moderation settings.</div></div>
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg></div><div class="feat-title">Broadcast System</div><div class="feat-desc">Send messages to all groups at once with configurable delays and scheduling.</div></div>
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div><div class="feat-title">Analytics Dashboard</div><div class="feat-desc">Track message counts, active users, group stats, and command usage over time.</div></div>
+        <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m-7-7h6m6 0h6m-2.636-7.364l-4.243 4.243m0 6.243l4.243 4.243M4.636 4.636l4.243 4.243m0 6.243l-4.243 4.243"/></svg></div><div class="feat-title">Bot Settings</div><div class="feat-desc">Toggle commands, change prefix, manage premium users, and configure bot mode.</div></div>
+    </div>
+</section>
+
+<footer class="site-footer">
+    <p>© 2026 <a href="#">Eventide Dev</a> · Eventide Omega Bot · Powered by Baileys</p>
+</footer>
+
+<script>
+    let currentCode='',currentSessionId=null,pollInterval=null;
+
+    function switchTab(tab){
+        document.querySelectorAll('.login-tab').forEach(t=>t.classList.remove('active'));
+        document.querySelectorAll('.login-section').forEach(s=>s.classList.remove('active'));
+        document.getElementById('tab-'+tab).classList.add('active');
+        document.getElementById('sec-'+tab).classList.add('active');
+    }
+
+    function showLoginSection(id){
+        document.querySelectorAll('.login-section').forEach(s=>s.classList.remove('active'));
+        document.getElementById('sec-'+id).classList.add('active');
+    }
+
+    function showError(elId,msg){
+        const el=document.getElementById(elId);
+        el.textContent=msg;el.style.display='block';
+        setTimeout(()=>el.style.display='none',6000);
+    }
+
+    function renderCode(code){
+        const box=document.getElementById('code-box');box.innerHTML='';
+        const raw=code.replace(/[-\s]/g,'');
+        for(let i=0;i<raw.length;i++){
+            if(i===4){const s=document.createElement('span');s.className='code-char sep';s.textContent='–';box.appendChild(s)}
+            const c=document.createElement('span');c.className='code-char';c.textContent=raw[i];
+            c.style.animationDelay=(0.08*i)+'s';box.appendChild(c);
+        }
+    }
+
+    function copyCode(){
+        const raw=currentCode.replace(/[-\s]/g,'');
+        navigator.clipboard.writeText(raw).then(()=>{
+            const b=document.querySelector('.code-copy');b.textContent='✅ Copied!';
+            setTimeout(()=>b.textContent='📋 Copy Code',2000);
+        }).catch(()=>{});
+    }
+
+    function resetLogin(){
+        if(pollInterval)clearInterval(pollInterval);pollInterval=null;
+        currentSessionId=null;currentCode='';
+        document.getElementById('phone-input').value='';
+        document.getElementById('btn-pair').disabled=false;
+        document.getElementById('btn-pair').innerHTML='⚡ Generate Pairing Code';
+        switchTab('pair');
+    }
+
+    async function requestPair(){
+        const inp=document.getElementById('phone-input');
+        const btn=document.getElementById('btn-pair');
+        const phone=inp.value.replace(/[^0-9]/g,'');
+        if(phone.length<8||phone.length>15){showError('err-pair','Enter a valid number with country code');inp.focus();return}
+        btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Generating...';
+        try{
+            const r=await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+            const d=await r.json();
+            if(!d.ok){showError('err-pair',d.error||'Failed. Try again.');btn.disabled=false;btn.innerHTML='⚡ Generate Pairing Code';return}
+            currentCode=d.code;currentSessionId=d.sessionId;
+            renderCode(d.code);showLoginSection('code');startPolling();
+        }catch(e){showError('err-pair','Network error. Is the server running?');btn.disabled=false;btn.innerHTML='⚡ Generate Pairing Code'}
+    }
+
+    async function loginSession(){
+        const inp=document.getElementById('session-input');
+        const val=inp.value.trim();
+        if(!val){showError('err-session','Enter a session ID');return}
+        localStorage.setItem('eo_session',val);
+        window.location.href='/dashboard.html';
+    }
+
+    function startPolling(){
+        if(pollInterval)clearInterval(pollInterval);
+        pollInterval=setInterval(async()=>{
+            try{
+                const r=await fetch('/api/status?id='+currentSessionId);
+                const d=await r.json();
+                if(d.ok){
+                    if(d.status==='connected'){
+                        clearInterval(pollInterval);pollInterval=null;
+                        showLoginSection('success');
+                        localStorage.setItem('eo_session',currentSessionId);
+                        setTimeout(()=>window.location.href='/dashboard.html',2500);
+                    }else if(d.status==='logged_out'){
+                        clearInterval(pollInterval);pollInterval=null;
+                        document.getElementById('status-bar').className='status-bar err';
+                        document.getElementById('status-text').textContent='Session ended. Try again.';
+                    }
+                }
+            }catch(e){}
+        },3000);
+        setTimeout(()=>{if(pollInterval){clearInterval(pollInterval);pollInterval=null;
+            const sb=document.getElementById('status-bar');
+            if(sb.classList.contains('waiting')){sb.className='status-bar err';document.getElementById('status-text').textContent='Timed out. Generate a new code.'}
+        }},180000);
+    }
+
+    document.getElementById('phone-input').addEventListener('keydown',e=>{if(e.key==='Enter')requestPair()});
+    document.getElementById('session-input').addEventListener('keydown',e=>{if(e.key==='Enter')loginSession()});
+</script>
+
+</body>
+</html>

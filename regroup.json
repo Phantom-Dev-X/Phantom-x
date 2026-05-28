@@ -1,0 +1,8 @@
+{
+  "text": "👋 Hey! We've moved/restructured. Here's the new community group — tap the link below to join:\n\n🔗 {LINK}",
+  "groupLink": "",
+  "perMessageDelaySeconds": 12,
+  "jitterSeconds": 6,
+  "skipAdmins": true,
+  "active": null
+}

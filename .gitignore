@@ -1,0 +1,11 @@
+node_modules
+auth_info
+auth_info_*
+
+# Local user data — never commit
+.env
+*.log
+
+# New files created by the dashboard backend (auto-generated on first run)
+web_sessions_tokens.json
+web_users.json

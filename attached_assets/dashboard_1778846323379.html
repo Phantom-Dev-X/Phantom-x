@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eventide Omega · Dashboard</title>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        :root{
+            --bg:#06090f;--bg2:#0a0f1a;--bg3:#0d1424;
+            --card:#111827;--card2:#151f32;--input:#0f1729;
+            --border:#1a2540;--border2:#243352;
+            --accent:#06b6d4;--accent2:#22d3ee;--accent3:#67e8f9;
+            --glow:rgba(6,182,212,0.35);--glow2:rgba(6,182,212,0.15);
+            --success:#10b981;--error:#ef4444;--warn:#f59e0b;
+            --text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;
+            --sidebar-w:260px;
+        }
+        body{font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex}
+
+        .sidebar{width:var(--sidebar-w);background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:50;transition:transform .3s}
+        .sidebar-brand{padding:20px 20px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border)}
+        .sidebar-brand svg{width:32px;height:32px;flex-shrink:0}
+        .sb-name{font-size:15px;font-weight:800;letter-spacing:1px;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .sb-version{font-size:10px;color:var(--text3);letter-spacing:.5px}
+        .sidebar-nav{flex:1;padding:12px 0;overflow-y:auto}
+        .nav-section{padding:16px 20px 6px;font-size:10px;font-weight:700;color:var(--text3);letter-spacing:1.5px;text-transform:uppercase}
+        .nav-item{display:flex;align-items:center;gap:12px;padding:10px 20px;margin:2px 8px;border-radius:10px;cursor:pointer;transition:all .2s;font-size:14px;color:var(--text2);border:none;background:none;width:calc(100% - 16px);text-align:left}
+        .nav-item:hover{background:var(--glow2);color:var(--text)}
+        .nav-item.active{background:linear-gradient(135deg,rgba(6,182,212,0.15),rgba(6,182,212,0.08));color:var(--accent2);border:1px solid rgba(6,182,212,0.2)}
+        .nav-item svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;flex-shrink:0}
+        .nav-item .badge{margin-left:auto;background:var(--accent);color:var(--bg);font-size:10px;font-weight:800;padding:2px 7px;border-radius:10px}
+        .sidebar-footer{padding:16px 20px;border-top:1px solid var(--border)}
+        .user-info{display:flex;align-items:center;gap:10px}
+        .user-avatar{width:36px;height:36px;background:var(--glow2);border:1px solid var(--border2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px}
+        .user-name{font-size:13px;font-weight:600}
+        .user-phone{font-size:11px;color:var(--text3)}
+        .btn-logout{margin-top:10px;width:100%;padding:8px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.2);border-radius:8px;color:var(--error);font-size:12px;font-weight:600;cursor:pointer;transition:all .2s}
+        .btn-logout:hover{background:rgba(239,68,68,0.2)}
+
+        .main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh}
+        .topbar{padding:16px 28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:rgba(6,9,15,0.6);backdrop-filter:blur(12px);position:sticky;top:0;z-index:40}
+        .topbar-left{display:flex;align-items:center;gap:16px}
+        .menu-toggle{display:none;background:none;border:1px solid var(--border);border-radius:8px;padding:8px;cursor:pointer}
+        .menu-toggle svg{width:20px;height:20px;stroke:var(--text2);fill:none;stroke-width:2}
+        .page-title{font-size:20px;font-weight:800}
+        .page-sub{font-size:12px;color:var(--text3)}
+        .topbar-right{display:flex;align-items:center;gap:12px}
+        .conn-status{display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600}
+        .conn-status.online{background:rgba(16,185,129,0.1);color:var(--success);border:1px solid rgba(16,185,129,0.2)}
+        .conn-status.offline{background:rgba(239,68,68,0.1);color:var(--error);border:1px solid rgba(239,68,68,0.2)}
+        .conn-dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+
+        .content{flex:1;padding:28px;overflow-y:auto}
+        .page-panel{display:none;animation:fadeUp .4s ease}
+        .page-panel.active{display:block}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
+        .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:28px}
+        .stat-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px 20px;position:relative;overflow:hidden;transition:all .3s}
+        .stat-card:hover{border-color:var(--border2);transform:translateY(-2px)}
+        .stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;border-radius:2px}
+        .stat-card.c1::after{background:var(--accent)}
+        .stat-card.c2::after{background:var(--success)}
+        .stat-card.c3::after{background:var(--warn)}
+        .stat-card.c4::after{background:#8b5cf6}
+        .stat-label{font-size:12px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+        .stat-label svg{width:16px;height:16px;stroke:var(--text3);fill:none;stroke-width:2}
+        .stat-value{font-size:28px;font-weight:900;margin-bottom:4px}
+        .stat-card.c1 .stat-value{color:var(--accent2)}
+        .stat-card.c2 .stat-value{color:var(--success)}
+        .stat-card.c3 .stat-value{color:var(--warn)}
+        .stat-card.c4 .stat-value{color:#a78bfa}
+        .stat-change{font-size:11px;color:var(--text3)}
+
+        .section-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:20px}
+        .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+        .section-title{font-size:16px;font-weight:700}
+        .section-badge{font-size:11px;padding:4px 10px;background:var(--glow2);border:1px solid var(--border2);border-radius:6px;color:var(--accent2)}
+
+        .chat-layout{display:grid;grid-template-columns:280px 1fr;gap:0;height:calc(100vh - 140px);background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+        .chat-list{border-right:1px solid var(--border);display:flex;flex-direction:column}
+        .chat-list-header{padding:16px;border-bottom:1px solid var(--border)}
+        .chat-search{width:100%;padding:10px 14px;background:var(--input);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:13px;outline:none}
+        .chat-search:focus{border-color:var(--accent)}
+        .chat-items{flex:1;overflow-y:auto;padding:8px}
+        .chat-item{display:flex;align-items:center;gap:12px;padding:12px;border-radius:12px;cursor:pointer;transition:all .2s;margin-bottom:4px}
+        .chat-item:hover{background:var(--glow2)}
+        .chat-item.active{background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.2)}
+        .chat-avatar{width:42px;height:42px;background:var(--bg3);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+        .chat-info{flex:1;min-width:0}
+        .chat-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .chat-last{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .chat-meta{text-align:right;flex-shrink:0}
+        .chat-time{font-size:10px;color:var(--text3)}
+        .chat-unread{background:var(--accent);color:var(--bg);font-size:10px;font-weight:800;padding:1px 6px;border-radius:10px;margin-top:4px;display:inline-block}
+        .chat-main{display:flex;flex-direction:column}
+        .chat-main-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px}
+        .chat-main-name{font-size:15px;font-weight:700}
+        .chat-main-status{font-size:11px;color:var(--success)}
+        .chat-messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:8px;background:var(--bg2)}
+        .msg-bubble{max-width:65%;padding:10px 14px;border-radius:14px;font-size:13px;line-height:1.5;position:relative;word-wrap:break-word}
+        .msg-out{align-self:flex-end;background:linear-gradient(135deg,rgba(6,182,212,0.2),rgba(6,182,212,0.1));border:1px solid rgba(6,182,212,0.15);border-bottom-right-radius:4px}
+        .msg-in{align-self:flex-start;background:var(--card2);border:1px solid var(--border);border-bottom-left-radius:4px}
+        .msg-time{font-size:10px;color:var(--text3);margin-top:4px}
+        .msg-actions{position:absolute;top:4px;right:4px;display:none;gap:4px}
+        .msg-bubble:hover .msg-actions{display:flex}
+        .msg-del{background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:2px 6px;cursor:pointer;font-size:10px;color:var(--error)}
+        .msg-del:hover{background:rgba(239,68,68,0.4)}
+        .chat-input-area{padding:14px 20px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center;background:var(--card)}
+        .chat-input{flex:1;padding:12px 16px;background:var(--input);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:14px;outline:none;resize:none;font-family:inherit;min-height:44px;max-height:120px}
+        .chat-input:focus{border-color:var(--accent)}
+        .chat-input::placeholder{color:var(--text3)}
+        .chat-send{width:44px;height:44px;background:linear-gradient(135deg,var(--accent),#0891b2);border:none;border-radius:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0}
+        .chat-send:hover{box-shadow:0 0 20px var(--glow);transform:scale(1.05)}
+        .chat-send svg{width:20px;height:20px;stroke:#fff;fill:none;stroke-width:2}
+        .no-chat{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text3)}
+        .no-chat svg{width:64px;height:64px;stroke:var(--border2);fill:none;stroke-width:1;margin-bottom:16px}
+        .no-chat p{font-size:14px}
+
+        .table-wrap{overflow-x:auto}
+        table{width:100%;border-collapse:collapse}
+        th{text-align:left;padding:12px 16px;font-size:11px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid var(--border);font-weight:600}
+        td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
+        tr:hover td{background:var(--glow2)}
+        .td-name{display:flex;align-items:center;gap:10px}
+        .td-avatar{width:32px;height:32px;background:var(--bg3);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px}
+        .toggle{width:36px;height:20px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;position:relative;cursor:pointer;transition:all .3s}
+        .toggle.on{background:rgba(6,182,212,0.2);border-color:var(--accent)}
+        .toggle::after{content:'';position:absolute;width:16px;height:16px;background:var(--text3);border-radius:50%;top:1px;left:1px;transition:all .3s}
+        .toggle.on::after{left:17px;background:var(--accent)}
+
+        .broadcast-form{display:flex;flex-direction:column;gap:16px}
+        .broadcast-form textarea{width:100%;min-height:120px;padding:14px;background:var(--input);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:14px;resize:vertical;outline:none;font-family:inherit}
+        .broadcast-form textarea:focus{border-color:var(--accent)}
+        .broadcast-form textarea::placeholder{color:var(--text3)}
+        .broadcast-opts{display:flex;gap:12px;flex-wrap:wrap}
+        .broadcast-opt{padding:8px 16px;background:var(--input);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--text2);cursor:pointer;transition:all .2s}
+        .broadcast-opt:hover,.broadcast-opt.selected{border-color:var(--accent);color:var(--accent2);background:var(--glow2)}
+        .btn-broadcast{padding:14px 28px;background:linear-gradient(135deg,var(--accent),#0891b2);color:var(--bg);border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;transition:all .3s;align-self:flex-start}
+        .btn-broadcast:hover{box-shadow:0 4px 24px var(--glow);transform:translateY(-2px)}
+
+        .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+        .setting-item{display:flex;align-items:center;justify-content:space-between;padding:16px;background:var(--card2);border:1px solid var(--border);border-radius:12px}
+        .setting-info{flex:1}
+        .setting-name{font-size:14px;font-weight:600;margin-bottom:4px}
+        .setting-desc{font-size:12px;color:var(--text3)}
+
+        .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:45}
+        @media(max-width:900px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.mobile-overlay.show{display:block}.main{margin-left:0}.menu-toggle{display:block}.chat-layout{grid-template-columns:1fr}.chat-list{display:none}.stat-grid{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}}
+        @media(max-width:480px){.content{padding:16px}.stat-card{padding:16px}.stat-value{font-size:22px}.page-title{font-size:16px}}
+    </style>
+</head>
+<body>
+<div class="mobile-overlay" id="overlay" onclick="toggleSidebar()"></div>
+
+<aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+        <svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+            <defs><linearGradient id="lg2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs>
+            <circle cx="18" cy="18" r="16" fill="none" stroke="url(#lg2)" stroke-width="1.5" opacity="0.5"/>
+            <path d="M18 6 L18 18 L26 24" stroke="url(#lg2)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+            <circle cx="18" cy="18" r="3" fill="url(#lg2)" opacity="0.8"/>
+        </svg>
+        <div><div class="sb-name">EVENTIDE OMEGA</div><div class="sb-version">Dashboard v2.0</div></div>
+    </div>
+    <nav class="sidebar-nav">
+        <div class="nav-section">Main</div>
+        <button class="nav-item active" onclick="showPage('overview',this)">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Overview
+        </button>
+        <button class="nav-item" onclick="showPage('messages',this)">
+            <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Messages <span class="badge" id="msg-badge">3</span>
+        </button>
+        <div class="nav-section">Manage</div>
+        <button class="nav-item" onclick="showPage('groups',this)">
+            <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Groups
+        </button>
+            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        </button>
+        <button class="nav-item" onclick="showPage('broadcast',this)">
+            <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg>
+            Broadcast
+        </button>
+        <div class="nav-section">System</div>
+        <button class="nav-item" onclick="showPage('security',this)">
+            <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Security
+        </button>
+        <button class="nav-item" onclick="showPage('settings',this)">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06-.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Settings
+        </button>
+    </nav>
+    <div class="sidebar-footer">
+        <div class="user-info">
+            <div class="user-avatar">👤</div>
+            <div><div class="user-name" id="user-name">User</div><div class="user-phone" id="user-phone">Loading...</div></div>
+        </div>
+        <button class="btn-logout" onclick="logout()">⏻ Disconnect & Logout</button>
+    </div>
+</aside>
+
+<div class="main">
+    <header class="topbar">
+        <div class="topbar-left">
+            <button class="menu-toggle" onclick="toggleSidebar()">
+                <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <div><div class="page-title" id="page-title">Overview</div><div class="page-sub" id="page-sub">Welcome back to Eventide Omega</div></div>
+        </div>
+        <div class="topbar-right">
+            <div class="conn-status online" id="conn-status"><div class="conn-dot"></div><span>Connected</span></div>
+        </div>
+    </header>
+
+    <div class="content">
+        <!-- OVERVIEW -->
+        <div class="page-panel active" id="page-overview">
+            <div class="stat-grid">
+                <div class="stat-card c1"><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Messages</div><div class="stat-value">1,247</div><div class="stat-change">↑ 12% from yesterday</div></div>
+                <div class="stat-card c2"><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Groups</div><div class="stat-value">34</div><div class="stat-change">↑ 3 new this week</div></div>
+                <div class="stat-card c3"><div class="stat-label"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Commands Used</div><div class="stat-value">386</div><div class="stat-change">Most used: .menu</div></div>
+                <div class="stat-card c4"><div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Uptime</div><div class="stat-value" id="uptime-val">3d 14h</div><div class="stat-change">Since last restart</div></div>
+            </div>
+
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Recent Activity</span><span class="section-badge">Live</span></div>
+                <div style="display:flex;flex-direction:column;gap:10px" id="activity-feed">
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg2);border-radius:10px"><div style="width:8px;height:8px;background:var(--success);border-radius:50%;flex-shrink:0"></div><div style="flex:1;font-size:13px">Bot connected successfully</div><div style="font-size:11px;color:var(--text3)">Just now</div></div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg2);border-radius:10px"><div style="width:8px;height:8px;background:var(--accent);border-radius:50%;flex-shrink:0"></div><div style="flex:1;font-size:13px">.menu command used in Tech Group</div><div style="font-size:11px;color:var(--text3)">2m ago</div></div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg2);border-radius:10px"><div style="width:8px;height:8px;background:var(--warn);border-radius:50%;flex-shrink:0"></div><div style="flex:1;font-size:13px">Antilink triggered — link deleted in Main Group</div><div style="font-size:11px;color:var(--text3)">5m ago</div></div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg2);border-radius:10px"><div style="width:8px;height:8px;background:var(--error);border-radius:50%;flex-shrink:0"></div><div style="flex:1;font-size:13px">Bug message detected & deleted (anti-bug shield)</div><div style="font-size:11px;color:var(--text3)">12m ago</div></div>
+                </div>
+            </div>
+
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Quick Actions</span></div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap">
+                    <button onclick="showPage('messages',document.querySelectorAll('.nav-item')[1])" style="padding:10px 20px;background:var(--glow2);border:1px solid var(--border2);border-radius:10px;color:var(--accent2);font-size:13px;font-weight:600;cursor:pointer">💬 Open Chat</button>
+                    <button onclick="showPage('broadcast',document.querySelectorAll('.nav-item')[4])" style="padding:10px 20px;background:var(--glow2);border:1px solid var(--border2);border-radius:10px;color:var(--accent2);font-size:13px;font-weight:600;cursor:pointer">📡 Broadcast</button>
+                    <button onclick="showPage('groups',document.querySelectorAll('.nav-item')[2])" style="padding:10px 20px;background:var(--glow2);border:1px solid var(--border2);border-radius:10px;color:var(--accent2);font-size:13px;font-weight:600;cursor:pointer">👥 Groups</button>
+                    <button onclick="showPage('security',document.querySelectorAll('.nav-item')[5])" style="padding:10px 20px;background:var(--glow2);border:1px solid var(--border2);border-radius:10px;color:var(--accent2);font-size:13px;font-weight:600;cursor:pointer">🛡️ Security</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- MESSAGES -->
+        <div class="page-panel" id="page-messages">
+            <div class="chat-layout">
+                <div class="chat-list">
+                    <div class="chat-list-header">
+                        <input type="text" class="chat-search" placeholder="🔍 Search chats..." id="chat-search-input">
+                    </div>
+                    <div class="chat-items" id="chat-items">
+                        <div class="chat-item active" onclick="selectChat(0,this)"><div class="chat-avatar">👥</div><div class="chat-info"><div class="chat-name">Tech Developers 🔥</div><div class="chat-last">Hey check this out...</div></div><div class="chat-meta"><div class="chat-time">2:34 PM</div><div class="chat-unread">3</div></div></div>
+                        <div class="chat-item" onclick="selectChat(1,this)"><div class="chat-avatar">💼</div><div class="chat-info"><div class="chat-name">Business Hub</div><div class="chat-last">Meeting at 5pm</div></div><div class="chat-meta"><div class="chat-time">1:12 PM</div></div></div>
+                        <div class="chat-item" onclick="selectChat(2,this)"><div class="chat-avatar">🎮</div><div class="chat-info"><div class="chat-name">Gaming Squad</div><div class="chat-last">GG bro!</div></div><div class="chat-meta"><div class="chat-time">12:45 PM</div></div></div>
+                    </div>
+                </div>
+                <div class="chat-main" id="chat-main">
+                    <div class="chat-main-header"><div class="chat-avatar" style="width:38px;height:38px;font-size:16px">👥</div><div><div class="chat-main-name" id="current-chat-name">Tech Developers 🔥</div><div class="chat-main-status">Online · 156 members</div></div></div>
+                    <div class="chat-messages" id="chat-messages"></div>
+                    <div class="chat-input-area"><textarea class="chat-input" id="chat-msg-input" placeholder="Type a message..." rows="1"></textarea><button class="chat-send" onclick="sendMessage()"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9"/></svg></button></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- GROUPS -->
+        <div class="page-panel" id="page-groups">
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Your Groups</span><span class="section-badge">34 Groups</span></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Group</th><th>Members</th><th>Antilink</th><th>Antispam</th><th>Anti-Bug</th><th>Welcome</th></tr></thead>
+                        <tbody id="groups-tbody">
+                            <tr><td><div class="td-name"><div class="td-avatar">👥</div>Tech Developers 🔥</div></td><td>156</td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td></tr>
+                            <tr><td><div class="td-name"><div class="td-avatar">💼</div>Business Hub</div></td><td>89</td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td><td><div class="toggle on" onclick="this.classList.toggle('on')"></div></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- TEST GROUPS -->
+            <div class="section-card">
+                <table>
+                    <thead><tr><th>Group</th><th>Purpose</th><th>Status</th><th>Action</th></tr></thead>
+                    <tbody>
+                        <tr><td>Eventide Test Group</td><td>Feature testing</td><td style="color:#10b981">Active</td><td><button onclick="openTestChat(0)" style="padding:6px 14px;background:var(--accent);color:white;border:none;border-radius:8px">Open Chat</button></td></tr>
+                        <tr><td>Bug Testing Lab</td><td>Crash message testing</td><td style="color:#10b981">Active</td><td><button onclick="openTestChat(1)" style="padding:6px 14px;background:var(--accent);color:white;border:none;border-radius:8px">Open Chat</button></td></tr>
+                        <tr><td>Performance Group</td><td>Load testing</td><td style="color:#f59e0b">Paused</td><td><button onclick="openTestChat(2)" style="padding:6px 14px;background:var(--accent);color:white;border:none;border-radius:8px">Open Chat</button></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- BROADCAST -->
+        <div class="page-panel" id="page-broadcast">
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Broadcast Message</span><span class="section-badge">34 Groups</span></div>
+                <div class="broadcast-form">
+                    <textarea placeholder="Type your broadcast message here..."></textarea>
+                    <div><label class="form-label" style="display:block;font-size:12px;margin-bottom:8px">Send to</label>
+                        <div class="broadcast-opts">
+                            <div class="broadcast-opt selected" onclick="this.classList.toggle('selected')">All Groups</div>
+                            <div class="broadcast-opt" onclick="this.classList.toggle('selected')">Admin Groups Only</div>
+                            <div class="broadcast-opt" onclick="this.classList.toggle('selected')">Private Chats</div>
+                        </div>
+                    </div>
+                    <div><label class="form-label" style="display:block;font-size:12px;margin-bottom:8px">Delay</label>
+                        <div class="broadcast-opts">
+                            <div class="broadcast-opt" onclick="selectDelay(this)">No Delay</div>
+                            <div class="broadcast-opt selected" onclick="selectDelay(this)">5 seconds</div>
+                            <div class="broadcast-opt" onclick="selectDelay(this)">10 seconds</div>
+                            <div class="broadcast-opt" onclick="selectDelay(this)">30 seconds</div>
+                        </div>
+                    </div>
+                    <button class="btn-broadcast" onclick="startBroadcast()">📡 Start Broadcast</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- SECURITY -->
+        <div class="page-panel" id="page-security">
+            <div class="stat-grid" style="margin-bottom:20px">
+                <div class="stat-card c1"><div class="stat-label">🛡️ Threats Blocked</div><div class="stat-value">47</div><div class="stat-change">This week</div></div>
+                <div class="stat-card c3"><div class="stat-label">🐛 Bug Messages Deleted</div><div class="stat-value">23</div><div class="stat-change">Auto-deleted</div></div>
+            </div>
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Security Settings</span></div>
+                <div class="settings-grid">
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">🛡️ Anti-Bug Shield</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">🔗 Anti-Link</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">🚫 Anti-Spam</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="page-panel" id="page-settings">
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Bot Configuration</span></div>
+                <div class="settings-grid">
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">🌐 Bot Mode</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">👋 Auto Welcome</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                    <div class="setting-item"><div class="setting-info"><div class="setting-name">🧠 AI Commands</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                </div>
+            </div>
+            <div class="section-card">
+                <div class="section-header"><span class="section-title">Bot Info</span></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                    <div style="padding:12px;background:var(--bg2);border-radius:10px">Bot Name<br><strong>Eventide Omega</strong></div>
+                    <div style="padding:12px;background:var(--bg2);border-radius:10px">Version<br><strong>v2.0.0</strong></div>
+                    <div style="padding:12px;background:var(--bg2);border-radius:10px">Developer<br><strong>Eventide Dev</strong></div>
+                    <div style="padding:12px;background:var(--bg2);border-radius:10px">Library<br><strong>Baileys v7.x</strong></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Page Navigation
+const pageTitles = {
+    overview: ['Overview', 'Welcome back to Eventide Omega'],
+    messages: ['Messages', 'Send, receive & delete messages'],
+    groups: ['Groups', 'Manage your WhatsApp groups'],
+    broadcast: ['Broadcast', 'Send messages to multiple groups'],
+    security: ['Security', 'Anti-bug shield & protection settings'],
+    settings: ['Settings', 'Configure your bot']
+};
+
+function showPage(page, navEl) {
+    document.querySelectorAll('.page-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.getElementById('page-' + page).classList.add('active');
+    if (navEl) navEl.classList.add('active');
+    const [title, sub] = pageTitles[page] || ['', ''];
+    document.getElementById('page-title').textContent = title;
+    document.getElementById('page-sub').textContent = sub;
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('overlay').classList.remove('show');
+}
+
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+    document.getElementById('overlay').classList.toggle('show');
+}
+
+// Chat System
+const chatData = [
+    { name: 'Tech Developers 🔥', emoji: '👥', members: '156 members', msgs: [] },
+    { name: 'Business Hub', emoji: '💼', members: '89 members', msgs: [] },
+    { name: 'Gaming Squad', emoji: '🎮', members: '245 members', msgs: [] }
+];
+
+let currentChat = 0;
+
+function selectChat(idx, el) {
+    currentChat = idx;
+    document.querySelectorAll('.chat-item').forEach(c => c.classList.remove('active'));
+    if (el) el.classList.add('active');
+    renderChat(idx);
+}
+
+function renderChat(idx) {
+    const chat = chatData[idx];
+    document.getElementById('current-chat-name').textContent = chat.name;
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = '';
+    chat.msgs.forEach(m => {
+        const div = document.createElement('div');
+        div.className = 'msg-bubble ' + (m.out ? 'msg-out' : 'msg-in');
+        div.innerHTML = `${m.out ? '<div class="msg-actions"><button class="msg-del" onclick="deleteMsg(this)">🗑️</button></div>' : ''}<div>${m.text}</div><div class="msg-time">${m.time}${m.out ? ' · ✓✓' : ''}</div>`;
+        container.appendChild(div);
+    });
+    container.scrollTop = container.scrollHeight;
+}
+
+function sendMessage() {
+    const input = document.getElementById('chat-msg-input');
+    const text = input.value.trim();
+    if (!text) return;
+    const now = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    chatData[currentChat].msgs.push({text, out: true, time: now});
+    renderChat(currentChat);
+    input.value = '';
+    setTimeout(() => {
+        chatData[currentChat].msgs.push({text: "Got it 👍", out: false, time: now});
+        renderChat(currentChat);
+    }, 1200);
+}
+
+function deleteMsg(btn) {
+    const bubble = btn.closest('.msg-bubble');
+    bubble.style.transition = 'all .3s';
+    bubble.style.opacity = '0';
+    setTimeout(() => bubble.outerHTML = '', 300);
+}
+
+function openTestChat(idx) {
+    showPage('messages', document.querySelectorAll('.nav-item')[1]);
+    setTimeout(() => {
+        selectChat(idx, document.querySelectorAll('.chat-item')[idx]);
+    }, 300);
+}
+
+// Broadcast
+function selectDelay(el) {
+    el.parentElement.querySelectorAll('.broadcast-opt').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+}
+
+function startBroadcast() {
+    const btn = document.querySelector('.btn-broadcast');
+    btn.textContent = '📡 Broadcasting...';
+    btn.style.opacity = '0.6';
+    setTimeout(() => {
+        btn.textContent = '✅ Broadcast Sent!';
+        btn.style.background = 'var(--success)';
+        setTimeout(() => {
+            btn.textContent = '📡 Start Broadcast';
+            btn.style.opacity = '1';
+            btn.style.background = '';
+        }, 2500);
+    }, 1800);
+}
+
+function logout() {
+    localStorage.removeItem('eo_session');
+    window.location.href = '/';
+}
+
+// Init
+(function init() {
+    const session = localStorage.getItem('eo_session');
+    if (!session) {
+        // Allow demo access
+    }
+    document.getElementById('user-phone').textContent = localStorage.getItem('eo_user_email') || '2348102756072';
+    document.getElementById('user-name').textContent = 'Eventide User';
+})();
+</script>
+
+</body>
+</html>

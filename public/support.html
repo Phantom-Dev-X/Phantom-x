@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Support Developer · Eventide Omega</title>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;background:#06090f;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+        .bg-glow{position:fixed;inset:0;overflow:hidden;z-index:0}
+        .bg-glow::before{content:'';position:absolute;top:-40%;left:-20%;width:80%;height:80%;background:radial-gradient(circle,rgba(6,182,212,0.10) 0%,transparent 70%)}
+        .bg-glow::after{content:'';position:absolute;bottom:-30%;right:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(6,182,212,0.08) 0%,transparent 70%)}
+        .card{position:relative;z-index:2;background:#111827;border:1px solid #1a2540;border-radius:22px;padding:38px 34px;width:100%;max-width:480px;overflow:hidden;box-shadow:0 0 80px rgba(6,182,212,0.08),0 25px 50px rgba(0,0,0,0.5);text-align:center}
+        .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#22d3ee,transparent);animation:shimmer 3s ease-in-out infinite}
+        @keyframes shimmer{0%,100%{opacity:.35}50%{opacity:1}}
+        .logo{display:flex;align-items:center;gap:12px;margin-bottom:24px;justify-content:center}
+        .logo-text{font-size:20px;font-weight:900;letter-spacing:1.5px;background:linear-gradient(135deg,#22d3ee,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        h1{font-size:24px;font-weight:900;margin-bottom:10px}
+        .sub{font-size:13px;color:#94a3b8;margin-bottom:24px;line-height:1.7}
+        .stage-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 13px;border-radius:999px;background:rgba(6,182,212,.10);border:1px solid rgba(6,182,212,.25);color:#67e8f9;font-size:12px;font-weight:800;letter-spacing:.3px;margin-bottom:18px}
+        .support-box{background:linear-gradient(135deg,rgba(6,182,212,0.11),rgba(34,211,238,0.045));border:1px solid rgba(6,182,212,0.24);border-radius:18px;padding:24px;margin-bottom:20px}
+        .support-box h3{font-size:17px;color:#22d3ee;margin-bottom:10px}
+        .support-box p{font-size:13px;color:#94a3b8;line-height:1.65;margin-bottom:18px}
+        .progress{height:10px;background:#0b1220;border:1px solid #1a2540;border-radius:999px;overflow:hidden;margin:16px 0 18px}
+        .bar{height:100%;width:0;background:linear-gradient(90deg,#06b6d4,#22d3ee);border-radius:999px;transition:width .35s ease;box-shadow:0 0 18px rgba(34,211,238,.35)}
+        .btn{width:100%;padding:15px;background:linear-gradient(135deg,#06b6d4,#0891b2);border:none;border-radius:13px;color:#061018;font-size:15px;font-weight:900;cursor:pointer;transition:all .25s;display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none}
+        .btn:hover{box-shadow:0 8px 30px rgba(6,182,212,0.36);transform:translateY(-2px)}
+        .btn:disabled{opacity:.62;cursor:not-allowed;transform:none;box-shadow:none}
+        .hint{min-height:38px;font-size:12px;color:#64748b;line-height:1.55;margin-top:14px}
+        .hint.good{color:#67e8f9}.hint.warn{color:#fbbf24}.hint.err{color:#fb7185}
+        .small{font-size:11px;color:#475569;line-height:1.6;margin-top:16px}
+        .home{display:inline-block;margin-top:18px;color:#64748b;font-size:12px;text-decoration:none}.home:hover{color:#22d3ee}
+        .heart{animation:pulse 1.5s ease-in-out infinite;display:inline-block}@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.16)}}
+    </style>
+</head>
+<body>
+<div class="bg-glow"></div>
+<div class="card">
+    <div class="logo">
+        <svg width="34" height="34" viewBox="0 0 36 36" aria-hidden="true">
+            <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs>
+            <circle cx="18" cy="18" r="16" fill="none" stroke="url(#lg)" stroke-width="1.5" opacity="0.5"/>
+            <path d="M18 6 L18 18 L26 24" stroke="url(#lg)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+            <circle cx="18" cy="18" r="3" fill="url(#lg)" opacity="0.8"/>
+        </svg>
+        <span class="logo-text">EVENTIDE OMEGA</span>
+    </div>
+
+    <div class="stage-pill" id="stagePill">Stage 1 of 5</div>
+    <h1>Support the Developer <span class="heart">❤️</span></h1>
+    <p class="sub">Before login, please support Phantom-X by opening 5 ads. This unlock resets every day at midnight on your device.</p>
+
+    <div class="support-box">
+        <h3 id="boxTitle">Tap Support Dev</h3>
+        <p id="boxText">Press the button below. If an ad opens, close it and come back for the next stage.</p>
+        <div class="progress"><div class="bar" id="bar"></div></div>
+        <button id="supportBtn" class="btn" type="button">🎬 Support Dev — Stage 1</button>
+        <div id="hint" class="hint">No skip button — complete all 5 stages to login.</div>
+    </div>
+
+    <div class="small">If ads do not open, disable ad-blocker/Brave Shield for this site and try again.</div>
+    <a class="home" href="/">← Back to home</a>
+</div>
+
+<!-- Adcash AutoTag (zone: zhycmbaeya). Ads run only on this support gate page. -->
+<script type="text/javascript" src="https://acscdn.com/script/aclib.js"></script>
+<script type="text/javascript">
+(function () {
+    'use strict';
+
+    var REQUIRED_ADS = 5;
+    var WAIT_SECONDS = 5;
+    var ZONE_ID = 'zhycmbaeya';
+    var PASS_KEY = 'eo_gate_pass_date';
+    var COUNT_KEY = 'eo_gate_count';
+    var COUNT_DATE_KEY = 'eo_gate_count_date';
+
+    var btn = document.getElementById('supportBtn');
+    var pill = document.getElementById('stagePill');
+    var bar = document.getElementById('bar');
+    var hint = document.getElementById('hint');
+    var boxTitle = document.getElementById('boxTitle');
+    var boxText = document.getElementById('boxText');
+
+    function todayKey() {
+        var d = new Date();
+        var y = d.getFullYear();
+        var m = String(d.getMonth() + 1).padStart(2, '0');
+        var day = String(d.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + day;
+    }
+
+    function getCount() {
+        var today = todayKey();
+        if (localStorage.getItem(COUNT_DATE_KEY) !== today) {
+            localStorage.setItem(COUNT_DATE_KEY, today);
+            localStorage.setItem(COUNT_KEY, '0');
+            localStorage.removeItem(PASS_KEY);
+            return 0;
+        }
+        return Math.max(0, Math.min(REQUIRED_ADS, parseInt(localStorage.getItem(COUNT_KEY) || '0', 10) || 0));
+    }
+
+    function setCount(n) {
+        localStorage.setItem(COUNT_DATE_KEY, todayKey());
+        localStorage.setItem(COUNT_KEY, String(Math.max(0, Math.min(REQUIRED_ADS, n))));
+    }
+
+    function markPassed() {
+        localStorage.setItem(PASS_KEY, todayKey());
+        setCount(REQUIRED_ADS);
+    }
+
+    function redirectLogin() {
+        window.location.replace('/login.html');
+    }
+
+    function runAdcash() {
+        try {
+            if (window.aclib && typeof window.aclib.runAutoTag === 'function') {
+                console.log('[Adcash] aclib loaded ✓');
+                console.log('[Adcash] AutoTag triggered for zone ' + ZONE_ID);
+                window.aclib.runAutoTag({ zoneId: ZONE_ID });
+                return true;
+            }
+            console.warn('[Adcash] aclib not ready or blocked');
+            return false;
+        } catch (err) {
+            console.warn('[Adcash] AutoTag error:', err);
+            return false;
+        }
+    }
+
+    function render() {
+        var count = getCount();
+        var nextStage = Math.min(count + 1, REQUIRED_ADS);
+        var percent = (count / REQUIRED_ADS) * 100;
+        bar.style.width = percent + '%';
+
+        if (count >= REQUIRED_ADS || localStorage.getItem(PASS_KEY) === todayKey()) {
+            markPassed();
+            pill.textContent = 'Completed 5 of 5';
+            boxTitle.textContent = 'Support complete ✅';
+            boxText.textContent = 'Thank you for supporting the developer today. Redirecting you to login now.';
+            btn.textContent = '✅ Opening Login...';
+            btn.disabled = true;
+            hint.className = 'hint good';
+            hint.textContent = 'Daily login unlock is active until midnight.';
+            setTimeout(redirectLogin, 700);
+            return;
+        }
+
+        pill.textContent = 'Stage ' + nextStage + ' of ' + REQUIRED_ADS;
+        boxTitle.textContent = 'Tap Support Dev';
+        boxText.textContent = 'Press the button below. If an ad opens, close it and come back for the next stage.';
+        btn.textContent = '🎬 Support Dev — Stage ' + nextStage;
+        btn.disabled = false;
+        hint.className = 'hint';
+        hint.textContent = count + ' of ' + REQUIRED_ADS + ' completed. No skip — complete all 5 stages to login.';
+    }
+
+    function handleClick() {
+        var before = getCount();
+        if (before >= REQUIRED_ADS) return render();
+
+        btn.disabled = true;
+        var loaded = runAdcash();
+        var left = WAIT_SECONDS;
+        hint.className = loaded ? 'hint warn' : 'hint err';
+        hint.textContent = loaded
+            ? 'Ad triggered. Close the ad and come back. Next stage in ' + left + 's…'
+            : 'Ad script looks blocked/not ready. Disable ad-blocker if no ad opened. Next stage in ' + left + 's…';
+
+        var timer = setInterval(function () {
+            left -= 1;
+            if (left > 0) {
+                hint.textContent = loaded
+                    ? 'Close the ad and come back. Next stage in ' + left + 's…'
+                    : 'Waiting ' + left + 's… disable ad-blocker if ads never open.';
+                return;
+            }
+            clearInterval(timer);
+            setCount(before + 1);
+            render();
+        }, 1000);
+    }
+
+    btn.addEventListener('click', handleClick);
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', render);
+    } else {
+        render();
+    }
+})();
+</script>
+</body>
+</html>

