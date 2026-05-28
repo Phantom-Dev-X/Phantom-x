@@ -10138,7 +10138,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
 
     const sock = makeWASocket({
         version,
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        browser: ["Phantom-X", "Chrome", "120.0.0"],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
@@ -10146,16 +10146,12 @@ async function startBotForWeb(sessionId, phoneNumber) {
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
         markOnlineOnConnect: true,
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         syncFullHistory: false,
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
         patchMessageBeforeSending: patchLegacyInteractiveForWhiskey,
         generateHighQualityLinkPreview: false,
         getMessage: async (key) => socketMsgStore.get(key),
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         keepAliveIntervalMs: 15_000,
         connectTimeoutMs: 90_000,
         retryRequestDelayMs: 500,
@@ -11390,7 +11386,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     const sock = makeWASocket({
         version,
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
+        browser: ["Phantom-X", "Chrome", "120.0.0"],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
@@ -11398,15 +11394,11 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
         markOnlineOnConnect: true,
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],               // keep the linked account visibly online for group command reliability
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         syncFullHistory: false,         // don't pull FULL history on connect
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
         generateHighQualityLinkPreview: false, // skip link preview generation — reduces processing overhead
         getMessage: async (key) => socketMsgStore.get(key),
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
-        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         keepAliveIntervalMs: 15_000,    // ping WA servers every 15 s — prevents idle disconnects
         connectTimeoutMs: 90_000,       // give the initial handshake up to 90 s
         retryRequestDelayMs: 500,       // wait 0.5 s between internal proto retries
