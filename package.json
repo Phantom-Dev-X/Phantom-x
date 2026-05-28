@@ -12,9 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@fizzxydev/baileys-pro": "^8.7.2",
     "@ryuu-reinzz/button-helper": "^2.2.3",
-    "@whiskeysockets/baileys": "^6.7.23",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
     "@zeppeliorg/wbails": "^1.0.8",
     "dotenv": "^17.4.2",
     "mongodb": "^7.2.0",

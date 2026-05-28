@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@fizzxydev/baileys-pro");
+} = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -189,7 +189,7 @@ async function kickSession(userId) {
         console.log(`[ConflictFix] Kicking active session for ${userId}`);
         try { sock.ev.removeAllListeners(); } catch (_) {}
         try { sock.end(new Error("terminated_for_new_pairing")); } catch (_) {}
-        try { sock.ws.close(); } catch (_) {}
+        try { if (sock.ws) sock.ws.close(); } catch (_) {}
         delete activeSockets[userId];
     }
     const authDir = getAuthDir(userId);
@@ -3836,10 +3836,23 @@ function unwrapMessageContent(message) {
 }
 
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
-    // Whiskey + helper package path.
-    // Flow: stage 3 menu art is already edited in-place by the caller, then we send a NEW
-    // message with one tappable button that opens a list picker.
-    if (!global.menuStateMap) global.menuStateMap = {};
+    try {
+        const { sendInteractiveMessage } = require("./wbails_helper");
+        const sections = [{
+            title: "Available Options",
+            rows: rows.map(r => ({ title: r.title, description: r.desc || "", id: r.id }))
+        }];
+        await sendInteractiveMessage(sock, jid, {
+            text: bodyText,
+            sections
+        }, { quoted: quotedMsg, buttonText: buttonLabel });
+    } catch (e) {
+        console.error("sendListSelect error:", e.message);
+        // Fallback to text
+        const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " — " + r.desc : ""}`).join("\n");
+        await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}` }, { quoted: quotedMsg });
+    }
+}
     global.menuStateMap[jid] = rows.map(r => r.id);
 
     const singleSelect = {
@@ -3879,10 +3892,19 @@ async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows)
 }
 async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer = "— Phantom-X") {
     try {
-        await helperSendButtons(sock, jid, {
+        const { sendButtons } = require("./wbails_helper");
+        await sendButtons(sock, jid, {
             text: bodyText,
             footer,
-            buttons: buttons.map(b => ({ id: b.id, text: b.label })),
+            buttons: buttons.map(b => ({ id: b.id, text: b.label }))
+        }, { quoted: quotedMsg });
+    } catch (e) {
+        console.error("sendQuickButtons error:", e.message);
+        // Fallback
+        const numbered = buttons.map((b, i) => `*${i + 1}.* ${b.label}`).join("\n");
+        await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}` }, { quoted: quotedMsg });
+    }
+}
         }, quotedMsg ? { quoted: quotedMsg } : {});
         await emitButtonTrace(sock, 'quick-send', { test: 'quick-buttons', reason: 'helper quick buttons sent', body: bodyText });
         return;
@@ -10150,6 +10172,7 @@ async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
 // Returns the pairing code string, or throws on failure.
 async function startBotForWeb(sessionId, phoneNumber) {
     await kickSession(sessionId);
+    await kickSession(sessionId);
     if (isSocketLive(activeSockets[sessionId])) {
         debugLog(`[WebStart] ${sessionId} already live — skipping duplicate start`);
         return webSessions.get(sessionId)?.code || null;
@@ -10174,6 +10197,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
         markOnlineOnConnect: true,
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         syncFullHistory: false,
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
@@ -11410,6 +11434,7 @@ function migrateLegacySessionDataIfNeeded() {
 // --- WHATSAPP ENGINE ---
 async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     if (!isReconnect) await kickSession(userId);
+    if (!isReconnect) await kickSession(userId);
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
     const { version } = await fetchLatestBaileysVersion();
     const socketMsgStore = createMessageStore();
@@ -11425,6 +11450,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         logger: pino({ level: "fatal" }),
         markOnlineOnConnect: true,
         browser: [ "Ubuntu", "Chrome", "20.0.04" ],               // keep the linked account visibly online for group command reliability
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         syncFullHistory: false,         // don't pull FULL history on connect
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,

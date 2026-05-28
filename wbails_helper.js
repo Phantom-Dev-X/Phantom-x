@@ -1,19 +1,15 @@
-const { 
-    generateWAMessageFromContent, 
-    proto 
-} = require("@whiskeysockets/baileys");
+const { generateWAMessageFromContent, proto } = require("@whiskeysockets/baileys");
 
 /**
- * wbails_helper.js
- * 
- * Injects 'biz' and 'interactive' nodes into Whiskey Sockets relayMessage
- * to ensure interactive buttons and lists actually render on all WA clients.
+ * wbails_helper.js - Optimized for official @whiskeysockets/baileys
+ * Ensures buttons/lists render correctly by injecting 'biz' and 'interactive' nodes.
  */
 
 async function sendInteractiveMessage(sock, jid, content, options = {}) {
     const { text, footer, title, subtitle, buttons, sections } = content;
     const isJidGroup = jid.endsWith("@g.us");
 
+    // Build modern NativeFlow Message
     const interactiveMessage = {
         body: { text: text || "" },
         footer: { text: footer || "— Phantom-X" },
@@ -27,6 +23,7 @@ async function sendInteractiveMessage(sock, jid, content, options = {}) {
         }
     };
 
+    // Quick Reply Buttons
     if (buttons && buttons.length > 0) {
         interactiveMessage.nativeFlowMessage.buttons = buttons.map(btn => ({
             name: "quick_reply",
@@ -35,11 +32,13 @@ async function sendInteractiveMessage(sock, jid, content, options = {}) {
                 id: btn.id,
             })
         }));
-    } else if (sections && sections.length > 0) {
+    } 
+    // Single Select List
+    else if (sections && sections.length > 0) {
         interactiveMessage.nativeFlowMessage.buttons = [{
             name: "single_select",
             buttonParamsJson: JSON.stringify({
-                title: options.buttonText || "Select an option",
+                title: options.buttonText || "Open List",
                 sections: sections.map(sec => ({
                     title: sec.title,
                     rows: sec.rows.map(row => ({
@@ -67,10 +66,7 @@ async function sendInteractiveMessage(sock, jid, content, options = {}) {
         quoted: options.quoted,
     });
 
-    /**
-     * This is the "secret sauce" from the wbails helper.
-     * Without these additional nodes, WhatsApp servers strip the button payload.
-     */
+    // CRITICAL: The 'biz' node injection that makes it work on Whiskey
     const additionalNodes = [
         {
             tag: "biz",
