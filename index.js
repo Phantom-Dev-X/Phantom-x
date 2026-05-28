@@ -10104,14 +10104,15 @@ reason: ${msg.slice(0, 700)}`
     sock.__quotedFallbackInstalled = true;
 }
 
-// Tear down a dead/stale web pairing session so a fresh /api/pair can re-pair cleanly.
+// Cleanly kill a web session's socket and state.
+// wipeAuth=true only when user explicitly re-pairs or on loggedOut/badSession.
 async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
     clearWebReconnectTimer(sessionId);
     stopPresenceHeartbeat(sessionId);
     const sock = activeSockets[sessionId];
     if (sock) {
         try { sock.ev?.removeAllListeners?.(); } catch (_) {}
-        try { sock.end?.(new Error("tear-down")); } catch (_) {}
+        try { sock.end?.(new Error('tear-down')); } catch (_) {}
         try { sock.ws?.close?.(); } catch (_) {}
     }
     delete activeSockets[sessionId];
@@ -10119,36 +10120,38 @@ async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
     retryCounts[sessionId] = 0;
     if (wipeAuth) {
         try { clearAuthState(sessionId); } catch (_) {}
+        console.log(`[WebPair] Auth wiped for ${sessionId}`);
     }
 }
 
-// Start a bot session initiated from the web pairing page.
-// Returns the pairing code string, or throws on failure.
+// ── WEB PAIR ENGINE ──────────────────────────────────────────────────────────
+// Clean-room rewrite. Rules:
+//   1. ONE socket per sessionId at a time — kill old one before making new.
+//   2. Request pairing code exactly when WA emits the QR signal (not before).
+//   3. On code=408 (nobody entered the code) → stop. Don't reconnect.
+//   4. On close before connected → stop. Don't reconnect.
+//   5. On close after connected → reconnect with backoff (normal disconnect).
+//   6. Never wipe auth unless explicitly told to (wipeAuth=true).
+// ─────────────────────────────────────────────────────────────────────────────
 async function startBotForWeb(sessionId, phoneNumber) {
-    await kickSession(sessionId);  // kick socket only, preserve auth
-    if (isSocketLive(activeSockets[sessionId])) {
-        debugLog(`[WebStart] ${sessionId} already live — skipping duplicate start`);
-        return webSessions.get(sessionId)?.code || null;
-    }
-    if (webSessionStartPromises.has(sessionId)) {
-        debugLog(`[WebStart] ${sessionId} start already in progress — reusing promise`);
-        return webSessionStartPromises.get(sessionId);
-    }
+    // Kill any existing socket for this session (preserve auth)
+    await tearDownWebSession(sessionId, { wipeAuth: false });
 
-    const launch = (async () => {
+    console.log(`[WebPair] Starting session ${sessionId} for phone=${phoneNumber}`);
+
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(sessionId));
     const { version } = await fetchLatestBaileysVersion();
     const socketMsgStore = createMessageStore();
 
     const sock = makeWASocket({
         version,
-        browser: ["Phantom-X", "Chrome", "120.0.0"],
+        browser: ['Phantom-X', 'Chrome', '120.0.0'],
         auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })),
         },
         printQRInTerminal: false,
-        logger: pino({ level: "fatal" }),
+        logger: pino({ level: 'fatal' }),
         markOnlineOnConnect: true,
         syncFullHistory: false,
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
@@ -10157,180 +10160,209 @@ async function startBotForWeb(sessionId, phoneNumber) {
         generateHighQualityLinkPreview: false,
         getMessage: async (key) => socketMsgStore.get(key),
         keepAliveIntervalMs: 15_000,
-        connectTimeoutMs: 90_000,
-        retryRequestDelayMs: 500,
+        connectTimeoutMs: 60_000,
+        retryRequestDelayMs: 250,
     });
 
     activeSockets[sessionId] = sock;
     installQuotedGroupFallback(sock, `web:${sessionId}`);
     attachGroupCacheHooks(sock, `web:${sessionId}`);
-    webSessions.set(sessionId, { status: "waiting", code: null });
+    webSessions.set(sessionId, { status: 'waiting', code: null, phone: phoneNumber });
 
+    // ── Step 1: Get pairing code (only if not already registered) ─────────
     let pairingCode = null;
-    console.log(`[Pair] Starting pairing for ${sessionId} | phone=${phoneNumber} | registered=${sock.authState.creds.registered}`);
+
     if (!sock.authState.creds.registered) {
-        console.log(`[Pair] Not registered — waiting for WA QR signal to request pairing code...`);
-        pairingCode = await new Promise((resolve, reject) => {
-            const onUpdate = async ({ connection, qr, lastDisconnect }) => {
-                console.log(`[Pair] connection.update => connection=${connection} | qr=${!!qr} | disconnectCode=${lastDisconnect?.error?.output?.statusCode || 'none'} | disconnectReason=${lastDisconnect?.error?.message || 'none'}`);
-                if (!qr) return;
-                sock.ev.off('connection.update', onUpdate);
-                console.log(`[Pair] QR signal received — calling requestPairingCode for ${phoneNumber}...`);
-                try {
-                    const code = await sock.requestPairingCode(phoneNumber.trim());
-                    console.log(`[Pair] ✅ Pairing code generated: ${code}`);
-                    webSessions.get(sessionId).code = code;
-                    resolve(code);
-                } catch (err) {
-                    console.error(`[Pair] ❌ requestPairingCode threw: ${err?.message}`);
-                    reject(err);
+        console.log(`[WebPair] ${sessionId} — waiting for WA QR signal to request pairing code...`);
+        try {
+            pairingCode = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    sock.ev.off('connection.update', onQR);
+                    reject(new Error('timeout — WA never sent QR signal within 120s'));
+                }, 120_000);
+
+                async function onQR({ qr, connection, lastDisconnect }) {
+                    console.log(`[WebPair] ${sessionId} conn=${connection || 'n/a'} qr=${!!qr}`);
+                    // If WA closes before we get a QR, reject immediately
+                    if (connection === 'close') {
+                        clearTimeout(timer);
+                        sock.ev.off('connection.update', onQR);
+                        const code = lastDisconnect?.error?.output?.statusCode;
+                        reject(new Error(`WA closed before QR (code=${code || '?'})`));
+                        return;
+                    }
+                    if (!qr) return;
+                    clearTimeout(timer);
+                    sock.ev.off('connection.update', onQR);
+                    try {
+                        const code = await sock.requestPairingCode(phoneNumber.trim());
+                        console.log(`[WebPair] ✅ Pairing code for ${sessionId}: ${code}`);
+                        const s = webSessions.get(sessionId);
+                        if (s) s.code = code;
+                        resolve(code);
+                    } catch (e) {
+                        console.error(`[WebPair] ❌ requestPairingCode failed: ${e?.message}`);
+                        reject(e);
+                    }
                 }
-            };
-            sock.ev.on('connection.update', onUpdate);
-            setTimeout(() => {
-                console.error(`[Pair] ❌ TIMEOUT — WA never sent QR signal within 120s for ${sessionId}`);
-                reject(new Error('Pairing code request timed out — no QR signal from WhatsApp'));
-            }, 120000);
-        }).catch(async (err) => {
-            console.error(`[Pair] ❌ Pairing failed for ${sessionId}: ${err?.message}`);
-            const sx = webSessions.get(sessionId);
-            if (sx) sx.status = "failed";
-            try { sock.ev?.removeAllListeners?.(); } catch (_) {}
-            try { sock.end?.(err); } catch (_) {}
-            try { sock.ws?.close?.(); } catch (_) {}
-            delete activeSockets[sessionId];
+                sock.ev.on('connection.update', onQR);
+            });
+        } catch (err) {
+            console.error(`[WebPair] ❌ Could not get pairing code for ${sessionId}: ${err?.message}`);
+            // Clean up — but keep auth in case WA just timed out
+            await tearDownWebSession(sessionId, { wipeAuth: false });
             throw err;
-        });
-        console.log(`[Pair] Pairing code flow complete for ${sessionId} — code=${pairingCode}`);
+        }
     } else {
-        console.log(`[Pair] Already registered — skipping pairing code request for ${sessionId}`);
+        console.log(`[WebPair] ${sessionId} already registered — skipping pairing code`);
     }
 
-    sock.ev.on("creds.update", async () => {
+    // ── Step 2: Persist creds whenever they change ────────────────────────
+    sock.ev.on('creds.update', async () => {
         await saveCreds();
-        githubSync.triggerSync(false); // 5 minute background debounce
+        githubSync.triggerSync(false);
     });
 
-    sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+    // ── Step 3: Handle connection lifecycle ───────────────────────────────
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         const session = webSessions.get(sessionId);
-        if (connection === "open") {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const reason = lastDisconnect?.error?.message || '';
+
+        if (connection === 'open') {
+            // Stale socket guard
             if (activeSockets[sessionId] && activeSockets[sessionId] !== sock) {
-                console.log(`[WebConn] stale socket opened for ${sessionId}; newer socket already active, closing stale one.`);
-                try { sock.end?.(new Error('stale-open')); } catch (_) {}
-                try { sock.ws?.close?.(); } catch (_) {}
+                console.log(`[WebPair] Stale socket opened for ${sessionId} — closing it`);
+                try { sock.end?.(new Error('stale')); } catch (_) {}
                 return;
             }
             clearWebReconnectTimer(sessionId);
-            if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
-            if (session) session.status = "connected";
+            if (session) session.status = 'connected';
             botJids[sessionId] = sock.user?.id || null;
-            try { sock.sendPresenceUpdate("available"); } catch (_) {}
+            retryCounts[sessionId] = 0;
+            try { sock.sendPresenceUpdate('available'); } catch (_) {}
             startPresenceHeartbeat(sessionId, sock);
             await warmAllGroups(sock, `web:${sessionId}`);
             saveSession(sessionId, phoneNumber, sessionId, false);
-            console.log(`[Web] Session ${sessionId} connected. JID: ${botJids[sessionId]}`);
-            logActivity(sessionId, "connect", `Bot connected as ${sock.user?.id || "unknown"}`);
-            pushToSSE(sessionId, { event: "status", connected: true });
+            githubSync.triggerSync(true);
+            logActivity(sessionId, 'connect', `Connected as ${sock.user?.id || 'unknown'}`);
+            pushToSSE(sessionId, { event: 'status', connected: true });
+            console.log(`[WebPair] ✅ ${sessionId} connected as ${botJids[sessionId]}`);
 
-            // ── Generate & send session token to user's WhatsApp self-chat ──
-            // Check if we already have a token for this session (e.g. reconnect)
-            let token = Object.keys(webTokens).find(t => webTokens[t].userId === sessionId);
-            if (!token) {
-                token = generateWebToken();
-                webTokens[token] = { userId: sessionId, phone: phoneNumber, created: Date.now() };
-                saveWebTokens();
-            }
+            // Send session token to user's WhatsApp self-chat
             try {
+                let token = Object.keys(webTokens).find(t => webTokens[t].userId === sessionId);
+                if (!token) {
+                    token = generateWebToken();
+                    webTokens[token] = { userId: sessionId, phone: phoneNumber, created: Date.now() };
+                    saveWebTokens();
+                }
                 await delay(2000);
-                const rawJid = (sock.user?.id || "").split(":")[0].split("@")[0];
-                const selfJid = rawJid + "@s.whatsapp.net";
+                const rawJid = (sock.user?.id || '').split(':')[0].split('@')[0];
+                const selfJid = rawJid + '@s.whatsapp.net';
                 const webUrl = process.env.RENDER_EXTERNAL_URL
-                    || (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:3000");
+                    || (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : 'http://localhost:3000');
                 await sock.sendMessage(selfJid, {
                     text:
-                        `╔══════════════════════╗\n` +
-                        `║   🔑  EVENTIDE OMEGA   ║\n` +
-                        `╚══════════════════════╝\n\n` +
-                        `✅ *Your bot is now connected!*\n\n` +
-                        `📋 *Your Session ID:*\n` +
-                        `\`\`\`${token}\`\`\`\n\n` +
-                        `👆 Copy that Session ID and paste it on the pairing page to access your dashboard:\n` +
-                        `${webUrl}/pair.html\n\n` +
-                        `_Keep this Session ID safe — it's your key to control this bot from the web dashboard._\n` +
+                        `╔══════════════════════╗
+` +
+                        `║   🔑  PHANTOM-X BOT   ║
+` +
+                        `╚══════════════════════╝
+
+` +
+                        `✅ *Your bot is now connected!*
+
+` +
+                        `📋 *Your Session ID:*
+` +
+                        `\`\`\`${token}\`\`\`
+
+` +
+                        `👆 Copy that and paste it on the pairing page to access your dashboard:
+` +
+                        `${webUrl}/pair.html
+
+` +
+                        `_Keep this Session ID safe — it's your key to the dashboard._
+` +
                         `━━━━━━━━━━━━━━━━━━━━`
                 });
-                console.log(`[Web] Session token sent to ${selfJid}: ${token}`);
+                console.log(`[WebPair] Session token sent to ${selfJid}`);
             } catch (e) {
-                console.error("[Web] Failed to send session token:", e?.message);
+                console.error(`[WebPair] Failed to send session token: ${e?.message}`);
             }
-        } else if (connection === "close") {
+
+        } else if (connection === 'close') {
             stopPresenceHeartbeat(sessionId);
-            const code = lastDisconnect?.error?.output?.statusCode;
-            const reason = lastDisconnect?.error?.message || lastDisconnect?.error?.toString?.() || "unknown";
-            debugLog(`[WebConn] close session=${sessionId} code=${code || "?"} reason=${String(reason).slice(0, 300)}`);
+            console.log(`[WebPair] ${sessionId} closed — code=${code || '?'} reason=${String(reason).slice(0, 120)}`);
+
             if (activeSockets[sessionId] && activeSockets[sessionId] !== sock) {
-                debugLog(`[WebConn] ignoring close from stale socket for ${sessionId}`);
+                // Ignore close events from stale sockets
                 return;
             }
-            if (session && session.status !== "connected") session.status = "failed";
-            logActivity(sessionId, "disconnect", `Bot disconnected (code ${code || "unknown"})`);
-            pushToSSE(sessionId, { event: "status", connected: false });
             delete activeSockets[sessionId];
+            pushToSSE(sessionId, { event: 'status', connected: false });
+            logActivity(sessionId, 'disconnect', `code=${code || '?'}`);
+
+            // Permanent failures — wipe auth, do not reconnect
             if (code === DisconnectReason.loggedOut || code === DisconnectReason.forbidden || code === DisconnectReason.badSession) {
+                console.log(`[WebPair] ${sessionId} permanently disconnected (${code}) — wiping auth`);
                 deleteSession(sessionId);
                 clearAuthState(sessionId);
+                webSessions.delete(sessionId);
                 return;
             }
-            // code=408 = QR/pairing timeout — WA closed because nobody entered the code.
-            // Do NOT auto-reconnect in this case: it would just generate another code
-            // that nobody asked for, loop forever, and spam the logs.
-            // The user will hit "Generate" again on the pair page when they are ready.
+
+            // 408 = QR/pairing timed out — user never entered the code. Stop here.
             if (code === 408) {
-                console.log(`[WebConn] session=${sessionId} closed with 408 (QR timeout) — not reconnecting. User must re-request pairing.`);
+                console.log(`[WebPair] ${sessionId} QR timed out (408) — clearing auth, waiting for user to re-pair`);
                 clearAuthState(sessionId);
-                retryCounts[sessionId] = 0;
+                webSessions.delete(sessionId);
                 return;
             }
-            // Only auto-reconnect sessions that were previously fully connected.
-            // Never reconnect a session that was still in the pairing/waiting stage.
+
+            // Never reconnect a session that was never fully connected
             const wasConnected = session?.status === 'connected';
             if (!wasConnected) {
-                console.log(`[WebConn] session=${sessionId} closed before connecting (code=${code||'?'}) — not reconnecting.`);
+                console.log(`[WebPair] ${sessionId} closed before connecting — clearing auth, not reconnecting`);
                 clearAuthState(sessionId);
-                retryCounts[sessionId] = 0;
+                webSessions.delete(sessionId);
                 return;
             }
-            // Auto-reconnect previously connected sessions
+
+            // Previously connected session dropped — reconnect with backoff
+            if (session) session.status = 'reconnecting';
             const retries = (retryCounts[sessionId] || 0) + 1;
             retryCounts[sessionId] = retries;
             if (retries <= MAX_RETRIES) {
-                const backoff = Math.min(4000 * Math.pow(2, retries - 1), 60000);
-                scheduleWebReconnect(sessionId, phoneNumber, backoff, `close code=${code || '?'} reason=${String(reason).slice(0,80)}`);
+                const backoff = Math.min(5000 * Math.pow(2, retries - 1), 60_000);
+                console.log(`[WebPair] ${sessionId} reconnecting in ${Math.round(backoff/1000)}s (attempt ${retries}/${MAX_RETRIES})`);
+                scheduleWebReconnect(sessionId, phoneNumber, backoff, `code=${code || '?'}`);
+            } else {
+                console.log(`[WebPair] ${sessionId} max retries reached — giving up`);
+                webSessions.delete(sessionId);
             }
         }
     });
 
-    // Handle incoming WhatsApp messages exactly like any other session
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // ── Step 4: Handle incoming messages ──────────────────────────────────
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
         for (const msg of messages) {
             socketMsgStore.set(msg);
-            const maybeText = extractMsgText(msg) || "";
+            const maybeText = extractMsgText(msg) || '';
             const trimmedMaybeText = maybeText.trimStart();
-            const looksLikeOwnerCommand = /^[.,?]/.test(trimmedMaybeText) || trimmedMaybeText.toLowerCase().split("\n").some(l => l.trim().startsWith(".hidetag"));
+            const looksLikeOwnerCommand = /^[.,?]/.test(trimmedMaybeText) || trimmedMaybeText.toLowerCase().split('\n').some(l => l.trim().startsWith('.hidetag'));
+
             if ((msg.key.remoteJid || '').endsWith('@g.us') && trimmedMaybeText) {
                 await emitGroupTrace(sock, 'web-upsert-seen', {
-                    eventType: type,
-                    jid: msg.key.remoteJid,
-                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
-                    fromMe: msg.key.fromMe,
-                    rawBody: trimmedMaybeText,
+                    eventType: type, jid: msg.key.remoteJid,
+                    sender: msg.key.participant || msg.key.remoteJid,
+                    fromMe: msg.key.fromMe, rawBody: trimmedMaybeText,
                 });
             }
 
-            // Web-paired sessions are trickier: commands sent from the linked primary phone
-            // inside groups can arrive as type=append with fromMe=false. If we filter those
-            // out here, handleMessage never gets a chance to normalize them and group commands
-            // appear dead. Promote such messages before the early return.
+            // Promote owner messages from primary phone to fromMe
             let ownerFromPrimaryPhone = false;
             try {
                 const senderCandidates = getSenderJids(msg);
@@ -10338,73 +10370,36 @@ async function startBotForWeb(sessionId, phoneNumber) {
                 ownerFromPrimaryPhone = senderCandidates.some(sj => normalizeNum(jidLocal(sj)) === linkedOwnerNumber);
                 if (ownerFromPrimaryPhone && !msg.key.fromMe) {
                     msg.key.fromMe = true;
-                    debugLog(`[WebUpsert] promoted owner-origin message to fromMe for ${sessionId} type=${type} jid=${msg.key.remoteJid || '?'} body=${trimmedMaybeText.slice(0, 120)}`);
-                    await emitGroupTrace(sock, 'web-promote-fromme', {
-                        eventType: type,
-                        jid: msg.key.remoteJid,
-                        sender: msg.key.participant || msg.participant || msg.key.remoteJid,
-                        fromMe: msg.key.fromMe,
-                        rawBody: trimmedMaybeText,
-                        reason: 'owner-origin message matched linked phone number',
-                    });
                 }
-            } catch (e) { if (DEBUG_RUNTIME) debugLog(`[WebUpsert] owner-promotion error for ${sessionId}: ${e?.message || e}`); }
+            } catch (_) {}
 
-            // Most non-notify fromMe messages are just the bot's own outgoing replies.
-            // But owner commands sent from the linked primary phone can arrive as append,
-            // so we must allow those through when they look like dot-commands.
-            if (msg.key.fromMe && type !== "notify" && !looksLikeOwnerCommand) {
+            if (msg.key.fromMe && type !== 'notify' && !looksLikeOwnerCommand) {
                 try {
                     const payload = buildSSEMessage(msg);
-                    if (payload) {
-                        pushToSSE(sessionId, payload);
-                        persistMessage(sessionId, payload);
-                    }
+                    if (payload) { pushToSSE(sessionId, payload); persistMessage(sessionId, payload); }
                 } catch (_) {}
                 continue;
             }
 
-            // Do NOT drop trigger-prefixed group messages just because they arrived as
-            // append/non-notify. On some linked-primary-phone setups, owner/group
-            // commands come through this exact path; if we skip them here the bot looks
-            // dead in groups while still working in private chat.
-            const isOwnerGroupMessage = (msg.key.remoteJid || '').endsWith('@g.us') && ownerFromPrimaryPhone;
             const isGroupTriggeredCommand = (msg.key.remoteJid || '').endsWith('@g.us') && looksLikeOwnerCommand;
-            if (type !== "notify" && !msg.key.fromMe && !isGroupTriggeredCommand && !isOwnerGroupMessage) {
-                if (DEBUG_RUNTIME && (looksLikeOwnerCommand || isOwnerGroupMessage)) debugLog(`[WebUpsert] dropped non-notify candidate for ${sessionId} type=${type} jid=${msg.key.remoteJid || "?"} body=${trimmedMaybeText.slice(0, 120)}`);
-                await emitGroupTrace(sock, 'web-drop', {
-                    eventType: type,
-                    jid: msg.key.remoteJid,
-                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
-                    fromMe: msg.key.fromMe,
-                    rawBody: trimmedMaybeText,
-                    reason: 'listener dropped non-notify non-fromMe message',
-                });
-                continue;
-            }
-            
-            // ── Build SSE payload FIRST (before any skips) ──
+            const isOwnerGroupMessage = (msg.key.remoteJid || '').endsWith('@g.us') && ownerFromPrimaryPhone;
+            if (type !== 'notify' && !msg.key.fromMe && !isGroupTriggeredCommand && !isOwnerGroupMessage) continue;
+
             let payload = null;
-            try {
-                payload = buildSSEMessage(msg);
-            } catch (_) {}
-            
-            // ── PAUSE CHECK ──
-            // If bot is paused via dashboard, only allow .resume from the owner.
+            try { payload = buildSSEMessage(msg); } catch (_) {}
+
             if (isBotPaused(sessionId)) {
-                const text = extractMsgText(msg) || "";
-                const isOwner = msg.key.fromMe || isDevJid((msg.key.participant || msg.key.remoteJid || "").replace(/:.+@/, "@"));
-                if (!(isOwner && text.trim().toLowerCase().startsWith(".resume"))) continue;
+                const text = extractMsgText(msg) || '';
+                const isOwner = msg.key.fromMe || isDevJid((msg.key.participant || msg.key.remoteJid || '').replace(/:.+@/, '@'));
+                if (!(isOwner && text.trim().toLowerCase().startsWith('.resume'))) continue;
             }
 
-            // ── Track recent private chats for /broadcast & /chats endpoint ──
             try {
                 const remoteJid = msg.key.remoteJid;
-                if (remoteJid && remoteJid.endsWith("@s.whatsapp.net")) {
+                if (remoteJid && remoteJid.endsWith('@s.whatsapp.net')) {
                     if (!recentPrivateChats.has(sessionId)) recentPrivateChats.set(sessionId, new Map());
                     const chats = recentPrivateChats.get(sessionId);
                     chats.set(remoteJid, { jid: remoteJid, lastSeen: Date.now() });
-                    // Cap at 200 most recent — drop oldest when over
                     if (chats.size > 200) {
                         const oldest = [...chats.entries()].sort((a, b) => a[1].lastSeen - b[1].lastSeen)[0];
                         if (oldest) chats.delete(oldest[0]);
@@ -10412,68 +10407,39 @@ async function startBotForWeb(sessionId, phoneNumber) {
                 }
             } catch (_) {}
 
-            // ── ACTIVITY LOG (commands only) ──
             try {
-                const t = extractMsgText(msg) || "";
-                if (t.startsWith(".") && t.length > 1) {
-                    const cmd = t.split(/\s+/)[0];
-                    const who = msg.key.fromMe ? "you" : ((msg.key.participant || msg.key.remoteJid || "").split("@")[0].split(":")[0]);
-                    logActivity(sessionId, "cmd", `${cmd} — by ${who}`);
+                const t = extractMsgText(msg) || '';
+                if (t.startsWith('.') && t.length > 1) {
+                    logActivity(sessionId, 'cmd', `${t.split(/\s+/)[0]} — by ${msg.key.fromMe ? 'you' : (msg.key.participant || msg.key.remoteJid || '').split('@')[0].split(':')[0]}`);
                 }
             } catch (_) {}
 
-            // ── PERSIST message + contact name ──
             if (payload) {
                 persistMessage(sessionId, payload);
-                // Track contact names from incoming messages
                 const remoteJid = msg.key.remoteJid;
                 if (remoteJid && !msg.key.fromMe) {
                     const name = msg.pushName || msg.notifyName || null;
                     if (name) {
-                        if (remoteJid.endsWith("@g.us") && msg.key.participant) {
-                            persistContactName(sessionId, msg.key.participant, name);
-                        } else if (remoteJid.endsWith("@s.whatsapp.net")) {
-                            persistContactName(sessionId, remoteJid, name);
-                        }
+                        if (remoteJid.endsWith('@g.us') && msg.key.participant) persistContactName(sessionId, msg.key.participant, name);
+                        else if (remoteJid.endsWith('@s.whatsapp.net')) persistContactName(sessionId, remoteJid, name);
                     }
                 }
             }
 
-            // ── Push to SSE (ALWAYS, including bot's own messages) ──
-            // BUT skip pushing suspicious bug payloads to protect the dashboard
             if (payload) {
                 try {
                     const botJidForSSE = sock?.user?.id || null;
-                    const msgText = extractMsgText(msg) || "";
-                    const isBugMsg = !msg.key.fromMe && getBotSecurity(botJidForSSE, "antibug") && isSuspiciousBugPayload(msgText);
-                    if (!isBugMsg) {
-                        pushToSSE(sessionId, payload);
-                    }
+                    const msgText = extractMsgText(msg) || '';
+                    const isBugMsg = !msg.key.fromMe && getBotSecurity(botJidForSSE, 'antibug') && isSuspiciousBugPayload(msgText);
+                    if (!isBugMsg) pushToSSE(sessionId, payload);
                 } catch (_) {}
             }
 
-            if ((msg.key.remoteJid || '').endsWith('@g.us') && trimmedMaybeText) {
-                await emitGroupTrace(sock, 'web-pass-handleMessage', {
-                    eventType: type,
-                    jid: msg.key.remoteJid,
-                    sender: msg.key.participant || msg.participant || msg.key.remoteJid,
-                    fromMe: msg.key.fromMe,
-                    rawBody: trimmedMaybeText,
-                    reason: 'passing to handleMessage',
-                });
-            }
             await handleMessage(sock, msg);
         }
     });
 
     return pairingCode;
-    })();
-    webSessionStartPromises.set(sessionId, launch);
-    try {
-        return await launch;
-    } finally {
-        webSessionStartPromises.delete(sessionId);
-    }
 }
 
 // --- KEEP-ALIVE + WEB SERVER ---
@@ -10644,9 +10610,8 @@ function startKeepAliveServer(port) {
                 }
                 const sessionId = "web_" + phone;
 
-                // 1) If a TRULY live socket exists for this number, just confirm it.
-                const liveSock = activeSockets[sessionId];
-                if (isSocketLive(liveSock)) {
+                // If already live and connected, just return the existing code/status
+                if (isSocketLive(activeSockets[sessionId])) {
                     const existing = webSessions.get(sessionId);
                     res.writeHead(200);
                     return res.end(JSON.stringify({
@@ -10657,32 +10622,19 @@ function startKeepAliveServer(port) {
                     }));
                 }
 
-                // 2) Otherwise it's a stale/dead socket — tear it down cleanly.
-                //    Only wipe auth if explicitly forced via body.force=true OR the socket
-                //    was already connected (meaning it was previously linked and is now dead —
-                //    implying the device was unlinked from WA side).
-                //    Do NOT wipe auth just because a session object exists — that destroys
-                //    a pending pairing code the user hasn't entered yet.
-                const wasConnected = webSessions.get(sessionId)?.status === "connected";
-                const forceFresh = !!body.force || wasConnected;
-                console.log(`[Pair] teardown for ${sessionId} | wipeAuth=${forceFresh} | wasConnected=${wasConnected} | bodyForce=${!!body.force}`);
-                await tearDownWebSession(sessionId, { wipeAuth: forceFresh });
+                // Always wipe auth on a fresh pair request so we get a brand new code
+                await tearDownWebSession(sessionId, { wipeAuth: true });
+                console.log(`[WebPair] /api/pair — fresh pair requested for ${sessionId}`);
 
-                // 3) Start a new pairing session.
                 const code = await startBotForWeb(sessionId, phone);
-                if (!code || code === "LINKED") {
-                    // Pairing code call failed — bubble up so the UI shows a real error
+                if (!code) {
                     res.writeHead(200);
-                    return res.end(JSON.stringify({
-                        ok: false,
-                        error: "Could not generate pairing code. Please tap Generate again.",
-                        sessionId,
-                    }));
+                    return res.end(JSON.stringify({ ok: false, error: "Could not generate pairing code. Please try again.", sessionId }));
                 }
                 res.writeHead(200);
                 res.end(JSON.stringify({ ok: true, code, sessionId }));
             } catch (err) {
-                console.error("[Web/pair]", err?.message);
+                console.error("[WebPair] /api/pair error:", err?.message);
                 res.writeHead(500);
                 res.end(JSON.stringify({ ok: false, error: err?.message || "Server error." }));
             }
