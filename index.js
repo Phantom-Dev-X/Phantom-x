@@ -10180,7 +10180,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
     if (!sock.authState.creds.registered) {
         await delay(3000);
         try {
-            pairingCode = await sock.requestPairingCode(phoneNumber.trim());
+            if (sock.authState.creds.registered) { pairingCode = "ALREADY_CONNECTED"; } else { await delay(2000); pairingCode = await sock.requestPairingCode(phoneNumber.trim()); }
             webSessions.get(sessionId).code = pairingCode;
         } catch (err) {
             console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
