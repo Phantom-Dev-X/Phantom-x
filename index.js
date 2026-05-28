@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@whiskeysockets/baileys");
+} = require("@fizzxydev/baileys-pro");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -183,6 +183,21 @@ body: ${String(info.body || '').slice(0, 120)}`
 
 // Per-user state
 const activeSockets = {};
+async function kickSession(userId) {
+    const sock = activeSockets[userId];
+    if (sock) {
+        console.log(`[ConflictFix] Kicking active session for ${userId}`);
+        try { sock.ev.removeAllListeners(); } catch (_) {}
+        try { sock.end(new Error("terminated_for_new_pairing")); } catch (_) {}
+        try { sock.ws.close(); } catch (_) {}
+        delete activeSockets[userId];
+    }
+    const authDir = getAuthDir(userId);
+    if (fs.existsSync(authDir)) {
+        console.log(`[ConflictFix] Wiping auth folder for ${userId}`);
+        fs.rmSync(authDir, { recursive: true, force: true });
+    }
+}
 const retryCounts = {};
 const botJids = {};        // userId -> bot's own WhatsApp JID
 const telegramCtxs = {};   // userId -> telegram ctx (for alerts)
@@ -10134,6 +10149,7 @@ async function tearDownWebSession(sessionId, { wipeAuth = false } = {}) {
 // Start a bot session initiated from the web pairing page.
 // Returns the pairing code string, or throws on failure.
 async function startBotForWeb(sessionId, phoneNumber) {
+    await kickSession(sessionId);
     if (isSocketLive(activeSockets[sessionId])) {
         debugLog(`[WebStart] ${sessionId} already live — skipping duplicate start`);
         return webSessions.get(sessionId)?.code || null;
@@ -10158,6 +10174,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
         markOnlineOnConnect: true,
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],
         syncFullHistory: false,
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
@@ -10180,7 +10197,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
     if (!sock.authState.creds.registered) {
         await delay(3000);
         try {
-            if (sock.authState.creds.registered) { pairingCode = "ALREADY_CONNECTED"; } else { await delay(2000); pairingCode = await sock.requestPairingCode(phoneNumber.trim()); }
+            pairingCode = await sock.requestPairingCode(phoneNumber.trim(), "12345678");
             webSessions.get(sessionId).code = pairingCode;
         } catch (err) {
             console.error(`[Web/pair] requestPairingCode failed for ${sessionId}:`, err?.message);
@@ -11392,6 +11409,7 @@ function migrateLegacySessionDataIfNeeded() {
 
 // --- WHATSAPP ENGINE ---
 async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
+    if (!isReconnect) await kickSession(userId);
     const { state, saveCreds } = await useMultiFileAuthState(getAuthDir(userId));
     const { version } = await fetchLatestBaileysVersion();
     const socketMsgStore = createMessageStore();
@@ -11405,7 +11423,8 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         },
         printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
-        markOnlineOnConnect: true,               // keep the linked account visibly online for group command reliability
+        markOnlineOnConnect: true,
+        browser: [ "Ubuntu", "Chrome", "20.0.04" ],               // keep the linked account visibly online for group command reliability
         syncFullHistory: false,         // don't pull FULL history on connect
         shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid)?.meta,
@@ -11425,7 +11444,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
     if (!isReconnect && !sock.authState.creds.registered) {
         await delay(3000);
         try {
-            const code = await sock.requestPairingCode(phoneNumber);
+            const code = await sock.requestPairingCode(phoneNumber, "12345678");
             await ctx.reply("✅ Your pairing code is ready!\n\nOpen WhatsApp → Linked Devices → Link a Device → Enter code manually.\n\nHere is your code 👇");
             await ctx.reply(`\`${code}\``, { parse_mode: "Markdown" });
         } catch (err) {
