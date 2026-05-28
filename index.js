@@ -3853,43 +3853,6 @@ async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows)
         await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}` }, { quoted: quotedMsg });
     }
 }
-    global.menuStateMap[jid] = rows.map(r => r.id);
-
-    const singleSelect = {
-        name: 'single_select',
-        buttonParamsJson: JSON.stringify({
-            title: buttonLabel || 'Tap to Select',
-            sections: [{
-                title: 'Available Options',
-                rows: rows.map(r => ({
-                    title: r.title,
-                    description: r.desc || '',
-                    id: r.id,
-                })),
-            }],
-        }),
-    };
-
-    // ONLY interactive attempt we want: helper package wrapper for Whiskey.
-    try {
-        await helperSendInteractiveMessage(sock, jid, {
-            text: bodyText,
-            footer: '— Phantom-X',
-            interactiveButtons: [singleSelect],
-        }, quotedMsg ? { quoted: quotedMsg } : {});
-        await emitButtonTrace(sock, 'menu-send', { test: 'menu-single-select', reason: 'helper single_select sent', body: bodyText });
-        return;
-    } catch (err) {
-        console.error('[sendListSelect] helper single_select failed:', err?.message || err);
-        await emitButtonTrace(sock, 'menu-send-fail', { test: 'menu-single-select', reason: String(err?.message || err), body: bodyText });
-    }
-
-    // Final fallback: plain numbered text only.
-    const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? ` — ${r.desc}` : ''}`).join('\n');
-    await sock.sendMessage(jid, {
-        text: `${bodyText}\n\n${numbered}\n\n_Reply with the number to choose._`
-    }, quotedMsg ? { quoted: quotedMsg } : {});
-}
 async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer = "— Phantom-X") {
     try {
         const { sendButtons } = require("./wbails_helper");
@@ -3904,20 +3867,6 @@ async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer 
         const numbered = buttons.map((b, i) => `*${i + 1}.* ${b.label}`).join("\n");
         await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}` }, { quoted: quotedMsg });
     }
-}
-        }, quotedMsg ? { quoted: quotedMsg } : {});
-        await emitButtonTrace(sock, 'quick-send', { test: 'quick-buttons', reason: 'helper quick buttons sent', body: bodyText });
-        return;
-    } catch (err) {
-        console.error('[sendQuickButtons] helper sendButtons failed:', err?.message || err);
-        await emitButtonTrace(sock, 'quick-send-fail', { test: 'quick-buttons', reason: String(err?.message || err), body: bodyText });
-    }
-
-    const numbered = buttons.map((b, i) => `*${i + 1}.* ${b.label}`).join("\n");
-    await sock.sendMessage(jid,
-        { text: bodyText + "\n\n" + numbered + "\n\n_Reply with the number to choose._" },
-        quotedMsg ? { quoted: quotedMsg } : {}
-    );
 }
 async function replyBadOnOff(sock, from, msg, cmdName) {
     const body = buildOmegaTerminal(
