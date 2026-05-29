@@ -9605,8 +9605,15 @@ telBot.command("listowners", async (ctx) => {
 
 telBot.command("pair", async (ctx) => {
     const userId = ctx.from.id;
-    const input = ctx.message.text.split(" ")[1];
-    if (!input) return ctx.reply("Abeg, add your number! Example: /pair 2348102756072");
+    const rawInput = ctx.message.text.split(" ").slice(1).join(" ");
+    if (!rawInput) return ctx.reply("Abeg, add your number! Example: /pair 2348102756072");
+
+    // Normalize to E.164 digits-only (strip +, spaces, dashes, brackets).
+    // requestPairingCode REQUIRES a plain digit string with country code.
+    const phone = normalizeNum(rawInput);
+    if (phone.length < 8 || phone.length > 15) {
+        return ctx.reply("❌ That number doesn't look right. Send it with your country code and no symbols.\nExample: /pair 2348102756072");
+    }
 
     if (activeSockets[userId]) {
         try { activeSockets[userId].end(); } catch (_) {}
@@ -9617,7 +9624,7 @@ telBot.command("pair", async (ctx) => {
     clearAuthState(userId);
 
     ctx.reply("🔄 Generating your pairing code... please wait a few seconds.");
-    startBot(userId, input.trim(), ctx);
+    startBot(userId, phone, ctx);
 });
 
 // Kill any existing polling session (prevents 409 Conflict on restart)
@@ -10195,7 +10202,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
                     clearTimeout(timer);
                     sock.ev.off('connection.update', onQR);
                     try {
-                        const code = await sock.requestPairingCode(phoneNumber.trim());
+                        const code = await sock.requestPairingCode(normalizeNum(phoneNumber));
                         console.log(`[WebPair] ✅ Pairing code for ${sessionId}: ${code}`);
                         const s = webSessions.get(sessionId);
                         if (s) s.code = code;
@@ -10209,8 +10216,10 @@ async function startBotForWeb(sessionId, phoneNumber) {
             });
         } catch (err) {
             console.error(`[WebPair] ❌ Could not get pairing code for ${sessionId}: ${err?.message}`);
-            // Clean up — but keep auth in case WA just timed out
-            await tearDownWebSession(sessionId, { wipeAuth: false });
+            // Wipe auth: a failed pairing attempt can leave a half-written auth
+            // state. Reusing it on the next attempt makes WhatsApp reject the link
+            // ("Couldn't link device") and can get the number rate-limited.
+            await tearDownWebSession(sessionId, { wipeAuth: true });
             throw err;
         }
     } else {
@@ -11411,7 +11420,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 if (!qr) return;
                 sock.ev.off('connection.update', onUpdate);
                 try {
-                    const code = await sock.requestPairingCode(phoneNumber);
+                    const code = await sock.requestPairingCode(normalizeNum(phoneNumber));
                     resolve({ ok: true, code });
                 } catch (err) {
                     resolve({ ok: false, err });
@@ -11422,6 +11431,11 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         });
         if (!pairResult.ok) {
             console.error(`Pairing error for user ${userId}:`, pairResult.err?.message || pairResult.err);
+            // Clean up the half-registered auth so the next /pair starts fresh.
+            // Leaving a partial auth state makes WhatsApp reject future links.
+            try { activeSockets[userId]?.end?.(new Error("pair-failed")); } catch (_) {}
+            delete activeSockets[userId];
+            clearAuthState(userId);
             await ctx.reply("❌ Failed to generate pairing code. Please try again with /pair <your number>.");
             return;
         }
@@ -11769,9 +11783,14 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 delete retryCounts[userId];
                 deleteSession(userId);
                 try { removePendingJoin(userId); } catch {}
+                // Always wipe auth on a terminal failure. A loggedOut/forbidden/
+                // badSession auth state is dead — reusing it makes WhatsApp refuse
+                // to link and can flag the number. Force a clean slate.
+                clearAuthState(userId);
                 if (statusCode === DisconnectReason.loggedOut) {
-                    clearAuthState(userId);
                     ctx.reply("⚠️ WhatsApp session ended. Use /pair to reconnect.");
+                } else {
+                    ctx.reply("⚠️ WhatsApp rejected this session. I cleared it — use /pair to link again.");
                 }
                 return;
             }
