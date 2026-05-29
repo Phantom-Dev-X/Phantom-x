@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@whiskeysockets/baileys");
+} = require("@fizzxydev/baileys-pro");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -40,10 +40,10 @@ const crypto = require("crypto");
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
 try {
-    const baileysPkg = require("@whiskeysockets/baileys/package.json");
-    console.log(`[WA Lib] Using @whiskeysockets/baileys v${baileysPkg.version}`);
+    const baileysPkg = require("@fizzxydev/baileys-pro/package.json");
+    console.log(`[WA Lib] Using @fizzxydev/baileys-pro v${baileysPkg.version}`);
 } catch (e) {
-    console.log(`[WA Lib] Could not resolve @whiskeysockets/baileys package: ${e?.message || e}`);
+    console.log(`[WA Lib] Could not resolve @fizzxydev/baileys-pro package: ${e?.message || e}`);
 }
 
 // ── MongoDB Cloud Persistence (free tier) ──────────────────────────────────────

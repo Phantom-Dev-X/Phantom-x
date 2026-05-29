@@ -5,7 +5,6 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "node scripts/patch-baileys.js",
     "patch-baileys": "node scripts/patch-baileys.js",
     "test": "node test/pair-flow.test.js && node test/auth-clear.test.js && node test/pair-complete.test.js"
   },
@@ -14,8 +13,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@fizzxydev/baileys-pro": "^8.7.2",
     "@ryuu-reinzz/button-helper": "^2.2.3",
-    "@whiskeysockets/baileys": "6.7.23",
     "@zeppeliorg/wbails": "^1.0.8",
     "dotenv": "^17.4.2",
     "mongodb": "^7.2.0",

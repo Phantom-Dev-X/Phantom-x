@@ -2,18 +2,14 @@
 /**
  * patch-baileys.js
  * ----------------------------------------------------------------------------
- * The Baileys 7.0.0-rc line (rc9..rc13) shipped THREE auth-handshake
- * regressions that cause "Couldn't link device" / 401 device_removed on BOTH
- * the QR and pairing-code login paths. This script surgically reverts them.
+ * NOTE: This project now uses the @fizzxydev/baileys-pro fork, which already
+ * has correct pairing behaviour (no v7-rc auth regressions, and native custom
+ * pairing-code support). So this script is normally a NO-OP.
  *
- * As of now the project is pinned to the stable `legacy` line (6.7.x), which
- * does NOT contain these bugs — so on 6.7.x this script is a harmless no-op.
- * It stays in place (and in the postinstall hook) so that if anyone ever bumps
- * back onto a v7 RC, pairing keeps working automatically.
- *
- *  Patch 1  validate-connection.js : generateLoginNode -> passive: true  => false
- *  Patch 2  validate-connection.js : remove `lidDbMigrated: false`
- *  Patch 3  socket.js              : `await noise.finishInit()` => no await
+ * It is kept only as a safety net: if anyone ever switches back to a vanilla
+ * @whiskeysockets/baileys 7.0.0-rc build, run `npm run patch-baileys` to revert
+ * the three known auth-handshake regressions (passive / lidDbMigrated /
+ * awaited noise.finishInit) that cause "Couldn't link device".
  * ----------------------------------------------------------------------------
  */
 const fs = require("fs");
@@ -23,79 +19,42 @@ const ROOT = path.join(__dirname, "..", "node_modules", "@whiskeysockets", "bail
 const BAILEYS = path.join(ROOT, "lib");
 
 if (!fs.existsSync(BAILEYS)) {
-    console.log("[patch-baileys] Baileys not installed yet — skipping.");
+    console.log("[patch-baileys] vanilla @whiskeysockets/baileys not installed (using fork) — nothing to patch.");
     process.exit(0);
 }
 
-// Detect version — only the v7 release candidates need patching.
 let version = "unknown";
 try { version = require(path.join(ROOT, "package.json")).version; } catch (_) {}
-const needsPatch = /^7\.0\.0-rc/.test(version);
-
-if (!needsPatch) {
-    console.log(`[patch-baileys] Baileys v${version} detected — stable line, no patch needed.`);
+if (!/^7\.0\.0-rc/.test(version)) {
+    console.log(`[patch-baileys] @whiskeysockets/baileys v${version} — stable line, no patch needed.`);
     process.exit(0);
 }
 
-console.log(`[patch-baileys] Baileys v${version} detected — applying RC auth fixes...`);
+console.log(`[patch-baileys] @whiskeysockets/baileys v${version} detected — applying RC auth fixes...`);
 
 function patchFile(relPath, edits) {
     const file = path.join(BAILEYS, relPath);
-    if (!fs.existsSync(file)) {
-        console.log(`[patch-baileys] ${relPath} not found — skipping.`);
-        return;
-    }
+    if (!fs.existsSync(file)) return;
     let src = fs.readFileSync(file, "utf8");
     let changed = false;
     for (const { find, replace, label } of edits) {
-        if (src.includes(replace) && !src.includes(find)) {
-            console.log(`[patch-baileys] ✓ already patched: ${label}`);
-            continue;
-        }
-        if (src.includes(find)) {
-            src = src.split(find).join(replace);
-            changed = true;
-            console.log(`[patch-baileys] ✓ patched: ${label}`);
-        } else {
-            console.log(`[patch-baileys] ⚠ pattern not found (skipped): ${label}`);
-        }
+        if (src.includes(replace) && !src.includes(find)) { console.log(`[patch-baileys] ✓ already patched: ${label}`); continue; }
+        if (src.includes(find)) { src = src.split(find).join(replace); changed = true; console.log(`[patch-baileys] ✓ patched: ${label}`); }
     }
     if (changed) fs.writeFileSync(file, src, "utf8");
 }
 
-// ── Patch 1 + 2 : validate-connection.js (generateLoginNode) ────────────────
 patchFile("Utils/validate-connection.js", [
-    {
-        find: "passive: true,",
-        replace: "passive: false,",
-        label: "generateLoginNode passive:true -> false",
-    },
-    {
-        find: "        // TODO: investigate (hard set as false atm)\n        lidDbMigrated: false\n",
-        replace: "",
-        label: "remove lidDbMigrated field",
-    },
+    { find: "passive: true,", replace: "passive: false,", label: "passive:true -> false" },
+    { find: "        // TODO: investigate (hard set as false atm)\n        lidDbMigrated: false\n", replace: "", label: "remove lidDbMigrated" },
 ]);
-
-// Fallback for the lidDbMigrated removal if the comment text differs.
-(function looseLidDbRemoval() {
+(function () {
     const file = path.join(BAILEYS, "Utils/validate-connection.js");
     if (!fs.existsSync(file)) return;
     let src = fs.readFileSync(file, "utf8");
-    if (src.includes("lidDbMigrated")) {
-        src = src.replace(/,?\s*lidDbMigrated:\s*false/g, "");
-        fs.writeFileSync(file, src, "utf8");
-        console.log("[patch-baileys] ✓ patched (loose): removed lingering lidDbMigrated");
-    }
+    if (src.includes("lidDbMigrated")) { src = src.replace(/,?\s*lidDbMigrated:\s*false/g, ""); fs.writeFileSync(file, src, "utf8"); }
 })();
-
-// ── Patch 3 : socket.js (noise.finishInit race) ─────────────────────────────
 patchFile("Socket/socket.js", [
-    {
-        find: "await noise.finishInit();",
-        replace: "noise.finishInit();",
-        label: "drop await on noise.finishInit()",
-    },
+    { find: "await noise.finishInit();", replace: "noise.finishInit();", label: "drop await on finishInit" },
 ]);
-
 console.log("[patch-baileys] Done.");

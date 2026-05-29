@@ -1,4 +1,4 @@
-const { generateWAMessageFromContent, proto } = require("@whiskeysockets/baileys");
+const { generateWAMessageFromContent, proto } = require("@fizzxydev/baileys-pro");
 
 /**
  * wbails_helper.js — Phantom-X button helper
