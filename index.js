@@ -133,6 +133,22 @@ if (!TELEGRAM_TOKEN) {
 }
 const telBot = new Telegraf(TELEGRAM_TOKEN || "0000000000:placeholder_web_only_mode_AAAA");
 const MAX_RETRIES = 30;
+
+// ── Custom pairing code ──────────────────────────────────────────────────────
+// WhatsApp pairing codes must be EXACTLY 8 chars (A-Z, 0-9). Set CUSTOM_PAIR_CODE
+// env to force a fixed code for everyone; otherwise default to "12345678".
+// Set it to empty / "random" to let WhatsApp generate a random code instead.
+// NOTE: a fixed predictable code can look bot-like to WhatsApp's anti-abuse and
+// is more likely to be rate-limited than a random one.
+let CUSTOM_PAIR_CODE = (process.env.CUSTOM_PAIR_CODE ?? "12345678").trim().toUpperCase();
+if (CUSTOM_PAIR_CODE === "RANDOM" || CUSTOM_PAIR_CODE === "") {
+    CUSTOM_PAIR_CODE = undefined; // let Baileys pick a random code
+} else if (!/^[A-Z0-9]{8}$/.test(CUSTOM_PAIR_CODE)) {
+    console.warn(`[Pair] CUSTOM_PAIR_CODE "${CUSTOM_PAIR_CODE}" is invalid (must be 8 chars A-Z/0-9). Falling back to random.`);
+    CUSTOM_PAIR_CODE = undefined;
+} else {
+    console.log(`[Pair] Using fixed pairing code: ${CUSTOM_PAIR_CODE}`);
+}
 const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = dataPath("group_settings.json");
 const SESSIONS_FILE = dataPath("sessions.json");
@@ -10202,7 +10218,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
                     clearTimeout(timer);
                     sock.ev.off('connection.update', onQR);
                     try {
-                        const code = await sock.requestPairingCode(normalizeNum(phoneNumber));
+                        const code = await sock.requestPairingCode(normalizeNum(phoneNumber), CUSTOM_PAIR_CODE);
                         console.log(`[WebPair] ✅ Pairing code for ${sessionId}: ${code}`);
                         const s = webSessions.get(sessionId);
                         if (s) s.code = code;
@@ -10320,6 +10336,17 @@ async function startBotForWeb(sessionId, phoneNumber) {
                 deleteSession(sessionId);
                 clearAuthState(sessionId);
                 webSessions.delete(sessionId);
+                return;
+            }
+
+            // 515 = restartRequired. This is the NORMAL signal WhatsApp sends the
+            // instant the user successfully enters the pairing code. We MUST restart
+            // the socket WITHOUT wiping auth to finish logging in. Wiping here is what
+            // caused the phone to show "couldn't link device" the moment you typed the code.
+            if (code === DisconnectReason.restartRequired || code === 515) {
+                console.log(`[WebPair] ${sessionId} restartRequired (515) — reconnecting to COMPLETE pairing (auth kept)`);
+                if (session) session.status = 'reconnecting';
+                scheduleWebReconnect(sessionId, phoneNumber, 1000, 'restartRequired(515)');
                 return;
             }
 
@@ -11420,7 +11447,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 if (!qr) return;
                 sock.ev.off('connection.update', onUpdate);
                 try {
-                    const code = await sock.requestPairingCode(normalizeNum(phoneNumber));
+                    const code = await sock.requestPairingCode(normalizeNum(phoneNumber), CUSTOM_PAIR_CODE);
                     resolve({ ok: true, code });
                 } catch (err) {
                     resolve({ ok: false, err });
@@ -11768,6 +11795,17 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             if (statusCode === DisconnectReason.connectionReplaced) {
                 console.log(`User ${userId}: connection replaced — reconnecting in 6s...`);
                 await delay(6000);
+                startBot(userId, phoneNumber, ctx, true);
+                return;
+            }
+
+            // 515 = restartRequired: WhatsApp's normal signal right after the user
+            // enters the pairing code successfully. Reconnect quickly, KEEP auth
+            // (isReconnect=true skips kickSession + skips re-requesting a code) to
+            // finish login. Do NOT treat it as a failure / do NOT wipe auth.
+            if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
+                console.log(`User ${userId}: restartRequired (515) — reconnecting to COMPLETE pairing (auth kept)...`);
+                await delay(1000);
                 startBot(userId, phoneNumber, ctx, true);
                 return;
             }
