@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@fizzxydev/baileys-pro");
+} = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -40,10 +40,10 @@ const crypto = require("crypto");
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
 try {
-    const baileysPkg = require("@fizzxydev/baileys-pro/package.json");
-    console.log(`[WA Lib] Using @fizzxydev/baileys-pro v${baileysPkg.version}`);
+    const baileysPkg = require("@whiskeysockets/baileys/package.json");
+    console.log(`[WA Lib] Using @whiskeysockets/baileys v${baileysPkg.version}`);
 } catch (e) {
-    console.log(`[WA Lib] Could not resolve @fizzxydev/baileys-pro package: ${e?.message || e}`);
+    console.log(`[WA Lib] Could not resolve @whiskeysockets/baileys package: ${e?.message || e}`);
 }
 
 // ── MongoDB Cloud Persistence (free tier) ──────────────────────────────────────
@@ -3887,30 +3887,59 @@ function unwrapMessageContent(message) {
 }
 
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
-    // Use the legacy listMessage format ("Test E"): it is the single most
-    // compatible interactive UI — it renders + responds on BOTH normal WhatsApp
-    // and WhatsApp Business. It goes out as a SINGLE_SELECT listMessage and is
-    // wrapped by patchMessageBeforeSending (viewOnce + deviceListMetadata).
-    // A tapped row returns listResponseMessage.singleSelectReply.selectedRowId
-    // which the handler already decodes back to the row id.
+    // "Test E" legacy listMessage — the single most compatible interactive UI:
+    // renders + responds on BOTH normal WhatsApp and WhatsApp Business.
+    //
+    // @whiskeysockets/baileys removed the { sections, buttonText } shorthand, so we
+    // HAND-BUILD a SINGLE_SELECT listMessage proto and relay it ourselves. The
+    // payload is byte-identical to the fork's Test-E output (verified via
+    // encode/decode round-trip). A tapped row returns
+    // listResponseMessage.singleSelectReply.selectedRowId, which handleMessage
+    // already decodes back to the row id. Also registers a 1-2-3 number fallback.
     try {
-        // Register a number-fallback so users can also reply 1, 2, 3...
-        try {
-            global.menuStateMap = global.menuStateMap || {};
-            global.menuStateMap[jid] = rows.map(r => r.id);
-        } catch (_) {}
+        global.menuStateMap = global.menuStateMap || {};
+        global.menuStateMap[jid] = rows.map(r => r.id);
+    } catch (_) {}
 
-        await sock.sendMessage(jid, {
-            text: bodyText,
-            footer: "legacy list + patchMessageBeforeSending",
+    try {
+        const listMessage = waProto.Message.ListMessage.create({
             title: "",
+            description: bodyText,
+            footerText: "legacy list + patchMessageBeforeSending",
             buttonText: buttonLabel,
+            listType: waProto.Message.ListMessage.ListType.SINGLE_SELECT,
             sections: [{
                 title: "Available Options",
-                rows: rows.map(r => ({ title: r.title, rowId: r.id, description: r.desc || "" }))
+                rows: rows.map(r => ({
+                    title: r.title,
+                    rowId: r.id,
+                    description: r.desc || "",
+                })),
             }],
-            viewOnce: true,
-        }, { quoted: quotedMsg });
+        });
+
+        // Wrap exactly like patchLegacyInteractiveForWhiskey (viewOnce + deviceListMetadata).
+        const content = {
+            viewOnceMessage: {
+                message: {
+                    messageContextInfo: {
+                        deviceListMetadataVersion: 2,
+                        deviceListMetadata: {},
+                    },
+                    listMessage,
+                },
+            },
+        };
+
+        const waMsg = generateWAMessageFromContent(jid, content, {
+            userJid: sock.user?.id,
+            quoted: quotedMsg || undefined,
+        });
+
+        await sock.relayMessage(jid, waMsg.message, {
+            messageId: waMsg.key.id,
+            useCachedGroupMetadata: String(jid || "").endsWith("@g.us") ? true : undefined,
+        });
     } catch (e) {
         console.error("sendListSelect error:", e.message);
         // Last-resort plain text + numbered options (always usable).

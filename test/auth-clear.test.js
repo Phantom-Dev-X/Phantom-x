@@ -100,7 +100,7 @@ const telegrafMock = { Telegraf: MockTelegraf, Markup: {} };
 
 const realLoad = Module._load;
 Module._load = function (request) {
-    if (request === "@fizzxydev/baileys-pro") return baileysMock;
+    if (request === "@whiskeysockets/baileys") return baileysMock;
     if (request === "telegraf") return telegrafMock;
     return realLoad.apply(this, arguments);
 };

@@ -2,7 +2,7 @@
  * pair-flow.test.js — End-to-end pairing propagation test.
  * ---------------------------------------------------------------------------
  * We act as BOTH upstream servers:
- *   • @fizzxydev/baileys-pro  -> the WhatsApp server (mocked)
+ *   • @whiskeysockets/baileys  -> the WhatsApp server (mocked)
  *   • telegraf                 -> the Telegram server (mocked)
  *
  * The REAL, unmodified index.js runs against these mocks. We give the bot a
@@ -137,7 +137,7 @@ const telegrafMock = { Telegraf: MockTelegraf, Markup: { button: {}, keyboard: (
 // ── Intercept require() for the two server libs ──────────────────────────────
 const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
-    if (request === "@fizzxydev/baileys-pro") return baileysMock;
+    if (request === "@whiskeysockets/baileys") return baileysMock;
     if (request === "telegraf") return telegrafMock;
     return realLoad.apply(this, arguments);
 };
