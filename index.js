@@ -3857,21 +3857,37 @@ function unwrapMessageContent(message) {
 }
 
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
+    // Use the legacy listMessage format ("Test E"): it is the single most
+    // compatible interactive UI — it renders + responds on BOTH normal WhatsApp
+    // and WhatsApp Business. It goes out as a SINGLE_SELECT listMessage and is
+    // wrapped by patchMessageBeforeSending (viewOnce + deviceListMetadata).
+    // A tapped row returns listResponseMessage.singleSelectReply.selectedRowId
+    // which the handler already decodes back to the row id.
     try {
-        const { sendInteractiveMessage } = require("./wbails_helper");
-        const sections = [{
-            title: "Available Options",
-            rows: rows.map(r => ({ title: r.title, description: r.desc || "", id: r.id }))
-        }];
-        await sendInteractiveMessage(sock, jid, {
+        // Register a number-fallback so users can also reply 1, 2, 3...
+        try {
+            global.menuStateMap = global.menuStateMap || {};
+            global.menuStateMap[jid] = rows.map(r => r.id);
+        } catch (_) {}
+
+        await sock.sendMessage(jid, {
             text: bodyText,
-            sections
-        }, { quoted: quotedMsg, buttonText: buttonLabel });
+            footer: "legacy list + patchMessageBeforeSending",
+            title: "",
+            buttonText: buttonLabel,
+            sections: [{
+                title: "Available Options",
+                rows: rows.map(r => ({ title: r.title, rowId: r.id, description: r.desc || "" }))
+            }],
+            viewOnce: true,
+        }, { quoted: quotedMsg });
     } catch (e) {
         console.error("sendListSelect error:", e.message);
-        // Fallback to text
+        // Last-resort plain text + numbered options (always usable).
         const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " — " + r.desc : ""}`).join("\n");
-        await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}` }, { quoted: quotedMsg });
+        try {
+            await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}\n\n_Reply with a number._` }, { quoted: quotedMsg });
+        } catch (_) {}
     }
 }
 async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer = "— Phantom-X") {
@@ -10184,6 +10200,10 @@ async function startBotForWeb(sessionId, phoneNumber) {
         getMessage: async (key) => socketMsgStore.get(key),
         keepAliveIntervalMs: 15_000,
         connectTimeoutMs: 60_000,
+        // Group sends run assertSessions() which queries WA for each participant.
+        // The default 60s ceiling on that query is what throws 408 "Timed Out"
+        // on large/slow groups (Baileys #1875). Raise it well above the default.
+        defaultQueryTimeoutMs: 120_000,
         retryRequestDelayMs: 250,
     });
 
@@ -11433,6 +11453,9 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         getMessage: async (key) => socketMsgStore.get(key),
         keepAliveIntervalMs: 15_000,    // ping WA servers every 15 s — prevents idle disconnects
         connectTimeoutMs: 90_000,       // give the initial handshake up to 90 s
+        // Prevent 408 "Timed Out" on group sends: assertSessions() per-participant
+        // query must not hit the default 60s ceiling on big/slow groups (#1875).
+        defaultQueryTimeoutMs: 120_000,
         retryRequestDelayMs: 500,       // wait 0.5 s between internal proto retries
     });
 
