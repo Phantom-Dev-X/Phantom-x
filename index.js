@@ -250,6 +250,36 @@ const webReconnectTimers = {};
 // cache and warm it on connect.
 const groupMetadataCache = new Map(); // jid -> { meta, ts }
 
+// ── Group-send reliability caches (shared across all sockets) ────────────────
+// These directly mitigate the "Timed Out" failures when sending to groups,
+// especially LID-addressed groups. Without persistent device + LID caches,
+// Baileys re-runs the slow USync device query + session fetch on every send,
+// and on a busy/slow link those queries hit the timeout.
+let _NodeCache = null;
+try { _NodeCache = require("node-cache"); } catch (_) {}
+// Cache of each user's device list (so the USync device query isn't repeated).
+const userDevicesCache = _NodeCache
+    ? new _NodeCache({ stdTTL: 300, useClones: false })
+    : undefined;
+// Cache for message retry counters (helps decryption/retry in groups).
+const msgRetryCounterCache = _NodeCache
+    ? new _NodeCache({ stdTTL: 3600, useClones: false })
+    : undefined;
+// Persistent LID -> phone JID map. Critical for LID groups: lets the bot resolve
+// participant identities without a fresh lookup every send.
+const lidJidMap = new Map();
+function attachLidMappingHooks(sock) {
+    if (!sock || sock.__lidHooksInstalled) return;
+    try {
+        sock.ev.on("lid-mapping.update", (mapping = {}) => {
+            try {
+                for (const [lid, jid] of Object.entries(mapping)) lidJidMap.set(lid, jid);
+            } catch (_) {}
+        });
+    } catch (_) {}
+    sock.__lidHooksInstalled = true;
+}
+
 function createMessageStore(limit = 2000) {
     const map = new Map();
     return {
@@ -10088,6 +10118,13 @@ action: stripped quoted reply before send`
             }
         }
 
+        // For groups, force use of the cached group metadata so the slow USync /
+        // participant-device query is skipped. This is the #1 cause of group
+        // "Timed Out" (Baileys #1875) — assertSessions/USync per participant.
+        if (isGroupJid) {
+            sendOptions = { ...sendOptions, useCachedGroupMetadata: true };
+        }
+
         try {
             if (isGroupJid) await ensureGroupReady(sock, jid, label);
             return await originalSendMessage(jid, content, sendOptions, ...rest);
@@ -10095,13 +10132,22 @@ action: stripped quoted reply before send`
             const msg = String(err?.message || err || 'unknown send error');
             if (!isGroupJid) throw err;
 
-            // One retry for group send timeouts — these are the main failure mode seen in traces.
+            // Up to TWO retries for group send timeouts — these are the main failure
+            // mode seen in traces. Each retry refreshes metadata + keeps using cache.
             if (/timed?\s*out|timeout/i.test(msg)) {
                 console.error(`[GroupSendRetry:${label}] timeout in ${jid}: ${msg}`);
                 try {
                     await delay(1500);
                     await ensureGroupReady(sock, jid, label);
-                    return await originalSendMessage(jid, content, sendOptions, ...rest);
+                    try {
+                        return await originalSendMessage(jid, content, sendOptions, ...rest);
+                    } catch (firstRetryErr) {
+                        const firstRetryMsg = String(firstRetryErr?.message || firstRetryErr || '');
+                        if (!/timed?\s*out|timeout/i.test(firstRetryMsg)) throw firstRetryErr;
+                        console.error(`[GroupSendRetry:${label}] 2nd attempt in ${jid}: ${firstRetryMsg}`);
+                        await delay(3000);
+                        return await originalSendMessage(jid, content, sendOptions, ...rest);
+                    }
                 } catch (retryErr) {
                     const retryMsg = String(retryErr?.message || retryErr || 'unknown retry send error');
                     console.error(`[GroupSendRetry:${label}] retry failed in ${jid}: ${retryMsg}`);
@@ -10205,11 +10251,14 @@ async function startBotForWeb(sessionId, phoneNumber) {
         // on large/slow groups (Baileys #1875). Raise it well above the default.
         defaultQueryTimeoutMs: 120_000,
         retryRequestDelayMs: 250,
+        userDevicesCache,
+        msgRetryCounterCache,
     });
 
     activeSockets[sessionId] = sock;
     installQuotedGroupFallback(sock, `web:${sessionId}`);
     attachGroupCacheHooks(sock, `web:${sessionId}`);
+    attachLidMappingHooks(sock);
     webSessions.set(sessionId, { status: 'waiting', code: null, phone: phoneNumber });
 
     // ── Step 1: Get pairing code (only if not already registered) ─────────
@@ -11457,11 +11506,14 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         // query must not hit the default 60s ceiling on big/slow groups (#1875).
         defaultQueryTimeoutMs: 120_000,
         retryRequestDelayMs: 500,       // wait 0.5 s between internal proto retries
+        userDevicesCache,
+        msgRetryCounterCache,
     });
 
     activeSockets[userId] = sock;
     installQuotedGroupFallback(sock, `tg:${userId}`);
     attachGroupCacheHooks(sock, `tg:${userId}`);
+    attachLidMappingHooks(sock);
 
     if (!isReconnect && !sock.authState.creds.registered) {
         // Wait for WA QR signal — that is the correct moment to request a pairing code
