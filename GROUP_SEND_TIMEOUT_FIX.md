@@ -74,3 +74,51 @@ Plus the existing protections that were already present:
 > device list + group metadata + LID map, send with `useCachedGroupMetadata: true`,
 > and raise the query timeout**, so those slow queries don't run (or don't abort)
 > on every message.
+
+---
+
+## Appendix — Other causes we investigated & RULED OUT
+
+After more research, we checked the other common causes of group-only timeouts.
+Good news: the bot already handles them correctly, so they are NOT the problem.
+
+### ✅ History-sync disabled bug (checked — already correct)
+Baileys 7.x has a known bug: with `syncFullHistory: false`, the default
+`shouldSyncHistoryMessage` becomes `() => false`, which silently disables ALL
+history sync — including **LID mappings and group-participation data**. Without
+that, the linked device cannot resolve group participants and group sends fail.
+(Reported across OpenClaw / Hermes / direct Baileys users; fixed in Baileys
+commit c81c074 but not yet on npm.)
+
+**Our status:** SAFE. The bot sets `shouldSyncHistoryMessage: shouldSyncHistoryMessageMinimal`
+which returns `syncType !== 2` — i.e. it allows INITIAL_BOOTSTRAP / RECENT /
+ON_DEMAND (LID + group participation) and only skips FULL. This is exactly the
+recommended fix.
+
+### ✅ Weak `getMessage` callback (checked — already correct)
+A `getMessage` that returns the wrong shape (or always undefined) causes group
+"Waiting Message"/decryption-retry stalls, because the bot can't fulfill
+WhatsApp's retry requests (Baileys #875, #886).
+
+**Our status:** SAFE. `getMessage: async (key) => socketMsgStore.get(key)` returns
+`msg.message` (correct shape), backed by a 2000-entry message store that's populated
+on every `messages.upsert`.
+
+### ✅ makeCacheableSignalKeyStore (checked — already correct)
+Used for both sockets, so signal key reads are cached.
+
+### Other causes to keep in mind (environmental, not code)
+- **Stale/closed Signal sessions** (libsignal "Closing stale open session") — usually
+  self-heals; our `assertSessions` + device cache reduce churn.
+- **428 Connection Closed on specific groups** (#914) — a few specific groups can
+  reject sends server-side even when metadata ops succeed; manual send works. This is
+  a WhatsApp-side quirk, not fixable in code.
+- **Slow host / high latency** — raise `defaultQueryTimeoutMs` or move hosts.
+- **Very large groups (200+)** — WhatsApp throttles session/USync setup server-side.
+
+### Conclusion
+The remaining mitigations that were actually MISSING (and are now added) were:
+persistent **userDevicesCache**, **msgRetryCounterCache**, **lid-mapping persistence**,
+and **`useCachedGroupMetadata: true` on every group send**. Combined with the
+already-correct history-sync + getMessage handling, this is the complete known set of
+group-reliability fixes.
