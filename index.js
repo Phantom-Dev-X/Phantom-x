@@ -10168,7 +10168,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
 
     const sock = makeWASocket({
         version,
-        browser: ['Phantom-X', 'Chrome', '120.0.0'],
+        browser: ['Mac OS', 'Chrome', '120.0.0'],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })),
@@ -11418,7 +11418,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
 
     const sock = makeWASocket({
         version,
-        browser: ["Phantom-X", "Chrome", "120.0.0"],
+        browser: ["Mac OS", "Chrome", "120.0.0"],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
