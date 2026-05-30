@@ -49,7 +49,7 @@ async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows)
         // INTERCEPT POLL VOTES FOR WA BUSINESS MENU WORKAROUND
         if (msg.message.pollUpdateMessage && global.menuStateMap && global.menuStateMap[from]) {
             try {
-                const { getAggregateVotesInPollMessage } = require("@whiskeysockets/baileys");
+                const { getAggregateVotesInPollMessage } = require("@itsukichan/baileys");
                 const pollUpdate = msg.message.pollUpdateMessage;
                 const pollCreationMsg = pollCreationCache[pollUpdate.pollCreationMessageKey.id];
                 

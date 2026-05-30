@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@whiskeysockets/baileys");
+} = require("@itsukichan/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -40,10 +40,10 @@ const crypto = require("crypto");
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
 try {
-    const baileysPkg = require("@whiskeysockets/baileys/package.json");
-    console.log(`[WA Lib] Using @whiskeysockets/baileys v${baileysPkg.version}`);
+    const baileysPkg = require("@itsukichan/baileys/package.json");
+    console.log(`[WA Lib] Using @itsukichan/baileys v${baileysPkg.version}`);
 } catch (e) {
-    console.log(`[WA Lib] Could not resolve @whiskeysockets/baileys package: ${e?.message || e}`);
+    console.log(`[WA Lib] Could not resolve @itsukichan/baileys package: ${e?.message || e}`);
 }
 
 // ── MongoDB Cloud Persistence (free tier) ──────────────────────────────────────
@@ -3887,63 +3887,32 @@ function unwrapMessageContent(message) {
 }
 
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
-    // "Test E" legacy listMessage — the single most compatible interactive UI:
-    // renders + responds on BOTH normal WhatsApp and WhatsApp Business.
-    //
-    // @whiskeysockets/baileys removed the { sections, buttonText } shorthand, so we
-    // HAND-BUILD a SINGLE_SELECT listMessage proto and relay it ourselves. The
-    // payload is byte-identical to the fork's Test-E output (verified via
-    // encode/decode round-trip). A tapped row returns
-    // listResponseMessage.singleSelectReply.selectedRowId, which handleMessage
-    // already decodes back to the row id. Also registers a 1-2-3 number fallback.
+    // Single-select list menu via @itsukichan/baileys native { sections } shorthand.
+    // The fork auto-injects the biz/interactive/native_flow binary nodes in
+    // relayMessage, so this renders + responds on BOTH normal WhatsApp and
+    // WhatsApp Business. A tapped row returns
+    // listResponseMessage.singleSelectReply.selectedRowId (handled in handleMessage).
+    // We also register a 1-2-3 number fallback so users can reply with a number.
     try {
         global.menuStateMap = global.menuStateMap || {};
         global.menuStateMap[jid] = rows.map(r => r.id);
     } catch (_) {}
 
     try {
-        const listMessage = waProto.Message.ListMessage.create({
+        await sock.sendMessage(jid, {
+            text: bodyText,
+            footer: "\u2014 EVENTIDE OMEGA",
             title: "",
-            description: bodyText,
-            footerText: "legacy list + patchMessageBeforeSending",
             buttonText: buttonLabel,
-            listType: waProto.Message.ListMessage.ListType.SINGLE_SELECT,
             sections: [{
                 title: "Available Options",
-                rows: rows.map(r => ({
-                    title: r.title,
-                    rowId: r.id,
-                    description: r.desc || "",
-                })),
+                rows: rows.map(r => ({ title: r.title, rowId: r.id, description: r.desc || "" })),
             }],
-        });
-
-        // Wrap exactly like patchLegacyInteractiveForWhiskey (viewOnce + deviceListMetadata).
-        const content = {
-            viewOnceMessage: {
-                message: {
-                    messageContextInfo: {
-                        deviceListMetadataVersion: 2,
-                        deviceListMetadata: {},
-                    },
-                    listMessage,
-                },
-            },
-        };
-
-        const waMsg = generateWAMessageFromContent(jid, content, {
-            userJid: sock.user?.id,
-            quoted: quotedMsg || undefined,
-        });
-
-        await sock.relayMessage(jid, waMsg.message, {
-            messageId: waMsg.key.id,
-            useCachedGroupMetadata: String(jid || "").endsWith("@g.us") ? true : undefined,
-        });
+        }, { quoted: quotedMsg || undefined });
     } catch (e) {
         console.error("sendListSelect error:", e.message);
         // Last-resort plain text + numbered options (always usable).
-        const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " — " + r.desc : ""}`).join("\n");
+        const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " \u2014 " + r.desc : ""}`).join("\n");
         try {
             await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}\n\n_Reply with a number._` }, { quoted: quotedMsg });
         } catch (_) {}
@@ -4384,7 +4353,7 @@ async function handleMessage(sock, msg) {
         }
 
         // --- BUTTON TEST callback interceptor ---
-        if (buttonId && buttonId.startsWith("btnt_")) {
+        if (buttonId && (buttonId.startsWith("btnt_") || buttonId.startsWith("tes_"))) {
             const eventTypeLabel = type || getContentType(content) || 'unknown';
             await emitButtonTrace(sock, 'callback', {
                 test: buttonId.split('_').slice(1, 2)[0] || 'unknown',
@@ -5046,6 +5015,95 @@ async function handleMessage(sock, msg) {
             
             
             case ".btntest":
+            case ".tes": {
+                // Sends every button type known to work in 2026 on @itsukichan/baileys,
+                // one after another, on BOTH normal WhatsApp and WhatsApp Business.
+                // Tap any control — handleMessage decodes the callback id.
+                const target = from;
+                const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                await reply("\u{1F9EA} Sending 2026 button types one by one. Tap any that render \u2014 I'll echo the callback id.");
+
+                const tests = [
+                    {
+                        label: "1\uFE0F\u20E3 quick_reply buttons",
+                        run: () => sock.sendMessage(target, {
+                            text: "*quick_reply* \u2014 simple tap buttons",
+                            title: "EVENTIDE OMEGA",
+                            subtitle: "button test",
+                            footer: "\u2014 quick_reply",
+                            interactiveButtons: [
+                                { name: "quick_reply", buttonParamsJson: JSON.stringify({ display_text: "\u2705 Yes", id: "tes_qr_yes" }) },
+                                { name: "quick_reply", buttonParamsJson: JSON.stringify({ display_text: "\u274C No", id: "tes_qr_no" }) },
+                                { name: "quick_reply", buttonParamsJson: JSON.stringify({ display_text: "\u2753 Maybe", id: "tes_qr_maybe" }) },
+                            ],
+                        }, { quoted: msg }),
+                    },
+                    {
+                        label: "2\uFE0F\u20E3 single_select list",
+                        run: () => sock.sendMessage(target, {
+                            text: "*single_select* \u2014 tap to open a list",
+                            title: "EVENTIDE OMEGA",
+                            footer: "\u2014 single_select",
+                            interactiveButtons: [{
+                                name: "single_select",
+                                buttonParamsJson: JSON.stringify({
+                                    title: "Open Menu",
+                                    sections: [{
+                                        title: "Sections",
+                                        rows: [
+                                            { header: "", title: "\u{1F451} Owner", description: "owner tools", id: "tes_ss_owner" },
+                                            { header: "", title: "\u{1F3AE} Fun", description: "games & fun", id: "tes_ss_fun" },
+                                        ],
+                                    }],
+                                }),
+                            }],
+                        }, { quoted: msg }),
+                    },
+                    {
+                        label: "3\uFE0F\u20E3 cta_url + cta_copy + cta_call",
+                        run: () => sock.sendMessage(target, {
+                            text: "*CTA buttons* \u2014 link / copy / call",
+                            title: "EVENTIDE OMEGA",
+                            footer: "\u2014 cta mix",
+                            interactiveButtons: [
+                                { name: "cta_url", buttonParamsJson: JSON.stringify({ display_text: "\u{1F517} Open Link", url: "https://github.com", merchant_url: "https://github.com" }) },
+                                { name: "cta_copy", buttonParamsJson: JSON.stringify({ display_text: "\u{1F4CB} Copy Code", id: "tes_copy", copy_code: "EVENTIDE-OMEGA-2026" }) },
+                                { name: "cta_call", buttonParamsJson: JSON.stringify({ display_text: "\u{1F4DE} Call", id: "tes_call" }) },
+                            ],
+                        }, { quoted: msg }),
+                    },
+                    {
+                        label: "4\uFE0F\u20E3 legacy listMessage (sections shorthand)",
+                        run: () => sock.sendMessage(target, {
+                            text: "*legacy list* \u2014 most compatible everywhere",
+                            title: "EVENTIDE OMEGA",
+                            footer: "\u2014 legacy list",
+                            buttonText: "Open Legacy List",
+                            sections: [{
+                                title: "Choose One",
+                                rows: [
+                                    { title: "\u{1F451} Owner", rowId: "tes_list_owner", description: "owner tools" },
+                                    { title: "\u{1F3AE} Fun", rowId: "tes_list_fun", description: "games & fun" },
+                                ],
+                            }],
+                        }, { quoted: msg }),
+                    },
+                ];
+
+                for (const t of tests) {
+                    try {
+                        await sock.sendMessage(target, { text: `\u{1F9EA} *${t.label}*` });
+                        await wait(1200);
+                        await t.run();
+                    } catch (e) {
+                        try { await sock.sendMessage(target, { text: `\u274C ${t.label} failed: ${e?.message || e}` }); } catch (_) {}
+                    }
+                    await wait(2500);
+                }
+                await sock.sendMessage(target, { text: "\u2705 *.tes complete.* Tap any working control \u2014 I'll echo its callback id." }).catch(() => {});
+                break;
+            }
+
             case ".testbtn": {
                 const target = from;
                 const baseRows = [
