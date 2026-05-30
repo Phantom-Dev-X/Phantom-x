@@ -9,3 +9,6 @@ auth_info_*
 # New files created by the dashboard backend (auto-generated on first run)
 web_sessions_tokens.json
 web_users.json
+
+# npm cache (should never be committed)
+.npm/
