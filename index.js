@@ -9748,6 +9748,26 @@ telBot.command("pair", async (ctx) => {
 process.once("SIGINT", () => { if (TELEGRAM_TOKEN) telBot.stop("SIGINT"); process.exit(0); });
 process.once("SIGTERM", () => { if (TELEGRAM_TOKEN) telBot.stop("SIGTERM"); });
 
+// ── GLOBAL CRASH GUARDS ──────────────────────────────────────────────────────
+// Baileys can throw async errors (e.g. "Connection Closed" 428 during a retry
+// request on a dropped/conflicted socket). Without these handlers an unhandled
+// rejection / exception crashes the WHOLE process, taking down EVERY session.
+// We log and keep running so one bad socket can't kill the bot.
+process.on("unhandledRejection", (reason) => {
+    try {
+        const msg = reason?.message || reason?.toString?.() || String(reason);
+        console.error("[unhandledRejection] " + String(msg).slice(0, 500));
+    } catch (_) {}
+});
+process.on("uncaughtException", (err) => {
+    try {
+        const msg = err?.message || err?.toString?.() || String(err);
+        const code = err?.output?.statusCode || err?.code || "";
+        console.error(`[uncaughtException${code ? " " + code : ""}] ` + String(msg).slice(0, 500));
+    } catch (_) {}
+    // Do NOT exit — keep the bot (and other sessions) alive.
+});
+
 // --- WEB PAIRING SESSION TRACKER ---
 // Tracks in-progress web pairing requests: sessionId -> { status, code }
 const webSessions = new Map();
