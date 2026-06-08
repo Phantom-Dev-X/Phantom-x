@@ -6,7 +6,7 @@ global.notifyOwner = async (text) => {
         const botJidRaw = Object.keys(activeSockets)[0];
         if (!botJidRaw) return;
         const sock = activeSockets[botJidRaw];
-        if (!sock) return;
+        if (!sock || !sock.user) return;
         // The owner is the bot itself (self chat)
         const ownerJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
         await sock.sendMessage(ownerJid, { text });
@@ -10518,7 +10518,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
             logActivity(sessionId, 'disconnect', `code=${code || '?'}`);
 
             // Permanent failures — wipe auth, do not reconnect
-            if (code === DisconnectReason.loggedOut || code === DisconnectReason.forbidden || code === DisconnectReason.badSession) {
+            if (code === DisconnectReason.loggedOut || code === DisconnectReason.forbidden) {
                 console.log(`[WebPair] ${sessionId} permanently disconnected (${code}) — wiping auth`);
                 deleteSession(sessionId);
                 clearAuthState(sessionId);
@@ -12007,7 +12007,6 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
             const shouldNotReconnect = [
                 DisconnectReason.loggedOut,
                 DisconnectReason.forbidden,
-                DisconnectReason.badSession,
             ].includes(statusCode);
 
             if (shouldNotReconnect) {
