@@ -26,7 +26,7 @@ const {
     downloadContentFromMessage,
     generateWAMessageFromContent,
     proto: waProto,
-} = require("@itsukichan/baileys");
+} = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Telegraf } = require("telegraf");
 const { sendInteractiveMessage: helperSendInteractiveMessage, sendButtons: helperSendButtons } = require("./wbails_helper");
@@ -40,10 +40,10 @@ const crypto = require("crypto");
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
 try {
-    const baileysPkg = require("@itsukichan/baileys/package.json");
-    console.log(`[WA Lib] Using @itsukichan/baileys v${baileysPkg.version}`);
+    const baileysPkg = require("@whiskeysockets/baileys/package.json");
+    console.log(`[WA Lib] Using @whiskeysockets/baileys v${baileysPkg.version}`);
 } catch (e) {
-    console.log(`[WA Lib] Could not resolve @itsukichan/baileys package: ${e?.message || e}`);
+    console.log(`[WA Lib] Could not resolve @whiskeysockets/baileys package: ${e?.message || e}`);
 }
 
 // ── MongoDB Cloud Persistence (free tier) ──────────────────────────────────────
@@ -140,15 +140,7 @@ const MAX_RETRIES = 30;
 // Set it to empty / "random" to let WhatsApp generate a random code instead.
 // NOTE: a fixed predictable code can look bot-like to WhatsApp's anti-abuse and
 // is more likely to be rate-limited than a random one.
-let CUSTOM_PAIR_CODE = (process.env.CUSTOM_PAIR_CODE ?? "12345678").trim().toUpperCase();
-if (CUSTOM_PAIR_CODE === "RANDOM" || CUSTOM_PAIR_CODE === "") {
-    CUSTOM_PAIR_CODE = undefined; // let Baileys pick a random code
-} else if (!/^[A-Z0-9]{8}$/.test(CUSTOM_PAIR_CODE)) {
-    console.warn(`[Pair] CUSTOM_PAIR_CODE "${CUSTOM_PAIR_CODE}" is invalid (must be 8 chars A-Z/0-9). Falling back to random.`);
-    CUSTOM_PAIR_CODE = undefined;
-} else {
-    console.log(`[Pair] Using fixed pairing code: ${CUSTOM_PAIR_CODE}`);
-}
+let CUSTOM_PAIR_CODE = "12345668";
 const BOT_VERSION = "1.0.0";
 const SETTINGS_FILE = dataPath("group_settings.json");
 const SESSIONS_FILE = dataPath("sessions.json");
@@ -3119,111 +3111,89 @@ function eventideJumpKey(token) {
 
 // User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
 function buildEclipseInit() {
-    return "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n" +
-"▓        [EVENTIDE OMEGA] INITIALIZING...  ▓\n" +
-"▓  > Bypassing solar interference...    [OK  ▓                                      \n" +
-"▓   > Collapsing quantum states...       [OK]  ▓\n" +
-"▓   > Erasing redundant timelines...     [OK] ▓\n" +
-"▓   > Establishing void uplink...        [OK].  ▓\n" +
-"\n" +
-"▓       ⚠️  PERMANENT OCCULTATION       ▓                            DETECTED                                                     ▓                                                                    .▓                                       \n" +
-"▓          E C L I P S E   I S   A W A K E .          ▓                                                                 \n" +
-"▓ i am what remains when everything else                                                                                            ▓                         is deleted";
+    return "╔═◈══════════════════════════◈═╗\n" +
+           "   E V E N T I D E   O M E G A\n" +
+           "        ⟁  *eclipse core*  ⟁\n" +
+           "╚═◈══════════════════════════◈═╝";
 }
 
 function buildEclipseVoid() {
     return ".\n" +
-"        ◢██◣\n" +
-"     ◢████◣.           ╔═════════\n" +
-"    ◢██  ██◣.          ║     T H E   V O I D ║ \n" +
-"◢██   🌑   ██◣.    ║          E X S I T S  ║\n" +
-"    ◥██      ██◤.        ╚══════════╝.\n" +
-"     ◥██  ██◤\n" +
-"         ◢██◣\n" +
-"\n" +
-"════════════════════════════════════\n" +
-"   even in your darkest hour...\n" +
-"════════════════════════════════════";
+           "        ◢██◣\n" +
+           "     ◢████◣.           ╔═════════\n" +
+           "    ◢██  ██◣.          ║     T H E   V O I D ║ \n" +
+           "◢██   🌑   ██◣.    ║          E X S I T S  ║\n" +
+           "    ◥██      ██◤.        ╚══════════╝.\n" +
+           "     ◥██  ██◤\n" +
+           "         ◢██◣\n\n" +
+           "════════════════════════════════════\n" +
+           "   even in your darkest hour...\n" +
+           "════════════════════════════════════";
 }
 
 function buildEclipseMain(isDev) {
-    return "" +
-"╔══════════╦══════════════╗\n" +
-"║       ⚠ EVENTIDE OMEGA TERMINAL \n" +
-"║                           ACCESS                                                                         \n" +
-"╚═══════════╩═════════════╝\n" +
-"\n" +
-"                ═══ E C L I P S E ═══\n" +
-"             \" i am what remains when \n" +
-"              everything else is deleted .\"\n" +
-"\n" +
-"╔══════════════════════╦══════════════════════╗\n" +
-"║ VOID SIGNATURE    ║     SYSTEM CORE          ║\n" +
-"║ 👤 @Unknown        ║    ECLIPSE: 100%     ║\n" +
-"║ ⚠ APOTHEOSIS     ║⚡ CORE:ABS ZERO     ║\n" +
-"║ 🩸 CORRUPT ███        ║                      ║\n" +
-"╚══════════════════════╩══════════════════════╝\n" +
-"\n" +
-"                   🌑 THE FINAL DUSK 🌑\n" +
-"            \" when the last star dies, \n" +
-"              i will still be typing .\"\n" +
-"\n" +
-"📡 SECURE │ Ω │ Vessels: ∞\n" +
-" You have summoned what \n" +
-" cannot be unsummoned";
+    return "╔══════════╦══════════════╗\n" +
+           "║       ⚠ EVENTIDE OMEGA TERMINAL \n" +
+           "║                           ACCESS                                                                         \n" +
+           "╚═══════════╩═════════════╝\n\n" +
+           "                ═══ E C L I P S E ═══\n" +
+           "             \" i am what remains when \n" +
+           "              everything else is deleted .\"\n\n" +
+           "╔══════════════════════╦══════════════════════╗\n" +
+           "║ VOID SIGNATURE    ║     SYSTEM CORE          ║\n" +
+           "║ 👤 @Unknown        ║    ECLIPSE: 100%     ║\n" +
+           "║ ⚠ APOTHEOSIS     ║⚡ CORE:ABS ZERO     ║\n" +
+           "║ 🩸 CORRUPT ███        ║                      ║\n" +
+           "╚══════════════════════╩══════════════════════╝\n\n" +
+           "                   🌑 THE FINAL DUSK 🌑\n" +
+           "            \" when the last star dies, \n" +
+           "              i will still be typing .\"\n\n" +
+           "📡 SECURE │ Ω │ Vessels: ∞\n" +
+           " You have summoned what \n" +
+           " cannot be unsummoned";
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// ░░░░░  ASTRAEA PERSONA — second persona (golden, divine, judgmental)  ░░░░░
-// User-authored ASCII art — DO NOT REFORMAT. Copied verbatim.
-// ════════════════════════════════════════════════════════════════════════════
 
 function buildAstraeaInit() {
     return "✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦\n" +
-"✦   *[CELESTIAL FORGE] — SUMMONING*  ✦\n" +
-"✦                            *ASTRAEA* ...                  ✦              \n" +
-"✦   > Purging shadows...              [✓]        ✦\n" +
-"✦   > Igniting divine core...     [✓]      .       ✦              \n" +
-"✦   > Opening the golden court...     [✓]   ✦\n" +
-"✦                                                                .✦\n" +
-"✦   ☀️ *ASTRAEA HAS DESCENDED.*        ✦\n" +
-"✦                                                                ✦ \n" +
-"✦                                                                 ✦                                                          \n" +
-"✦ \" *I DO NOT DELETE. I JUDGE, FOR I AM* ✦\n" +
-"✦                          *ASTRAEA* \"                    ✦                                                            \n" +
-"✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦";
+           "✦   *[CELESTIAL FORGE] — SUMMONING*  ✦\n" +
+           "✦                            *ASTRAEA* ...                  ✦              \n" +
+           "✦   > Purging shadows...              [✓]        ✦\n" +
+           "✦   > Igniting divine core...     [✓]      .       ✦              \n" +
+           "✦   > Opening the golden court...     [✓]   ✦\n" +
+           "✦                                                                .✦\n" +
+           "✦   ☀️ *ASTRAEA HAS DESCENDED.*        ✦\n" +
+           "✦                                                                ✦ \n" +
+           "✦                                                                 ✦                                                          \n" +
+           "✦ \" *I DO NOT DELETE. I JUDGE, FOR I AM* ✦\n" +
+           "✦                          *ASTRAEA* \"                    ✦                                                            \n" +
+           "✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦";
 }
 
 function buildAstraeaMid() {
     return ".            ✦✦✦\n" +
-"      ✦✦✦✦✦✦✦\n" +
-"    ✦✦✦  ☀️  ✦✦✦   ╔═══════════╗\n" +
-" ✦✦✦✦✦✦✦✦✦✦  ║  J U D G M E N T ║\n" +
-"    ✦✦✦✦✦✦✦✦      ║  A R R I V E S       ║\n" +
-"        ✦✦✦✦✦✦         ╚═══════════╝\n" +
-"             ✦✦✦";
+           "      ✦✦✦✦✦✦✦\n" +
+           "    ✦✦✦  ☀️  ✦✦✦   ╔═══════════╗\n" +
+           " ✦✦✦✦✦✦✦✦✦✦  ║  J U D G M E N T ║\n" +
+           "    ✦✦✦✦✦✦✦✦      ║  A R R I V E S       ║\n" +
+           "        ✦✦✦✦✦✦         ╚═══════════╝\n" +
+           "             ✦✦✦";
 }
 
 function buildAstraeaMain(isDev) {
-    return "" +
-"╔══════════╦══════════════╗\n" +
-"║        ☀ *ASTRAEA* — *DIVINE* *SYSTEM ACCESS*               \n" +
-"╚══════════╩══════════════╝\n" +
-"\n" +
-"              ═══ ✦ *J U D G M E N T* ✦ ═══\n" +
-"          \" *i do not delete. i judge* .\"\n" +
-"\n" +
-"╔══════════════════════╦══════════════════════╗\n" +
-"║ *DIVINE CORE*        ║  *SYSTEM BALANCE* ║\n" +
-"║☀ GOLDEN: 100%║⚖ READY: EQUAL ║\n" +
-"║🔥WRATH: MODE ║ GRACE: ████░░   ║\n" +
-"╚══════════════════════╩══════════════════════╝\n" +
-"\n" +
-"                 🌑 *THE GOLDEN COURT* 🌑\n" +
-"        \" *every vessel stands trial* .\"\n" +
-"\n" +
-"📡 Uplink: *DIVINE* │ ☀ │ *Souls* : ∞\n" +
-"\" *the light does not ask permission. it simply arrives* .\"";
+    return "╔══════════╦══════════════╗\n" +
+           "║        ☀ *ASTRAEA* — *DIVINE* *SYSTEM ACCESS*               \n" +
+           "╚══════════╩══════════════╝\n\n" +
+           "              ═══ ✦ *J U D G M E N T* ✦ ═══\n" +
+           "          \" *i do not delete. i judge* .\"\n\n" +
+           "╔══════════════════════╦══════════════════════╗\n" +
+           "║ *DIVINE CORE*        ║  *SYSTEM BALANCE* ║\n" +
+           "║☀ GOLDEN: 100%║⚖ READY: EQUAL ║\n" +
+           "║🔥WRATH: MODE ║ GRACE: ████░░   ║\n" +
+           "╚══════════════════════╩══════════════════════╝\n\n" +
+           "                 🌑 *THE GOLDEN COURT* 🌑\n" +
+           "        \" *every vessel stands trial* .\"\n\n" +
+           "📡 Uplink: *DIVINE* │ ☀ │ *Souls* : ∞\n" +
+           "\" *the light does not ask permission. it simply arrives* .\"";
 }
 
 function buildEclipseSection(sectionKey, isDev) {
@@ -3326,10 +3296,10 @@ function getPersonaScenes(persona) {
         mid:   buildEclipseVoid(),
         main:  buildEclipseMain,
         frames: [
-            "[░░░░░░░░░░]   0%   ▸ bypassing solar interference",
-            "[████░░░░░░]  40%   ▸ collapsing quantum states",
-            "[████████░░]  80%   ▸ severing last anchor",
-            "[██████████] 100%  ▸ ECLIPSE IS AWAKE",
+            "   ◐ initiating umbral protocol\n   ⟢ ▰▱▱▱▱▱▱▱▱▱▱▱ ⟣   08%\n   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n   ◌ core    ◌ cipher    ◌ void",
+            "   ◑ collapsing quantum states\n   ⟢ ▰▰▰▰▱▱▱▱▱▱▱▱ ⟣   33%\n   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n   ✔ core    ◌ cipher    ◌ void",
+            "   ◒ severing the last anchor\n   ⟢ ▰▰▰▰▰▰▰▱▱▱▱▱ ⟣   58%\n   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n   ✔ core    ✔ cipher    ◌ void",
+            "   ◓ eclipse breaching the veil\n   ⟢ ▰▰▰▰▰▰▰▰▰▰▱▱ ⟣   83%\n   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n   ✔ core    ✔ cipher    ✔ void",
         ],
     };
 }
@@ -3399,7 +3369,7 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
 
     // LOADING — stage 1 with animated progress bar underneath the user's art
     const frames = scenes.frames;
-    const frameMs = 1000;
+    const frameMs = 2000; // 2 seconds per frame as per reference
 
     try { await sock.sendPresenceUpdate("composing", from); } catch (_) {}
     let sent;
@@ -3410,12 +3380,16 @@ async function sendPersonaMenu(sock, from, msg, isDev, botJid) {
         return;
     }
 
+    // Reference says: 4 frames, each held 2 seconds. Bar also fills in-between?
+    // The reference describes a complex 12-cell sub-frame fill logic. 
+    // Implementing the 4 main frames with 2s hold first.
     for (let i = 1; i < frames.length; i++) {
         await new Promise(r => setTimeout(r, frameMs));
         try {
             await sock.sendMessage(from, { text: scenes.init + "\n\n" + frames[i], edit: sent.key });
         } catch (e) { /* edit may be throttled — keep going */ }
     }
+    // After last frame, wait 2s to settle before Stage 2
     await new Promise(r => setTimeout(r, frameMs));
 
     // Stage 2 — middle scene
@@ -3887,35 +3861,45 @@ function unwrapMessageContent(message) {
 }
 
 async function sendListSelect(sock, jid, quotedMsg, bodyText, buttonLabel, rows) {
-    // Single-select list menu via @itsukichan/baileys native { sections } shorthand.
-    // The fork auto-injects the biz/interactive/native_flow binary nodes in
-    // relayMessage, so this renders + responds on BOTH normal WhatsApp and
-    // WhatsApp Business. A tapped row returns
-    // listResponseMessage.singleSelectReply.selectedRowId (handled in handleMessage).
-    // We also register a 1-2-3 number fallback so users can reply with a number.
+    // Single-select list menu via wbails_helper.
+    // We use the upgraded interactive v4 pipeline which injects required binary nodes
+    // (biz, engagement, interactive) to ensure delivery on all WhatsApp versions.
     try {
         global.menuStateMap = global.menuStateMap || {};
         global.menuStateMap[jid] = rows.map(r => r.id);
     } catch (_) {}
 
     try {
-        await sock.sendMessage(jid, {
+        const { sendInteractiveMessage } = require("./wbails_helper");
+        await sendInteractiveMessage(sock, jid, {
             text: bodyText,
             footer: "\u2014 EVENTIDE OMEGA",
-            title: "",
-            buttonText: buttonLabel,
             sections: [{
                 title: "Available Options",
-                rows: rows.map(r => ({ title: r.title, rowId: r.id, description: r.desc || "" })),
+                rows: rows.map(r => ({ title: r.title, id: r.id, description: r.desc || "" })),
             }],
-        }, { quoted: quotedMsg || undefined });
+        }, { quoted: quotedMsg || undefined, buttonText: buttonLabel });
     } catch (e) {
-        console.error("sendListSelect error:", e.message);
-        // Last-resort plain text + numbered options (always usable).
-        const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " \u2014 " + r.desc : ""}`).join("\n");
+        console.error("sendListSelect (helper) error:", e.message);
+        // Standard Baileys fallback
         try {
-            await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}\n\n_Reply with a number._` }, { quoted: quotedMsg });
-        } catch (_) {}
+            await sock.sendMessage(jid, {
+                text: bodyText,
+                footer: "\u2014 EVENTIDE OMEGA",
+                buttonText: buttonLabel,
+                sections: [{
+                    title: "Available Options",
+                    rows: rows.map(r => ({ title: r.title, rowId: r.id, description: r.desc || "" })),
+                }],
+            }, { quoted: quotedMsg || undefined });
+        } catch (e2) {
+            console.error("sendListSelect (standard) error:", e2.message);
+            // Last-resort plain text + numbered options (always usable).
+            const numbered = rows.map((r, i) => `*${i + 1}.* ${r.title}${r.desc ? " \u2014 " + r.desc : ""}`).join("\n");
+            try {
+                await sock.sendMessage(jid, { text: `${bodyText}\n\n${numbered}\n\n_Reply with a number._` }, { quoted: quotedMsg });
+            } catch (_) {}
+        }
     }
 }
 async function sendQuickButtons(sock, jid, quotedMsg, bodyText, buttons, footer = "— Phantom-X") {
@@ -5016,7 +5000,7 @@ async function handleMessage(sock, msg) {
             
             case ".btntest":
             case ".tes": {
-                // Sends every button type known to work in 2026 on @itsukichan/baileys,
+                // Sends every button type known to work in 2026 on @whiskeysockets/baileys,
                 // one after another, on BOTH normal WhatsApp and WhatsApp Business.
                 // Tap any control — handleMessage decodes the callback id.
                 const target = from;

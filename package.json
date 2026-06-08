@@ -4,16 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "patch-baileys": "node scripts/patch-baileys.js",
-    "test": "node test/pair-flow.test.js && node test/auth-clear.test.js && node test/pair-complete.test.js"
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@itsukichan/baileys": "7.3.2",
+    "@whiskeysockets/baileys": "^6.7.23",
     "@ryuu-reinzz/button-helper": "^2.2.3",
     "@zeppeliorg/wbails": "^1.0.8",
     "dotenv": "^17.4.2",
