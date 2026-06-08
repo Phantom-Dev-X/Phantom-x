@@ -36,6 +36,8 @@ const os = require("os");
 const https = require("https");
 const http   = require("http");
 const crypto = require("crypto");
+const processStartTime = Date.now();
+
 
 // Load .env file if present (works on Render, Railway, Heroku, VPS, local, etc.)
 try { require("dotenv").config(); } catch (_) {}
@@ -189,8 +191,110 @@ body: ${String(info.body || '').slice(0, 120)}`
     } catch (_) {}
 }
 
-// Per-user state
-const activeSockets = {};
+// --- BACKGROUND JOB PERSISTENCE & REARMING ---
+const BROADCAST_JOBS_FILE = dataPath("broadcast_jobs.json");
+const CLONE_JOBS_FILE = dataPath("clone_jobs.json");
+
+function loadBroadcastJobs() {
+    if (!fs.existsSync(BROADCAST_JOBS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(BROADCAST_JOBS_FILE, "utf8")); } catch { return {}; }
+}
+function saveBroadcastJobs(d) {
+    const clean = {};
+    for (const [k, v] of Object.entries(d)) {
+        const { timer, ...rest } = v;
+        clean[k] = rest;
+    }
+    fs.writeFileSync(BROADCAST_JOBS_FILE, JSON.stringify(clean, null, 2));
+}
+
+function loadCloneJobs() {
+    if (!fs.existsSync(CLONE_JOBS_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(CLONE_JOBS_FILE, "utf8")); } catch { return {}; }
+}
+function saveCloneJobs(d) {
+    const clean = {};
+    for (const [k, v] of Object.entries(d)) {
+        const { timer, ...rest } = v;
+        clean[k] = rest;
+    }
+    fs.writeFileSync(CLONE_JOBS_FILE, JSON.stringify(clean, null, 2));
+}
+
+async function doBroadcastTick(sock, botJid) {
+    const bj = broadcastJobs[botJid];
+    if (!bj || !sock.user?.id) { delete broadcastJobs[botJid]; saveBroadcastJobs(broadcastJobs); return; }
+    if (bj.idx >= bj.total) {
+        delete broadcastJobs[botJid];
+        saveBroadcastJobs(broadcastJobs);
+        try { await sock.sendMessage(bj.from, { text: `✅ *Broadcast complete!*\n\nSent to *${bj.sent}/${bj.total}* groups.` }); } catch (_) {}
+        return;
+    }
+    const gid = bj.groupIds[bj.idx];
+    bj.idx++;
+    saveBroadcastJobs(broadcastJobs);
+    try {
+        await sock.sendMessage(gid, { text: bj.broadcastMsg });
+        bj.sent++;
+        await sock.sendMessage(bj.from, { text: `📤 Sent (${bj.sent}/${bj.total}): ${bj.allGroups[gid]?.subject || gid}` });
+    } catch (_) { bj.skipped++; }
+    if (broadcastJobs[botJid]) {
+        broadcastJobs[botJid].timer = setTimeout(() => doBroadcastTick(sock, botJid), bj.intervalMs);
+    }
+}
+
+async function runCloneBatch(sock, from) {
+    const job = cloneJobs[from];
+    if (!job || !sock.user?.id) { delete cloneJobs[from]; saveCloneJobs(cloneJobs); return; }
+    if (job.index >= job.total) {
+        delete cloneJobs[from];
+        saveCloneJobs(cloneJobs);
+        try { await sock.sendMessage(job.from, { text: `🎉 *Clone complete!*\n\n✅ Added: *${job.added}* member(s)\n⏭ Skipped: *${job.skipped}*` }); } catch (_) {}
+        return;
+    }
+    const thisBatch = Math.min(job.batchSize, job.total - job.index);
+    for (let i = 0; i < thisBatch; i++) {
+        if (!cloneJobs[from]) return;
+        const memberJid = job.members[job.index];
+        job.index++;
+        saveCloneJobs(cloneJobs);
+        try {
+            const res = await sock.groupParticipantsUpdate(job.destJid, [memberJid], "add");
+            const r = Array.isArray(res) ? res[0] : null;
+            if ((r?.status ? String(r.status) : "200") === "200") {
+                job.added++;
+                await sock.sendMessage(job.from, { text: `➕ Added (${job.added}/${job.total}): @${memberJid.split("@")[0]}`, mentions: [memberJid] });
+            } else { job.skipped++; }
+        } catch (e) {
+            job.skipped++;
+            if (String(e?.message || "").toLowerCase().includes("rate")) await delay(8000);
+        }
+        if (i < thisBatch - 1) await delay(1000);
+    }
+    if (cloneJobs[from]) {
+        cloneJobs[from].timer = setTimeout(() => runCloneBatch(sock, from), job.intervalMs);
+    }
+}
+
+function rearmJobsForSock(sock, botJid) {
+    // Rearm broadcast for this botJid
+    if (broadcastJobs[botJid] && !broadcastJobs[botJid].timer) {
+        console.log(`[Rearm] Resuming broadcast for ${botJid} at index ${broadcastJobs[botJid].idx}`);
+        // Delay slightly to ensure connection is stable
+        setTimeout(() => doBroadcastTick(sock, botJid), 5000);
+    }
+    // Rearm clone jobs that belong to this bot (indexed by "from" which is often a chatJid)
+    // However, cloneJobs are currently indexed by "from" globally. 
+    // We should probably check if the socket is the one that started it.
+    // For now, we'll rearm ALL clone jobs on the first socket that connects, 
+    // or better, if we can match the owner.
+    for (const [from, job] of Object.entries(cloneJobs)) {
+        if (!job.timer) {
+            console.log(`[Rearm] Resuming clone job in ${from} at index ${job.index}`);
+            setTimeout(() => runCloneBatch(sock, from), 7000);
+        }
+    }
+}
 async function kickSession(userId, { wipeAuth = false } = {}) {
     const sock = activeSockets[userId];
     if (sock) {
@@ -218,8 +322,9 @@ const telegramCtxs = {};   // userId -> telegram ctx (for alerts)
 // Anti-spam tracker: { jid: { count, lastTime } }
 const spamTracker = {};
 
-// GC Clone jobs: { groupJid: { members: [], index, interval } }
-const cloneJobs = {};
+const activeSockets = {};
+const broadcastJobs = loadBroadcastJobs();
+const cloneJobs = loadCloneJobs();
 
 // Reconnect notification cooldown: { userId: lastNotifyTimestamp }
 // Prevents flooding Telegram + WA self-chat with "restored" msgs on every micro-disconnect
@@ -974,7 +1079,7 @@ function schedulePromoGroup() {
             const botJid = sock.user.id;
             const last = cfg.lastRun[botJid] || 0;
             const offset = botStaggerOffsetMs(botJid, cfg.intervalHours || 24);
-            const nextDue = last === 0 ? (now - intervalMs + offset) : (last + intervalMs);
+            const nextDue = last === 0 ? (now + offset) : (last + intervalMs);
             if (now >= nextDue) {
                 runPromoGroupCycleForBot(sock).catch(e => console.log(`[promo] cycle err: ${e?.message}`));
             }
@@ -4113,6 +4218,9 @@ function getStaticHelpAnswer(query) {
 // --- MESSAGE HANDLER ---
 async function handleMessage(sock, msg) {
     try {
+        // Prevent responding to old messages on restart
+        const msgTime = (msg.messageTimestamp || 0) * 1000;
+        if (msgTime < processStartTime) return;
         if (!msg.message) return;
 
         const from = msg.key.remoteJid;
@@ -5548,37 +5656,10 @@ async function handleMessage(sock, msg) {
                     broadcastJobs[botJid] = {
                         timer: null, groupIds, allGroups,
                         idx: 0, total: totalGroups, sent: 0, skipped: 0,
+                        intervalMs, broadcastMsg, from
                     };
-
-                    const doBroadcastTick = async () => {
-                        if (!sock.user?.id) { delete broadcastJobs[botJid]; return; }
-                        const bj = broadcastJobs[botJid];
-                        if (!bj) return; // stopped
-
-                        if (bj.idx >= bj.total) {
-                            delete broadcastJobs[botJid];
-                            try { await sock.sendMessage(from, { text: `✅ *Broadcast complete!*\n\nSent to *${bj.sent}/${bj.total}* groups.` }); } catch (_) {}
-                            return;
-                        }
-
-                        // Send to ONE group per tick — silent skip on failure
-                        const gid = bj.groupIds[bj.idx];
-                        bj.idx++;
-                        try {
-                            await sock.sendMessage(gid, { text: broadcastMsg });
-                            bj.sent++;
-                            await sock.sendMessage(from, { text: `📤 Sent (${bj.sent}/${bj.total}): ${bj.allGroups[gid]?.subject || gid}` });
-                        } catch (_) {
-                            bj.skipped++;
-                        }
-
-                        // Schedule next AFTER this one finishes
-                        if (broadcastJobs[botJid]) {
-                            broadcastJobs[botJid].timer = setTimeout(doBroadcastTick, intervalMs);
-                        }
-                    };
-                    // Fire first send immediately; subsequent ones wait intervalMs after each
-                    doBroadcastTick();
+                    saveBroadcastJobs(broadcastJobs);
+                    doBroadcastTick(sock, botJid);
                 } catch (e) {
                     await reply(`❌ Broadcast failed: ${e?.message || "error"}`);
                 }
@@ -5590,6 +5671,7 @@ async function handleMessage(sock, msg) {
                 if (broadcastJobs[botJid].timer) clearTimeout(broadcastJobs[botJid].timer);
                 const bj = broadcastJobs[botJid];
                 delete broadcastJobs[botJid];
+                saveBroadcastJobs(broadcastJobs);
                 await reply(`🛑 *Broadcast stopped.*\n\n📤 Sent: *${bj.sent || 0}/${bj.total || 0}*\n⏭ Skipped: *${bj.skipped || 0}*`);
                 break;
             }
@@ -6683,62 +6765,12 @@ _Can be started from any chat, but source members require source group access an
                     ));
 
                     const intervalMs = intervalMins * 60 * 1000;
-                    cloneJobs[from] = { timer: null, members, total: members.length, index: 0, added: 0, skipped: 0 };
-
-                    // Sequential batching: next batch timer only starts AFTER current batch fully completes.
-                    // This prevents concurrent WA operations that cause session logouts.
-                    const runCloneBatch = async () => {
-                        if (!sock.user?.id) { delete cloneJobs[from]; return; }
-                        const job = cloneJobs[from];
-                        if (!job) return; // stopped mid-run
-
-                        if (job.index >= job.total) {
-                            delete cloneJobs[from];
-                            try {
-                                await sock.sendMessage(from, {
-                                    text: `🎉 *Clone complete!*\n\n✅ Added: *${job.added}* member(s)\n⏭ Skipped: *${job.skipped}*`
-                                });
-                            } catch (_) {}
-                            return;
-                        }
-
-                        // Process exactly batchSize members — all errors/skips are silent
-                        const thisBatch = Math.min(batchSize, job.total - job.index);
-                        for (let i = 0; i < thisBatch; i++) {
-                            if (!cloneJobs[from]) return; // .stopclone / .cancelexec fired mid-batch
-                            const memberJid = job.members[job.index];
-                            job.index++;
-                            try {
-                                const res = await sock.groupParticipantsUpdate(destJid, [memberJid], "add");
-                                const r   = Array.isArray(res) ? res[0] : null;
-                                const status = r?.status ? String(r.status) : "200";
-                                if (status === "200") {
-                                    job.added++;
-                                    await sock.sendMessage(from, {
-                                        text: `➕ Added (${job.added}/${job.total}): @${memberJid.split("@")[0]}`,
-                                        mentions: [memberJid],
-                                    });
-                                } else {
-                                    job.skipped++;
-                                }
-                            } catch (e) {
-                                job.skipped++;
-                                const errMsg = String(e?.message || "").toLowerCase();
-                                if (errMsg.includes("rate") || errMsg.includes("429") || errMsg.includes("too many")) {
-                                    await new Promise(r => setTimeout(r, 8000));
-                                }
-                            }
-                            if (i < thisBatch - 1) await new Promise(r => setTimeout(r, 1000));
-                        }
-
-                        // Schedule next batch ONLY after this batch finishes
-                        if (cloneJobs[from]) {
-                            cloneJobs[from].timer = setTimeout(runCloneBatch, intervalMs);
-                        }
+                    cloneJobs[from] = {
+                        timer: null, members, total: members.length, index: 0, added: 0, skipped: 0,
+                        batchSize, intervalMs, destJid, from
                     };
-
-                    // First batch fires after first interval
-                    cloneJobs[from].timer = setTimeout(runCloneBatch, intervalMs);
+                    saveCloneJobs(cloneJobs);
+                    runCloneBatch(sock, from);
                 } catch (err) {
                     console.error("Clone error:", err?.message || err);
                     await reply(`❌ Failed to start clone.\n\nCheck that both links/IDs are valid, the linked account can access the source group, and the bot is admin in the destination.\n\nReason: ${err?.message || "unknown error"}`);
@@ -6773,6 +6805,7 @@ _Can be started from any chat, but source members require source group access an
                 const remaining = Math.max(0, total - done);
                 const pct = total ? Math.round((done / total) * 100) : 0;
                 delete cloneJobs[from];
+                saveCloneJobs(cloneJobs);
                 await reply(
                     `🛑 *Clone stopped.*\n\n` +
                     `processed: *${done}/${total}* (${pct}%)\n` +
@@ -9504,11 +9537,7 @@ JID: \`${targetJid}\``);
                             { id: "typo_yes", label: `✅ Run  ${bestDisplay.split(" ")[0]}` },
                             { id: "typo_no",  label: "❌ Dismiss" }
                         ]);
-                    } else if (isSelfChat && body) {
-                        await reply(buildOmegaTerminal(`   👁  *SCANNING...*\n\n   Type *.menu* to access all commands.`));
                     }
-                } else if (isSelfChat && body) {
-                    await reply(`👋 I'm active! Type *.menu* to see all commands.`);
                 }
                 break;
         }
@@ -10433,6 +10462,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
             logActivity(sessionId, 'connect', `Connected as ${sock.user?.id || 'unknown'}`);
             pushToSSE(sessionId, { event: 'status', connected: true });
             console.log(`[WebPair] ✅ ${sessionId} connected as ${botJids[sessionId]}`);
+            rearmJobsForSock(sock, botJids[sessionId]);
 
             // Send session token to user's WhatsApp self-chat
             try {
@@ -11948,6 +11978,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
                 }
             }
             console.log(`User ${userId} connected! Bot JID: ${botJids[userId]}`);
+            rearmJobsForSock(sock, botJids[userId]);
         }
 
         if (connection === "close") {
