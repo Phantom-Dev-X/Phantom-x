@@ -330,9 +330,6 @@ const cloneJobs = loadCloneJobs();
 // Prevents flooding Telegram + WA self-chat with "restored" msgs on every micro-disconnect
 const lastConnectNotify = {};
 
-// Broadcast jobs: { botJid: { intervalId, groups, index, total } }
-const broadcastJobs = {};
-
 // Presence heartbeat timers per linked session — keeps the WA account visibly online
 // and helps avoid the "last seen" confusion after deploy.
 const presenceHeartbeats = {};
