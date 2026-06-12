@@ -424,6 +424,9 @@ function patchLegacyInteractiveForWhiskey(message) {
 // AI Help mode: { "senderJid::chatJid": { timer } }
 const helpModeUsers = {};
 
+// AI Chat mode: { "senderJid::chatJid": { timer } }
+const aiModeUsers = {};
+
 // .session command state: { "devJid::chatJid": { step: "action"|"count"|"link", action: "join"|"follow"|"addcontacts", count: N } }
 const sessionCmdState = {};
 
@@ -1272,6 +1275,34 @@ function getHelpSystemPrompt() {
         `.premiumadd / .premiumremove — manage premium users`;
 }
 
+// --- DUCKDUCKGO KEYLESS AI SEARCH SUMMARY ---
+async function duckduckgoInstantAnswer(query) {
+    return new Promise((resolve) => {
+        const u = new URL(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+        https.get({
+            hostname: u.hostname,
+            path: u.pathname + u.search,
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
+        }, res => {
+            let d = ""; res.on("data", c => d += c);
+            res.on("end", () => {
+                const snippets = [];
+                const re = /<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/g;
+                let m;
+                while ((m = re.exec(d)) !== null) {
+                    const clean = m[1].replace(/<b>|<\/b>|<em>|<\/em>|<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+                    if (clean && !snippets.includes(clean)) snippets.push(clean);
+                }
+                if (snippets.length) {
+                    resolve(snippets.slice(0, 2).join("\n\n"));
+                } else {
+                    resolve(null);
+                }
+            });
+        }).on("error", () => resolve(null));
+    });
+}
+
 // Calls a Pollinations.ai model by name (free, no key needed)
 async function callPollinations(prompt, opts = {}, model = "openai") {
     const messages = [];
@@ -1319,54 +1350,138 @@ async function callPollinations(prompt, opts = {}, model = "openai") {
     });
 }
 
-async function callGemini(prompt, opts = {}) {
-    const KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+async function callUniversalAI(prompt, opts = {}) {
     let lastErr = null;
-    if (KEY) {
-        // Prefer newer Gemini first, then stable fallbacks
+
+    // 1. Google Gemini API (Official System Instruction Specification)
+    const GEMINI_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY || "").trim();
+    if (GEMINI_KEY) {
         const models = opts.model
             ? [opts.model]
             : [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
-        const sys = opts.system ? [{ text: opts.system }] : [];
+        const systemInstruction = opts.system ? { parts: [{ text: opts.system }] } : undefined;
+
         for (const model of models) {
             const body = JSON.stringify({
-                contents: [{ parts: sys.concat([{ text: prompt }]) }],
+                system_instruction: systemInstruction,
+                contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: { temperature: opts.temperature ?? 0.7 },
             });
             try {
                 const result = await new Promise((resolve, reject) => {
                     const req = https.request({
                         hostname: "generativelanguage.googleapis.com",
-                        path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
+                        path: `/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-                    }, (res) => {
+                    }, res => {
                         let data = ""; res.on("data", c => data += c);
                         res.on("end", () => {
                             try {
                                 const p = JSON.parse(data);
                                 const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
-                                if (t) resolve(t.trim());
-                                else {
-                                    const errMsg = p?.error?.message || p?.error?.status || "Empty response from Gemini";
-                                    reject(new Error(errMsg));
-                                }
+                                if (t) return resolve(t.trim());
+                                const errMsg = p?.error?.message || p?.error?.status || `HTTP ${res.statusCode}: Empty Gemini reply`;
+                                reject(new Error(errMsg));
                             } catch (e) { reject(e); }
                         });
                     });
                     req.on("error", reject); req.write(body); req.end();
                 });
-                return result;
+                if (result) return result;
             } catch (e) {
                 lastErr = e;
+                console.log(`[UniversalAI] Gemini (${model}) error: ${e.message}`);
             }
         }
-    } else {
-        lastErr = new Error("No Gemini API key set in Render environment variable");
     }
 
-    // Fall back to Pollinations AI if Gemini failed or no API key is set
-    console.log(`[callGemini] Gemini unavailable (${lastErr ? lastErr.message : "no key"}), falling back to Pollinations AI...`);
+    // 2. Groq API (Incredible speed & intelligence)
+    const GROQ_KEY = (process.env.GROQ_API_KEY || "").trim();
+    if (GROQ_KEY) {
+        const messages = [];
+        if (opts.system) messages.push({ role: "system", content: opts.system });
+        messages.push({ role: "user", content: prompt });
+        const body = JSON.stringify({ messages, model: "llama3-70b-8192", temperature: opts.temperature ?? 0.7 });
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const req = https.request({
+                    hostname: "api.groq.com",
+                    path: "/openai/v1/chat/completions",
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${GROQ_KEY}` },
+                }, res => {
+                    let data = ""; res.on("data", c => data += c);
+                    res.on("end", () => {
+                        try {
+                            const p = JSON.parse(data);
+                            const t = p?.choices?.[0]?.message?.content;
+                            if (t) return resolve(t.trim());
+                            reject(new Error(p?.error?.message || "Empty Groq reply"));
+                        } catch (e) { reject(e); }
+                    });
+                });
+                req.on("error", reject); req.write(body); req.end();
+            });
+            if (result) return result;
+        } catch (e) {
+            lastErr = e;
+            console.log(`[UniversalAI] Groq error: ${e.message}`);
+        }
+    }
+
+    // 3. DeepSeek API / OpenRouter API / OpenAI API standard compatibility
+    const OPENAI_COMPAT_KEYS = [
+        { key: process.env.DEEPSEEK_API_KEY, host: "api.deepseek.com", path: "/chat/completions", model: "deepseek-chat" },
+        { key: process.env.OPENROUTER_API_KEY, host: "api.openrouter.ai", path: "/v1/chat/completions", model: "openrouter/auto" },
+        { key: process.env.OPENAI_API_KEY, host: "api.openai.com", path: "/v1/chat/completions", model: "gpt-4o-mini" },
+    ];
+
+    for (const cfg of OPENAI_COMPAT_KEYS) {
+        if (!cfg.key || !cfg.key.trim()) continue;
+        const messages = [];
+        if (opts.system) messages.push({ role: "system", content: opts.system });
+        messages.push({ role: "user", content: prompt });
+        const body = JSON.stringify({ messages, model: cfg.model, temperature: opts.temperature ?? 0.7 });
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const req = https.request({
+                    hostname: cfg.host,
+                    path: cfg.path,
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${cfg.key.trim()}` },
+                }, res => {
+                    let data = ""; res.on("data", c => data += c);
+                    res.on("end", () => {
+                        try {
+                            const p = JSON.parse(data);
+                            const t = p?.choices?.[0]?.message?.content;
+                            if (t) return resolve(t.trim());
+                            reject(new Error(p?.error?.message || `Empty ${cfg.host} reply`));
+                        } catch (e) { reject(e); }
+                    });
+                });
+                req.on("error", reject); req.write(body); req.end();
+            });
+            if (result) return result;
+        } catch (e) {
+            lastErr = e;
+            console.log(`[UniversalAI] ${cfg.host} error: ${e.message}`);
+        }
+    }
+
+    // 4. Fall back to DuckDuckGo Keyless AI Search Summary (No API key needed)
+    console.log(`[UniversalAI] Primary AI providers unavailable, falling back to DuckDuckGo Keyless AI Search Summary...`);
+    try {
+        const ddgRes = await duckduckgoInstantAnswer(prompt);
+        if (ddgRes) return ddgRes;
+    } catch (e) {
+        lastErr = e;
+        console.log(`[UniversalAI] DuckDuckGo Keyless fallback failed: ${e.message}`);
+    }
+
+    // 5. Fall back to Pollinations AI (Free, no key needed)
+    console.log(`[UniversalAI] DuckDuckGo Keyless AI unavailable, trying Pollinations AI fallback...`);
     const pollModels = ["openai", "openai-fast", "mistral"];
     for (const m of pollModels) {
         try {
@@ -1374,15 +1489,19 @@ async function callGemini(prompt, opts = {}) {
             if (res) return res;
         } catch (e) {
             lastErr = e;
-            console.log(`[callGemini] Pollinations fallback (${m}) failed: ${e.message}`);
+            console.log(`[UniversalAI] Pollinations fallback (${m}) failed: ${e.message}`);
         }
     }
 
-    throw lastErr || new Error("All AI models failed (Gemini AI and Pollinations AI fallbacks).");
+    throw lastErr || new Error("All AI models and Keyless Fallbacks (DuckDuckGo AI & Pollinations) failed to respond. Please check your API key in Render environment variables.");
+}
+
+async function callGemini(prompt, opts = {}) {
+    return await callUniversalAI(prompt, opts);
 }
 
 async function callAI(prompt, opts = {}) {
-    return await callGemini(prompt, opts);
+    return await callUniversalAI(prompt, opts);
 }
 
 // --- TTS (Google Translate free endpoint, multi-language) ---
@@ -4427,13 +4546,49 @@ async function handleMessage(sock, msg) {
                     await reply(buildOmegaTerminal(
                         `   ❌  *AI_ORACLE — OFFLINE*\n\n` +
                         `   The help AI couldn't respond right now.\n\n` +
-                        `   *Possible reasons:*\n` +
-                        `   • No GEMINI_API_KEY / GOOGLE_API_KEY set in your environment and Pollinations AI fallback is unavailable\n` +
-                        `   • AI services are temporarily down\n` +
-                        `   • Network issue on your server\n\n` +
-                        `   *Fix:* Add GEMINI_API_KEY (or GOOGLE_API_KEY) in your Render environment variables\n` +
-                        `   Get a free key: aistudio.google.com\n\n` +
+                        `   *Diagnostic Report:*\n` +
+                        `   • GEMINI_API_KEY: ${process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY ? "Set (but request failed — check key validity or quota)" : "Not Set"}\n` +
+                        `   • GROQ_API_KEY: ${process.env.GROQ_API_KEY ? "Set" : "Not Set"}\n` +
+                        `   • DEEPSEEK_API_KEY: ${process.env.DEEPSEEK_API_KEY ? "Set" : "Not Set"}\n` +
+                        `   • DuckDuckGo Keyless AI Fallback: Temporarily Busy or Unavailable\n\n` +
+                        `   *Fix:* Double-check your GEMINI_API_KEY on Render or add a free GROQ_API_KEY from console.groq.com\n\n` +
                         `   _Type *.help* to turn off help mode._`
+                    ));
+                }
+                return;
+            }
+        }
+
+        // --- AI CHAT MODE interceptor ---
+        {
+            const aiKey = `${senderJid}::${from}`;
+            if (aiModeUsers[aiKey] && rawBody && !rawBody.startsWith(".")) {
+                clearTimeout(aiModeUsers[aiKey].timer);
+                aiModeUsers[aiKey].timer = setTimeout(async () => {
+                    delete aiModeUsers[aiKey];
+                    try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  AI Chat mode timed out after 10 min inactivity.\n   Type *.ai* again to re-enable.`) }); } catch {}
+                }, 10 * 60 * 1000);
+                const aiChatSystemPrompt =
+                    `You are Phantom X, a highly intelligent, empathetic, relatable, and friendly AI companion and conversational assistant built by Eclipse.\n` +
+                    `RULES:\n` +
+                    `1. Be extremely conversational, friendly, supportive, and relatable. Feel free to use popular Nigerian/African relatable slang (e.g., "omo", "bro", "abeg", "no worries", "guy", "sha") to make the conversation feel incredibly alive and natural.\n` +
+                    `2. If a user is studying for an exam (e.g., Physics, Math, Economics), provide exceptionally clear, step-by-step breakdowns, memory formulas, tips, and deep encouragement like a brilliant study partner.\n` +
+                    `3. If a user is dealing with heartbreak, relationship issues, or stress, offer genuine warmth, heartfelt comfort, and wise, uplifting advice.\n` +
+                    `4. Use WhatsApp formatting (*bold*, _italic_) to make your messages beautiful and clear.\n` +
+                    `5. Give dynamic, fresh, and engaging answers every single time.`;
+                try {
+                    const aiReply = await callAI(rawBody, { system: aiChatSystemPrompt, temperature: 0.85 });
+                    await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
+                } catch (e) {
+                    await reply(buildOmegaTerminal(
+                        `   ❌  *AI_SYNAPSE — OFFLINE*\n\n` +
+                        `   My neural pathways couldn't respond right now.\n\n` +
+                        `   *Diagnostic Report:*\n` +
+                        `   • GEMINI_API_KEY: ${process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY ? "Set (but request failed — check key validity or quota)" : "Not Set"}\n` +
+                        `   • GROQ_API_KEY: ${process.env.GROQ_API_KEY ? "Set" : "Not Set"}\n` +
+                        `   • DuckDuckGo Keyless AI Fallback: Temporarily Busy or Unavailable\n\n` +
+                        `   *Fix:* Double-check your GEMINI_API_KEY on Render or add a free GROQ_API_KEY from console.groq.com\n\n` +
+                        `   _Type *.ai* to turn off AI chat mode._`
                     ));
                 }
                 return;
@@ -5723,10 +5878,12 @@ async function handleMessage(sock, msg) {
                         await reply(buildOmegaTerminal(
                             `   ❌  *AI_ORACLE — OFFLINE*\n\n` +
                             `   The help AI couldn't respond right now.\n\n` +
-                            `   *Possible reasons:*\n` +
-                            `   • No GEMINI_API_KEY set and Pollinations AI fallback is unavailable\n` +
-                            `   • Network issue on your server\n\n` +
-                            `   *Fix:* Add GEMINI_API_KEY in your Render environment variables from aistudio.google.com`
+                            `   *Diagnostic Report:*\n` +
+                            `   • GEMINI_API_KEY: ${process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY ? "Set (but request failed — check key validity or quota)" : "Not Set"}\n` +
+                            `   • GROQ_API_KEY: ${process.env.GROQ_API_KEY ? "Set" : "Not Set"}\n` +
+                            `   • DEEPSEEK_API_KEY: ${process.env.DEEPSEEK_API_KEY ? "Set" : "Not Set"}\n` +
+                            `   • DuckDuckGo Keyless AI Fallback: Temporarily Busy or Unavailable\n\n` +
+                            `   *Fix:* Double-check your GEMINI_API_KEY on Render or add a free GROQ_API_KEY from console.groq.com`
                         ));
                     }
                     break;
