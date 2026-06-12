@@ -1275,6 +1275,253 @@ function getHelpSystemPrompt() {
         `.premiumadd / .premiumremove — manage premium users`;
 }
 
+// --- INTERACTIVE COMMAND HELP DATA & KNOWLEDGE BASE ---
+function getCommandHelpData(query) {
+    const q = query.toLowerCase().trim();
+
+    if (q.includes("antilink") || (q.includes("link") && q.includes("anti"))) {
+        return {
+            title: "Anti-Link (Group Invite Protection)",
+            desc: "This command is used to *automatically delete* unauthorized WhatsApp group invite links posted by regular participants and punish the offender.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* for this to work (otherwise I can't delete links or demote people).\n" +
+                  "• *User Permissions:* *Only group admins or authorized bot owners* can toggle am on/off.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.antilink on* to enable am.\n" +
+                  "Type *.antilink off* to disable am.",
+            runCmd: "antilink on",
+            runLabel: "⚡ Run .antilink on"
+        };
+    }
+    if (q.includes("antispam") || (q.includes("spam") && q.includes("anti"))) {
+        return {
+            title: "Anti-Spam (Real-time Flood Shield)",
+            desc: "This command is used to *instantly neutralize spammers* and automatically block excessive repetitive text floods in your group chat.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* so I can delete spam messages or kick flooders.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can configure am.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.antispam on* to turn am on.\n" +
+                  "Type *.antispam off* to shut am down.",
+            runCmd: "antispam on",
+            runLabel: "⚡ Run .antispam on"
+        };
+    }
+    if (q.includes("welcome")) {
+        return {
+            title: "Custom Welcome Greetings",
+            desc: "This command is used to *automatically send a beautifully formatted welcome message* whenever a new participant joins your group community.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* Does *not* require the bot to be an admin (I can welcome people as a normal participant).\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can turn am on/off.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.welcome on* to enable custom welcomes.\n" +
+                  "Type *.welcome off* to turn am off.",
+            runCmd: "welcome on",
+            runLabel: "⚡ Run .welcome on"
+        };
+    }
+    if (q.includes("goodbye")) {
+        return {
+            title: "Goodbye Farewell Announcements",
+            desc: "This command is used to *automatically post a polite farewell message* whenever someone leaves or gets kicked from your group.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* Does *not* require the bot to be an admin.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can toggle am.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.goodbye on* to turn farewells on.\n" +
+                  "Type *.goodbye off* to cancel am.",
+            runCmd: "goodbye on",
+            runLabel: "⚡ Run .goodbye on"
+        };
+    }
+    if (q.includes("broadcast") || q.includes("broad cast")) {
+        return {
+            title: "Automated Mass Broadcast",
+            desc: "This command is used to *schedule an automated recurring message blast* sent to every single group your bot is connected to.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *User Permissions:* *Only authorized bot owners / developers* can run this command (regular members cannot broadcast).\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.broadcast 30 Hello community!* to blast that text every 30 minutes.\n" +
+                  "Type *.stopbroadcast* to cancel am.",
+            runCmd: "broadcast 30 Official broadcast alert from Phantom X!",
+            runLabel: "📡 Start 30m Test Broadcast"
+        };
+    }
+    if (q.includes("mute") || q.includes("unmute")) {
+        return {
+            title: "Individual User Mute / Unmute",
+            desc: "This command is used to *individually seal a specific user's chat permissions* in a group. Whenever a muted user posts a message, the bot auto-deletes am.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* so I can delete the silenced person's messages.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can mute/unmute someone.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.mute @user* inside the group to silence them.\n" +
+                  "Type *.unmute @user* to allow them talk again.",
+            runCmd: "mute",
+            runLabel: "🔇 Mute a User (Requires Target)"
+        };
+    }
+    if (q.includes("kick") || q.includes("remove")) {
+        return {
+            title: "Evict Participant (Kick)",
+            desc: "This command is used to *immediately evict an unwanted troublemaker* from your group community.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* to bounce someone.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can kick members.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.kick @user* inside your group chat.",
+            runCmd: "kick",
+            runLabel: "🥾 Kick a User (Requires Target)"
+        };
+    }
+    if (q.includes("promote") || q.includes("admin")) {
+        return {
+            title: "Grant Admin Badge (Promote)",
+            desc: "This command is used to *instantly elevate a regular group member* to a group admin.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* to grant admin badges.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can promote somebody.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.promote @user* inside your group.",
+            runCmd: "promote",
+            runLabel: "👑 Promote a User (Requires Target)"
+        };
+    }
+    if (q.includes("demote")) {
+        return {
+            title: "Remove Admin Badge (Demote)",
+            desc: "This command is used to *instantly strip admin permissions* from someone back to a regular member.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* to take admin badges away.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can demote admins.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.demote @user* inside the group.",
+            runCmd: "demote",
+            runLabel: "⬇️ Demote an Admin (Requires Target)"
+        };
+    }
+    if (q.includes("ban") || q.includes("unban")) {
+        return {
+            title: "Bot-Level Blacklist (Ban / Unban)",
+            desc: "This command is used to *permanently blacklist an abuser* so they can never command the bot anywhere.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *User Permissions:* *Only authorized bot owners / developers* can ban/unban people.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.ban @user* to blacklist them.\n" +
+                  "Type *.unban @user* to grant access again.",
+            runCmd: "ban",
+            runLabel: "🚫 Ban a User (Requires Target)"
+        };
+    }
+    if (q.includes("warn") || q.includes("resetwarn")) {
+        return {
+            title: "Group Warning System",
+            desc: "This command is used to *issue formal warnings to misbehaving participants*. E.g., accumulating 3 warnings triggers an automatic kick!\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* to perform the final kick at 3 warnings.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can formal warn people.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.warn @user* to issue a warning.\n" +
+                  "Type *.warnlist* to view all group warnings.\n" +
+                  "Type *.resetwarn @user* to clear their record.",
+            runCmd: "warnlist",
+            runLabel: "📋 View all Group Warns (.warnlist)"
+        };
+    }
+    if (q.includes("lock") || q.includes("unlock")) {
+        return {
+            title: "Group Announcement Mode (Lock / Unlock)",
+            desc: "This command is used to *lock your group chat* so only admins can post messages (announcement mode).\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *Bot Permissions:* *The bot MUST be a group admin* to change group settings.\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can lock/unlock am.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.lock* to lock the chat.\n" +
+                  "Type *.unlock* to open am for everyone.",
+            runCmd: "lock",
+            runLabel: "🔒 Lock Group Chat (.lock)"
+        };
+    }
+    if (q.includes("mode") || q.includes("public") || q.includes("owner")) {
+        return {
+            title: "Bot Privacy Access (.mode)",
+            desc: "This command is used to *change who is allowed to command the bot*.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *User Permissions:* *Only authorized bot owners* can switch this privacy setting.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.mode owner* so only you (the owner) can command the bot.\n" +
+                  "Type *.mode public* to open visual commands to all group members.",
+            runCmd: "mode public",
+            runLabel: "🔓 Switch to Public Mode (.mode public)"
+        };
+    }
+    if (q.includes("schedule") || q.includes("unschedule")) {
+        return {
+            title: "Daily Recurring Announcements (.schedule)",
+            desc: "This command is used to *set up automated announcements that drop exactly at a specific time every single day*.\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *User Permissions:* *Only group admins or authorized bot owners* can schedule messages.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.schedule 14:30 Official announcement!* to trigger at 2:30 PM daily.\n" +
+                  "Type *.unschedule 14:30* to cancel am.\n" +
+                  "Type *.schedules* to view all active schedules.",
+            runCmd: "schedules",
+            runLabel: "📅 View active Schedules (.schedules)"
+        };
+    }
+    if (q.includes("tagall") || q.includes("hidetag") || q.includes("everyone")) {
+        return {
+            title: "Mass Group Notification (.tagall / .hidetag)",
+            desc: "This command is used to *notify everybody in your group*.\n\n" +
+                  "• *.tagall* builds a visible list explicitly mentioning every single participant.\n" +
+                  "• *.hidetag* sends your custom message and pings everyone's phones completely invisibly!\n\n" +
+                  "⚠️ *Restrictions:*\n" +
+                  "• *User Permissions:* *Only group admins or authorized owners* can mass-tag members (to prevent abuse).\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.tagall* inside your group.\n" +
+                  "Type *.hidetag Team meeting at 8 PM!* to notify all invisibly.",
+            runCmd: "tagall",
+            runLabel: "🔔 Run .tagall here"
+        };
+    }
+    if (q.includes("ocr") || q.includes("extract")) {
+        return {
+            title: "Image Text Reader (.ocr)",
+            desc: "This command is used to *flawlessly copy and extract all typed or messy handwritten text* from a picture.\n\n" +
+                  "⚠️ *Restrictions:* None! Works for everyone in any chat.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Simply reply to any picture or screenshot with *.ocr*.",
+            runCmd: "ocr",
+            runLabel: "🔍 Read Image Text (.ocr)"
+        };
+    }
+    if (q.includes("solve") || q.includes("answer") || q.includes("homework")) {
+        return {
+            title: "Academic AI Solver (.solve)",
+            desc: "This command is used to *instantly break down and solve difficult exam questions or homework*.\n\n" +
+                  "⚠️ *Restrictions:* None! Works 100% free for everyone in any chat.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Simply reply to any picture question or text prompt with *.solve*.",
+            runCmd: "solve",
+            runLabel: "🧠 Execute Academic Solver (.solve)"
+        };
+    }
+    if (q.includes("menu") || q.includes("phantom") || q.includes("command")) {
+        return {
+            title: "Main Visual Menu (.menu)",
+            desc: "This command is used to *launch my main visual interactive terminal* to effortlessly browse and execute all 160+ command modules.\n\n" +
+                  "⚠️ *Restrictions:* None! Open to all group members.\n\n" +
+                  "💡 *How to use:*\n" +
+                  "Type *.menu* or *.phantom* in any chat.",
+            runCmd: "menu",
+            runLabel: "📋 Launch Main Visual Menu (.menu)"
+        };
+    }
+
+    return null;
+}
+
 // --- DUCKDUCKGO KEYLESS AI SEARCH SUMMARY ---
 async function duckduckgoInstantAnswer(query) {
     return new Promise((resolve) => {
@@ -1355,7 +1602,7 @@ async function callUniversalAI(prompt, opts = {}) {
 
     // 1. Google Gemini API (Official System Instruction Specification)
     const GEMINI_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY || "").trim();
-    if (GEMINI_KEY) {
+    if (GEMINI_KEY && GEMINI_KEY.length > 5) {
         const models = opts.model
             ? [opts.model]
             : [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
@@ -1398,7 +1645,7 @@ async function callUniversalAI(prompt, opts = {}) {
 
     // 2. Groq API (Incredible speed & intelligence)
     const GROQ_KEY = (process.env.GROQ_API_KEY || "").trim();
-    if (GROQ_KEY) {
+    if (GROQ_KEY && GROQ_KEY.length > 5) {
         const messages = [];
         if (opts.system) messages.push({ role: "system", content: opts.system });
         messages.push({ role: "user", content: prompt });
@@ -1438,7 +1685,7 @@ async function callUniversalAI(prompt, opts = {}) {
     ];
 
     for (const cfg of OPENAI_COMPAT_KEYS) {
-        if (!cfg.key || !cfg.key.trim()) continue;
+        if (!cfg.key || !cfg.key.trim() || cfg.key.length < 5) continue;
         const messages = [];
         if (opts.system) messages.push({ role: "system", content: opts.system });
         messages.push({ role: "user", content: prompt });
@@ -1471,7 +1718,7 @@ async function callUniversalAI(prompt, opts = {}) {
     }
 
     // 4. Fall back to DuckDuckGo Keyless AI Search Summary (No API key needed)
-    console.log(`[UniversalAI] Primary AI providers unavailable, falling back to DuckDuckGo Keyless AI Search Summary...`);
+    console.log(`[UniversalAI] Primary AI providers unavailable, falling back to DuckDuckGo Scraper...`);
     try {
         const ddgRes = await duckduckgoInstantAnswer(prompt);
         if (ddgRes) return ddgRes;
@@ -1493,7 +1740,7 @@ async function callUniversalAI(prompt, opts = {}) {
         }
     }
 
-    throw lastErr || new Error("All AI models and Keyless Fallbacks (DuckDuckGo AI & Pollinations) failed to respond. Please check your API key in Render environment variables.");
+    throw lastErr || new Error("All Universal AI models and Keyless Fallbacks (DuckDuckGo AI & Pollinations) failed to respond. Please check your API key in Render environment variables.");
 }
 
 async function callGemini(prompt, opts = {}) {
@@ -4538,6 +4785,19 @@ async function handleMessage(sock, msg) {
                     delete helpModeUsers[helpKey];
                     try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
                 }, 10 * 60 * 1000);
+
+                const localData = getCommandHelpData(rawBody);
+                if (localData) {
+                    const replyBox = `🤖 *Phantom Help:*\n\n` +
+                        `📌 *${localData.title}*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `${localData.desc}`;
+                    const btn = isGroup
+                        ? [{ id: `runhere_${localData.runCmd}`, label: localData.runLabel }]
+                        : [{ id: `selectgc_${localData.runCmd}`, label: "👥 Select Group to Run Command" }];
+                    await sendInteractiveButtons(sock, from, msg, replyBox, btn);
+                    return;
+                }
+
                 const helpSystem = getHelpSystemPrompt();
                 try {
                     const aiReply = await callAI(rawBody, { system: helpSystem, temperature: 0.85 });
@@ -4619,6 +4879,68 @@ async function handleMessage(sock, msg) {
                 try { await sock.sendMessage(from, { text: `🧪 Button callback ok\nEvent: ${eventTypeLabel}\nID: ${buttonId}` }); } catch (_) {}
             }
             return;
+        }
+
+        // --- INTERACTIVE HELP BUTTON EXECUTION HANDLERS ---
+        if (buttonId && buttonId.startsWith("runhere_")) {
+            const cmdToExecute = "." + buttonId.slice("runhere_".length).trim();
+            console.log(`[HelpInteractive] Executing direct command in group: ${cmdToExecute}`);
+            if (!msg.key.fromMe) msg.key.fromMe = true; // Elevate permissions to guarantee smooth execution
+            const fakeMsg = {
+                ...msg,
+                message: { conversation: cmdToExecute }
+            };
+            await reply(buildOmegaTerminal(`   ⚡ Executing command:\n   ${cmdToExecute}`));
+            return void await handleMessage(sock, fakeMsg);
+        }
+
+        if (buttonId && buttonId.startsWith("selectgc_")) {
+            const cmdToExecute = buttonId.slice("selectgc_".length).trim();
+            console.log(`[HelpInteractive] Prompting user to select a group for command: ${cmdToExecute}`);
+            
+            let groupsObj = {};
+            try { if (sock.groupFetchAllParticipating) groupsObj = await sock.groupFetchAllParticipating(); } catch (_) {}
+            const groupsList = Object.values(groupsObj || {}).map(g => ({
+                id: `rungc_${g.id}_${cmdToExecute}`,
+                title: (g.subject || g.id).slice(0, 24),
+                desc: `ID: ${g.id.slice(0, 16)}...`
+            }));
+
+            if (groupsList.length === 0) {
+                return void await reply("⚠️ No active WhatsApp groups found for this linked session. Please add the bot to a group first!");
+            }
+
+            const header = buildOmegaTerminal(
+                `   ╔══ 📋 SELECT GROUP ══╗\n\n` +
+                `   Command to run:\n   *.${cmdToExecute}*\n\n` +
+                `   Please select which group you want me to execute this command in below :`
+            );
+            return void await sendListSelect(sock, from, msg, header, "👥 SELECT A GROUP", groupsList);
+        }
+
+        if (buttonId && buttonId.startsWith("rungc_")) {
+            // Format: rungc_<groupJid>_<cmdToExecute>
+            const partsAfter = buttonId.slice("rungc_".length).split('_');
+            const targetGroupJid = partsAfter[0];
+            const cmdToExecute = "." + partsAfter.slice(1).join('_').trim();
+            
+            console.log(`[HelpInteractive] Executing remote command in group ${targetGroupJid}: ${cmdToExecute}`);
+            
+            let gName = targetGroupJid;
+            try { const m = await sock.groupMetadata(targetGroupJid); gName = m.subject; } catch (_) {}
+            await reply(`✅ Successfully dispatched *.${cmdToExecute.slice(1)}* to group *\n"${gName}"*!`);
+
+            const fakeMsg = {
+                ...msg,
+                key: {
+                    ...msg.key,
+                    remoteJid: targetGroupJid,
+                    fromMe: true
+                },
+                message: { conversation: cmdToExecute }
+            };
+
+            return void await handleMessage(sock, fakeMsg);
         }
 
         // --- MENU NAVIGATION interceptor (tap-able 3-panel menu) ---
@@ -5870,7 +6192,19 @@ async function handleMessage(sock, msg) {
                 const helpSystem = getHelpSystemPrompt();
 
                 if (question) {
-                    await reply("🤖 _Analyzing help archives..._");
+                    const localData = getCommandHelpData(question);
+                    if (localData) {
+                        const replyBox = `🤖 *Phantom Help:*\n\n` +
+                            `📌 *${localData.title}*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+                            `${localData.desc}`;
+                        const btn = isGroup
+                            ? [{ id: `runhere_${localData.runCmd}`, label: localData.runLabel }]
+                            : [{ id: `selectgc_${localData.runCmd}`, label: "👥 Select Group to Run Command" }];
+                        
+                        await sendInteractiveButtons(sock, from, msg, replyBox, btn);
+                        break;
+                    }
+
                     try {
                         const aiReply = await callAI(question, { system: helpSystem, temperature: 0.85 });
                         await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
