@@ -1211,56 +1211,65 @@ function savePersonas(d) { _saveJson(PERSONA_FILE, d); }
 function getPersona(scopeJid) { return loadPersonas()[scopeJid] || ""; }
 function setPersona(scopeJid, text) { const d = loadPersonas(); d[scopeJid] = text; savePersonas(d); }
 function clearPersona(scopeJid) { const d = loadPersonas(); delete d[scopeJid]; savePersonas(d); }
-async function callGemini(prompt, opts = {}) {
-    const KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    if (!KEY) throw new Error("Gemini API key not set. Add GEMINI_API_KEY (or GOOGLE_API_KEY) from https://aistudio.google.com/app/apikey");
-    // Prefer newer Gemini first, then stable fallbacks
-    const models = opts.model
-        ? [opts.model]
-        : [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
-    const sys = opts.system ? [{ text: opts.system }] : [];
-    let lastErr = null;
-    for (const model of models) {
-        const body = JSON.stringify({
-            contents: [{ parts: sys.concat([{ text: prompt }]) }],
-            generationConfig: { temperature: opts.temperature ?? 0.7 },
-        });
-        try {
-            const result = await new Promise((resolve, reject) => {
-                const req = https.request({
-                    hostname: "generativelanguage.googleapis.com",
-                    path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-                }, (res) => {
-                    let data = ""; res.on("data", c => data += c);
-                    res.on("end", () => {
-                        try {
-                            const p = JSON.parse(data);
-                            const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
-                            if (t) resolve(t.trim());
-                            else {
-                                const errMsg = p?.error?.message || p?.error?.status || "Empty response from Gemini";
-                                reject(new Error(errMsg));
-                            }
-                        } catch (e) { reject(e); }
-                    });
-                });
-                req.on("error", reject); req.write(body); req.end();
-            });
-            return result;
-        } catch (e) {
-            lastErr = e;
-            const msg = e?.message || "";
-            const isUnavailable = msg.includes("not found") || msg.includes("NOT_FOUND") || msg.includes("404") || msg.includes("permission") || msg.includes("PERMISSION_DENIED");
-            const isRateLimited = msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429") || msg.includes("quota") || msg.includes("rate") || msg.includes("too many");
-            if (!isUnavailable && !isRateLimited) {
-                throw e; // real error (network, parse, auth) — don't retry
-            }
-            // model unavailable OR quota/rate-limit — fall through to next model
-        }
-    }
-    throw lastErr || new Error("All Gemini models failed");
+function getHelpSystemPrompt() {
+    return `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
+        `RULES:\n` +
+        `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
+        `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
+        `3. Always show the exact command syntax.\n` +
+        `4. If you're unsure, say so honestly.\n\n` +
+        `FULL COMMAND LIST:\n` +
+        `.menu — main menu\n` +
+        `.ai / .ask <q> — ask AI\n` +
+        `.ping — bot latency\n` +
+        `.uptime — how long bot has been online\n` +
+        `.add <number> — add member to group\n` +
+        `.kick @user — remove member\n` +
+        `.promote @user — make admin\n` +
+        `.demote @user — remove admin\n` +
+        `.ban @user — ban member\n` +
+        `.unban @user — unban member\n` +
+        `.warn @user — issue warning (3 = auto kick)\n` +
+        `.warnlist — see all warnings\n` +
+        `.resetwarn @user — clear warnings\n` +
+        `.antilink on/off — block invite links from non-admins\n` +
+        `.antispam on/off — block spam messages\n` +
+        `.antimention on/off — block mass mentions\n` +
+        `.antidemote on/off — stop non-owners demoting the bot\n` +
+        `.lock / .unlock — group announcement mode\n` +
+        `.mute @user — silence a specific user\n` +
+        `.unmute @user — restore their voice\n` +
+        `.tagall — tag all members\n` +
+        `.hidetag — tag all silently\n` +
+        `.admins — tag all admins\n` +
+        `.welcome on/off — welcome message for new members\n` +
+        `.goodbye on/off — goodbye message for leaving members\n` +
+        `.groupinfo — group details\n` +
+        `.adminlist — list all admins\n` +
+        `.membercount — number of members\n` +
+        `.link — get group invite link\n` +
+        `.revoke — reset invite link\n` +
+        `.mode owner/public — public or owner-only mode\n` +
+        `.broadcast <mins> <msg> — send to all groups on interval\n` +
+        `.stopbroadcast — stop broadcast\n` +
+        `.schedule HH:MM <msg> — schedule daily message\n` +
+        `.persona — set bot personality\n` +
+        `.setpp — set menu banner image\n` +
+        `.setwpp — set WhatsApp profile picture\n` +
+        `.sticker — convert image to sticker\n` +
+        `.toimg — convert sticker to image\n` +
+        `.ocr — extract text from image\n` +
+        `.translate <text> — translate text\n` +
+        `.weather <city> — weather info\n` +
+        `.tts <text> — text to speech\n` +
+        `.lyrics <song> — get song lyrics\n` +
+        `.song <name> — download song\n` +
+        `.imagine <prompt> — AI image generation\n` +
+        `.solve — solve a question (text or image)\n` +
+        `.truth / .dare — truth or dare game\n` +
+        `.ttt — tic-tac-toe\n` +
+        `.cmdlock — lock/unlock commands for premium\n` +
+        `.premiumadd / .premiumremove — manage premium users`;
 }
 
 // Calls a Pollinations.ai model by name (free, no key needed)
@@ -1310,22 +1319,70 @@ async function callPollinations(prompt, opts = {}, model = "openai") {
     });
 }
 
-async function callAI(prompt, opts = {}) {
+async function callGemini(prompt, opts = {}) {
+    const KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
     let lastErr = null;
-
-    try {
-        return await callGemini(prompt, opts);
-    } catch (e) {
-        lastErr = e;
+    if (KEY) {
+        // Prefer newer Gemini first, then stable fallbacks
+        const models = opts.model
+            ? [opts.model]
+            : [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+        const sys = opts.system ? [{ text: opts.system }] : [];
+        for (const model of models) {
+            const body = JSON.stringify({
+                contents: [{ parts: sys.concat([{ text: prompt }]) }],
+                generationConfig: { temperature: opts.temperature ?? 0.7 },
+            });
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    const req = https.request({
+                        hostname: "generativelanguage.googleapis.com",
+                        path: `/v1beta/models/${model}:generateContent?key=${KEY}`,
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                    }, (res) => {
+                        let data = ""; res.on("data", c => data += c);
+                        res.on("end", () => {
+                            try {
+                                const p = JSON.parse(data);
+                                const t = p?.candidates?.[0]?.content?.parts?.[0]?.text;
+                                if (t) resolve(t.trim());
+                                else {
+                                    const errMsg = p?.error?.message || p?.error?.status || "Empty response from Gemini";
+                                    reject(new Error(errMsg));
+                                }
+                            } catch (e) { reject(e); }
+                        });
+                    });
+                    req.on("error", reject); req.write(body); req.end();
+                });
+                return result;
+            } catch (e) {
+                lastErr = e;
+            }
+        }
+    } else {
+        lastErr = new Error("No Gemini API key set in Render environment variable");
     }
 
-    try {
-        return await callPollinations(prompt, opts, "openai");
-    } catch (e) {
-        lastErr = e;
+    // Fall back to Pollinations AI if Gemini failed or no API key is set
+    console.log(`[callGemini] Gemini unavailable (${lastErr ? lastErr.message : "no key"}), falling back to Pollinations AI...`);
+    const pollModels = ["openai", "openai-fast", "mistral"];
+    for (const m of pollModels) {
+        try {
+            const res = await callPollinations(prompt, opts, m);
+            if (res) return res;
+        } catch (e) {
+            lastErr = e;
+            console.log(`[callGemini] Pollinations fallback (${m}) failed: ${e.message}`);
+        }
     }
 
-    throw lastErr || new Error("All AI providers failed");
+    throw lastErr || new Error("All AI models failed (Gemini AI and Pollinations AI fallbacks).");
+}
+
+async function callAI(prompt, opts = {}) {
+    return await callGemini(prompt, opts);
 }
 
 // --- TTS (Google Translate free endpoint, multi-language) ---
@@ -4362,65 +4419,7 @@ async function handleMessage(sock, msg) {
                     delete helpModeUsers[helpKey];
                     try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  Help mode timed out after 10 min inactivity.\n   Type *.help* again to re-enable.`) }); } catch {}
                 }, 10 * 60 * 1000);
-                const helpSystem =
-                    `You are Phantom X, an AI customer care assistant for the Eclipse/Phantom-X WhatsApp bot.\n` +
-                    `RULES:\n` +
-                    `1. If the user's message contains a typo or close approximation of a command (e.g. "antilinnk", "broad cast", "promot", "getpp", "kickk"), recognise their intent, gently note the correct spelling, then answer fully.\n` +
-                    `2. Be friendly, conversational, and concise. Use WhatsApp *bold* and _italic_.\n` +
-                    `3. Always show the exact command syntax.\n` +
-                    `4. If you're unsure, say so honestly.\n\n` +
-                    `FULL COMMAND LIST:\n` +
-                    `.menu — main menu\n` +
-                    `.ai / .ask <q> — ask AI\n` +
-                    `.ping — bot latency\n` +
-                    `.uptime — how long bot has been online\n` +
-                    `.add <number> — add member to group\n` +
-                    `.kick @user — remove member\n` +
-                    `.promote @user — make admin\n` +
-                    `.demote @user — remove admin\n` +
-                    `.ban @user — ban member\n` +
-                    `.unban @user — unban member\n` +
-                    `.warn @user — issue warning (3 = auto kick)\n` +
-                    `.warnlist — see all warnings\n` +
-                    `.resetwarn @user — clear warnings\n` +
-                    `.antilink on/off — block invite links from non-admins\n` +
-                    `.antispam on/off — block spam messages\n` +
-                    `.antimention on/off — block mass mentions\n` +
-                    `.antidemote on/off — stop non-owners demoting the bot\n` +
-                    `.lock / .unlock — group announcement mode\n` +
-                    `.mute @user — silence a specific user\n` +
-                    `.unmute @user — restore their voice\n` +
-                    `.tagall — tag all members\n` +
-                    `.hidetag — tag all silently\n` +
-                    `.admins — tag all admins\n` +
-                    `.welcome on/off — welcome message for new members\n` +
-                    `.goodbye on/off — goodbye message for leaving members\n` +
-                    `.groupinfo — group details\n` +
-                    `.adminlist — list all admins\n` +
-                    `.membercount — number of members\n` +
-                    `.link — get group invite link\n` +
-                    `.revoke — reset invite link\n` +
-                    `.mode owner/public — public or owner-only mode\n` +
-                    `.broadcast <mins> <msg> — send to all groups on interval\n` +
-                    `.stopbroadcast — stop broadcast\n` +
-                    `.schedule HH:MM <msg> — schedule daily message\n` +
-                    `.persona — set bot personality\n` +
-                    `.setpp — set menu banner image\n` +
-                    `.setwpp — set WhatsApp profile picture\n` +
-                    `.sticker — convert image to sticker\n` +
-                    `.toimg — convert sticker to image\n` +
-                    `.ocr — extract text from image\n` +
-                    `.translate <text> — translate text\n` +
-                    `.weather <city> — weather info\n` +
-                    `.tts <text> — text to speech\n` +
-                    `.lyrics <song> — get song lyrics\n` +
-                    `.song <name> — download song\n` +
-                    `.imagine <prompt> — AI image generation\n` +
-                    `.solve — solve a question (text or image)\n` +
-                    `.truth / .dare — truth or dare game\n` +
-                    `.ttt — tic-tac-toe\n` +
-                    `.cmdlock — lock/unlock commands for premium\n` +
-                    `.premiumadd / .premiumremove — manage premium users`;
+                const helpSystem = getHelpSystemPrompt();
                 try {
                     const aiReply = await callAI(rawBody, { system: helpSystem, temperature: 0.85 });
                     await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
@@ -4429,10 +4428,10 @@ async function handleMessage(sock, msg) {
                         `   ❌  *AI_ORACLE — OFFLINE*\n\n` +
                         `   The help AI couldn't respond right now.\n\n` +
                         `   *Possible reasons:*\n` +
-                        `   • No GEMINI_API_KEY / GOOGLE_API_KEY set in your environment\n` +
-                        `   • AI service is temporarily down\n` +
+                        `   • No GEMINI_API_KEY / GOOGLE_API_KEY set in your environment and Pollinations AI fallback is unavailable\n` +
+                        `   • AI services are temporarily down\n` +
                         `   • Network issue on your server\n\n` +
-                        `   *Fix:* Add GEMINI_API_KEY (or GOOGLE_API_KEY) to your environment\n` +
+                        `   *Fix:* Add GEMINI_API_KEY (or GOOGLE_API_KEY) in your Render environment variables\n` +
                         `   Get a free key: aistudio.google.com\n\n` +
                         `   _Type *.help* to turn off help mode._`
                     ));
@@ -5712,6 +5711,27 @@ async function handleMessage(sock, msg) {
             }
 
             case ".help": {
+                const question = parts.slice(1).join(" ").trim();
+                const helpSystem = getHelpSystemPrompt();
+
+                if (question) {
+                    await reply("🤖 _Analyzing help archives..._");
+                    try {
+                        const aiReply = await callAI(question, { system: helpSystem, temperature: 0.85 });
+                        await reply(`🤖 *Phantom Help:*\n\n${aiReply}`);
+                    } catch (e) {
+                        await reply(buildOmegaTerminal(
+                            `   ❌  *AI_ORACLE — OFFLINE*\n\n` +
+                            `   The help AI couldn't respond right now.\n\n` +
+                            `   *Possible reasons:*\n` +
+                            `   • No GEMINI_API_KEY set and Pollinations AI fallback is unavailable\n` +
+                            `   • Network issue on your server\n\n` +
+                            `   *Fix:* Add GEMINI_API_KEY in your Render environment variables from aistudio.google.com`
+                        ));
+                    }
+                    break;
+                }
+
                 const helpKey = `${senderJid}::${from}`;
                 if (helpModeUsers[helpKey]) {
                     clearTimeout(helpModeUsers[helpKey].timer);
