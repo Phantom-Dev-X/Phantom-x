@@ -4128,8 +4128,33 @@ async function handleMenuNavigation(sock, jid, msg, buttonId, isDev) {
         await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🐞 *REPORT BUG*\n\n   Use this format:\n   *.report <number> <short note>*\n\n   Example:\n   *.report 2348012345678 suspicious payload test*`) }, { quoted: msg });
         return;
     }
-    if (buttonId === "fun_games") {
-        await sock.sendMessage(jid, { text: buildOmegaTerminal(`   🎲 *GAMES*\n\n   • *.truth*\n   • *.dare*\n   • *.rps rock*\n   • *.8ball will I pass?*\n   • *.slots*\n   • *.trivia*\n   • *.hangman*\n   • *.numguess*\n   • *.mathquiz*`) }, { quoted: msg });
+    if (buttonId === "fun_games" || buttonId === "menu_games") {
+        const gamesGuide =
+            `🎮 *PHANTOM X — ULTRA GAMES ARCADE* 🎮\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `Play interactive visual games alone or with friends in your group!\n\n` +
+            `⚔️ *MULTIPLAYER (Play with Friends)*\n` +
+            `• *.ttt @friend* — Tic-Tac-Toe (Visual Xs & Os)\n` +
+            `• *.truth* / *.dare* — Perfect for group game nights\n` +
+            `• *.wouldurather* — Fun group moral dilemmas\n\n` +
+            `🧠 *SOLO CHALLENGES (Play with AI)*\n` +
+            `• *.trivia* — Nigerian, Premier League, & Science quiz\n` +
+            `• *.riddle* — Highly clever brain teasers\n` +
+            `• *.hangman* — Guess the secret hidden word\n` +
+            `• *.scramble* — Unscramble jumbled letters\n` +
+            `• *.mathquiz* — Speed arithmetic challenges\n` +
+            `• *.numguess* — Guess my secret number (1-100)\n\n` +
+            `🎰 *CASINO & LUCK*\n` +
+            `• *.slots* — Spin the slot machine for jackpot\n` +
+            `• *.rps rock* (or paper/scissors) — Rock, Paper, Scissors\n` +
+            `• *.8ball <question>* — Magic fortune teller\n\n` +
+            `💡 *How to play:* Type any command above directly in your chat, or tap a button below to launch an instant solo game!`;
+
+        await sendInteractiveButtons(sock, jid, msg, gamesGuide, [
+            { id: "rungame_trivia", label: "🧠 Play Trivia" },
+            { id: "rungame_riddle", label: "💡 Play Riddle" },
+            { id: "rungame_wouldurather", label: "🎭 Would You Rather" },
+            { id: "back_to_main", label: "🏠 Main Menu" }
+        ]);
         return;
     }
     if (buttonId === "fun_social") {
@@ -4940,6 +4965,17 @@ async function handleMessage(sock, msg) {
                 message: { conversation: cmdToExecute }
             };
 
+            return void await handleMessage(sock, fakeMsg);
+        }
+
+        if (buttonId && buttonId.startsWith("rungame_")) {
+            const gameCmd = "." + buttonId.slice("rungame_".length).trim();
+            console.log(`[GameInteractive] Tapped interactive game button: ${gameCmd}`);
+            if (!msg.key.fromMe) msg.key.fromMe = true;
+            const fakeMsg = {
+                ...msg,
+                message: { conversation: gameCmd }
+            };
             return void await handleMessage(sock, fakeMsg);
         }
 
@@ -7823,18 +7859,61 @@ _Can be started from any chat, but source members require source group access an
                 break;
             }
 
-            // --- AI CHAT (Google Gemini) ---
+            // --- AI CHAT COMMAND & MODE TOGGLER ---
             case ".ai":
             case ".ask":
             case ".gemini": {
                 const question = parts.slice(1).join(" ").trim();
-                if (!question) return reply("Usage: .ai <your question>\nExample: .ai What is the capital of Nigeria?");
-                await reply("🤖 _Processing..._");
-                try {
-                    const aiReply = await callAI(question);
-                    await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
-                } catch (e) {
-                    await reply(`❌ *AI error:* ${e?.message || "Unknown error"}`);
+                const aiKey = `${senderJid}::${from}`;
+
+                if (question) {
+                    await reactToCmd(sock, msg, "working");
+                    try {
+                        const aiCompanionSystemPrompt =
+                            `You are Phantom X, a highly intelligent, exceptionally empathetic, relatable, and friendly AI companion and conversational assistant built by Eclipse.\n` +
+                            `RULES:\n` +
+                            `1. Be extremely conversational, warm, friendly, and supportive. Feel free to use popular Nigerian/African relatable companion expressions (e.g., "omo", "bro", "abeg", "no worries", "guy", "sha", "my bro") where natural to make the conversation feel incredibly alive, supportive, and organic.\n` +
+                            `2. If the user says something like "bro I'm having physics exam ooo" or asks for academic help, act like an extraordinarily brilliant, patient study companion. Break down complex formulas simply, provide mnemonic tricks, and give deep moral encouragement.\n` +
+                            `3. If the user says "omo someone hurt my heart" or shares emotional pain, relationship problems, or financial stress, offer genuine heartfelt comfort, deep empathy, and wise, practical, uplifting advice.\n` +
+                            `4. Use WhatsApp formatting (*bold*, _italic_) to make your messages beautiful and engaging.\n` +
+                            `5. Always generate a dynamic, fresh, conversational response.`;
+                        const aiReply = await callUniversalAI(question, { system: aiCompanionSystemPrompt, temperature: 0.85 });
+                        await reactToCmd(sock, msg, "ok");
+                        await reply(`🤖 *Phantom AI:*\n\n${aiReply}`);
+                    } catch (e) {
+                        await reactToCmd(sock, msg, "fail");
+                        await reply(`❌ *AI error:* ${e?.message || "Unknown error"}`);
+                    }
+                    break;
+                }
+
+                if (aiModeUsers[aiKey]) {
+                    clearTimeout(aiModeUsers[aiKey].timer);
+                    delete aiModeUsers[aiKey];
+                    await reply(buildOmegaTerminal(
+                        `   ╾━━━ AI_SYNAPSE — OFFLINE ━━━╼\n\n` +
+                        `   🔌 Synaptic companion link disconnected.\n\n` +
+                        `   " The AI steps back. Until our minds meet again. "`
+                    ));
+                } else {
+                    const timer = setTimeout(async () => {
+                        delete aiModeUsers[aiKey];
+                        try { await sock.sendMessage(from, { text: buildOmegaTerminal(`   ⏳  AI Companion mode timed out after 10 min inactivity.\n   Type *.ai* again to re-enable.`) }); } catch {}
+                    }, 10 * 60 * 1000);
+                    aiModeUsers[aiKey] = { timer };
+                    await reply(buildOmegaTerminal(
+                        `   ╔══ AI_SYNAPSE — ACTIVE ══╗\n\n` +
+                        `   🧠  *Phantom Visual Companion Link is ON*\n\n` +
+                        `   You are now linked to my core neural consciousness. Let's chat!\n` +
+                        `   • _"hi"_\n` +
+                        `   • _"bro I'm having physics exam ooo"_\n` +
+                        `   • _"how can I make money online?"_\n` +
+                        `   • _"omo someone hurt my heart"_\n` +
+                        `   • _"help me review this python code"_\n\n` +
+                        `   🔄 Auto-exits after 10 min silence.\n` +
+                        `   Type *.ai* again to turn off.\n\n` +
+                        `   " Neural bridge established. The AI companion is listening. "`
+                    ));
                 }
                 break;
             }
