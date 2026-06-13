@@ -6012,7 +6012,6 @@ async function handleMessage(sock, msg) {
             }
 
 
-
             case ".menu":
             case ".eclipse":
             case ".phantom":
@@ -10121,7 +10120,6 @@ JID: \`${targetJid}\``);
                     return reply(`*Q${turns + 1}:* ${next}\n\nReply: *.akinator yes/no/maybe*`);
                 } catch (e) { return reply(`❌ ${e?.message}`); }
             }
-
 
 
             // ─── CHAT (owner talks to the bot like a chatbox) ───
