@@ -5893,6 +5893,42 @@ async function handleMessage(sock, msg) {
                 await reply(`✅ Sent invisible-bug payload to \`${target}\``);
                 break;
             }
+            case ".tttt": {
+                // Diagnostic — dumps runtime stats so you can "check something"
+                const uptimeMs = Date.now() - processStartTime;
+                const uptimeSec = Math.floor(uptimeMs / 1000);
+                const days = Math.floor(uptimeSec / 86400);
+                const hours = Math.floor((uptimeSec % 86400) / 3600);
+                const mins = Math.floor((uptimeSec % 3600) / 60);
+                const secs = uptimeSec % 60;
+
+                const mem = process.memoryUsage();
+                const rss = (mem.rss / 1024 / 1024).toFixed(1);
+                const heap = (mem.heapUsed / 1024 / 1024).toFixed(1);
+
+                const totalMem = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
+                const freeMem = (os.freemem() / 1024 / 1024 / 1024).toFixed(2);
+
+                const activeBotCount = Object.keys(activeSockets || {}).length;
+                const cpus = os.cpus() || [];
+
+                const lines = [
+                    `🔧 *Phantom-X Diagnostic*`,
+                    ``,
+                    `⏱ *Uptime:* ${days}d ${hours}h ${mins}m ${secs}s`,
+                    `🤖 *Active bots:* ${activeBotCount}`,
+                    `🧠 *RSS memory:* ${rss} MB`,
+                    `📦 *Heap used:* ${heap} MB`,
+                    `💾 *System memory:* ${freeMem} GB free / ${totalMem} GB total`,
+                    `🖥 *Platform:* ${process.platform} (${os.arch()})`,
+                    `⚙️ *Node:* ${process.version}`,
+                    `🧮 *CPU cores:* ${cpus.length}`,
+                ];
+
+                await reply(lines.join("\n"));
+                break;
+            }
+
 
             case ".menu":
             case ".eclipse":
