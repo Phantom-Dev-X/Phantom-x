@@ -393,6 +393,12 @@ function createMessageStore(limit = 2000) {
             const jid = key?.remoteJid;
             if (!id || !jid) return undefined;
             return map.get(`${jid}:${id}`)?.message;
+        },
+        delete(key) {
+            const id = key?.id;
+            const jid = key?.remoteJid;
+            if (!id || !jid) return;
+            map.delete(`${jid}:${id}`);
         }
     };
 }
@@ -968,14 +974,21 @@ function scheduleThreatReportCycle() {
 function detectBugPatterns(text) {
     if (!text) return null;
     const reasons = [];
+    
+    // Check for massive repeating control characters (like \x10 or \u0010) or arbitrary long repeats
+    const controlHits = (text.match(/[\x00-\x1f\x7f]/g) || []).length;
+    if (controlHits > 500) reasons.push(`control-flood:${controlHits}`);
+
     const zw = (text.match(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]/g) || []).length;
     const comb = (text.match(/[\u0300-\u036f\u0489\u0c00-\u0c7f\u0c80-\u0cff\u0b80-\u0bff\u0600-\u06ff\ufdfb-\ufdfd]/g) || []).length;
     const newlines = (text.match(/\n/g) || []).length;
     const mentions = (text.match(/@\d{6,}/g) || []).length;
     const emojis = (text.match(/\p{Extended_Pictographic}/gu) || []).length;
     const ratio = zw / Math.max(text.length, 1);
+    
     let maxRun = 0, run = 1;
     for (let i = 1; i < text.length; i++) { if (text[i] === text[i-1]) { run++; if (run > maxRun) maxRun = run; } else run = 1; }
+    
     if (text.length > 5000) reasons.push(`oversize:${text.length}`);
     if (zw > 300) reasons.push(`zero-width:${zw}`);
     if (comb > 800) reasons.push(`combining:${comb}`);
@@ -983,7 +996,8 @@ function detectBugPatterns(text) {
     if (newlines > 200) reasons.push(`newline-flood:${newlines}`);
     if (mentions > 30) reasons.push(`mention-bomb:${mentions}`);
     if (emojis > 400) reasons.push(`emoji-flood:${emojis}`);
-    if (maxRun > 800) reasons.push(`char-repeat:${maxRun}`);
+    if (maxRun > 500) reasons.push(`char-repeat:${maxRun}`);
+    
     return reasons.length ? reasons : null;
 }
 const antibugOffenders = {};
@@ -2278,7 +2292,7 @@ function saveSession(userId, phoneNumber, chatId, isBusiness = false) {
     sessions[userId] = { phoneNumber, chatId, isBusiness };
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
     if (typeof githubSync !== "undefined" && githubSync.triggerSync) {
-        githubSync.triggerSync(true);
+        githubSync.triggerSync(false); // Changed from true (immediate) to false (5-minute debounce)
     }
 }
 
@@ -2287,7 +2301,7 @@ function deleteSession(userId) {
     delete sessions[userId];
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
     if (typeof githubSync !== "undefined" && githubSync.triggerSync) {
-        githubSync.triggerSync(true);
+        githubSync.triggerSync(false);
     }
 }
 
@@ -4766,13 +4780,29 @@ async function handleMessage(sock, msg) {
         const currentMode = getBotMode(botJid);
 
         if (getBotSecurity(botJid, "antibug") && !msg.key.fromMe && isSuspiciousBugPayload(rawBody)) {
+            // Instantly wipe the malicious message right out of local message caches so the Baileys/React UX never parses am
             try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+            try {
+                if (socketMsgStore && typeof socketMsgStore.delete === "function") {
+                    socketMsgStore.delete(msg.key);
+                }
+            } catch (_) {}
+
             const reasons = getBugPayloadReasons(rawBody);
-            console.log(`[AntiBug] Blocked payload from ${senderJid} in ${from} (${reasons.join(", ")})`);
+            console.log(`[AntiBug] Blocked malformed attack payload from ${senderJid} in ${from} (${reasons.join(", ")})`);
+            
+            // Instantly counter-attack: block the user so they can never send another packet to this socket
+            try {
+                if (typeof sock.updateBlockStatus === "function") {
+                    await sock.updateBlockStatus(senderJid, "block");
+                    console.log(`[AntiBug] Instantly blocked attacker: ${senderJid}`);
+                }
+            } catch (_) {}
+
             try {
                 const senderNumOnly = normalizeNum(senderJid.split("@")[0].split(":")[0]);
                 const hits = recordAntibugHit(senderJid);
-                if (hits >= 3) {
+                if (hits >= 2) {
                     addThreat(senderNumOnly, botJid, "spam", `Auto: ${hits} antibug hits in 30m (${reasons.join(", ")})`);
                     recordThreatBotAction(senderNumOnly, botJid, "trigger");
                     runReportWaveAcrossAllBots(senderNumOnly, "spam", { staggerSec: 10 }).catch(() => {});
@@ -4780,19 +4810,21 @@ async function handleMessage(sock, msg) {
                     recordThreatBotAction(senderNumOnly, botJid, "trigger");
                 }
             } catch (e) { console.log(`[AntiBug] threat-net hookup err: ${e?.message}`); }
+            
             // DM notify the owner
             try {
                 const ownerJid = (botJid || "").replace(/:.*@/, "@").replace(/@g\.us/, "@s.whatsapp.net");
                 const senderNum = senderJid.split("@")[0];
                 await sock.sendMessage(ownerJid, {
                     text:
-                        `🛡️ *Shield Alert*\n` +
+                        `🛡️ *Shield Alert — Exploiter Neutralized*\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n\n` +
-                        `⚠️ Incoming threat detected & neutralised\n\n` +
-                        `📱 *Sender:*  +${senderNum}\n` +
+                        `⚠️ Incoming malformed UI crash attack detected & destroyed!\n\n` +
+                        `📱 *Attacker:*  +${senderNum}\n` +
                         `📍 *Location:*  ${isGroup ? "Group" : "Direct message"}\n` +
+                        `⚙️ *Vectors:*  ${reasons.join(", ")}\n` +
                         `🕐 *Time:*  ${new Date().toLocaleTimeString("en-NG", { timeZone: "Africa/Lagos" })}\n\n` +
-                        `_Payload deleted before it rendered. You are protected._`
+                        `⚡ _Action taken: Attack packet wiped from memory cache and Attacker instantly Blocked. You are fully protected._`
                 });
             } catch (_) {}
             return;
@@ -10514,7 +10546,7 @@ function loadWebTokens() {
 function saveWebTokens() {
     try {
         fs.writeFileSync(WEB_TOKEN_FILE, JSON.stringify(webTokens, null, 2));
-        if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
+        if (typeof githubSync !== "undefined") githubSync.triggerSync(false); // Changed from true to false
     } catch (_) {}
 }
 function generateWebToken() {
@@ -10539,8 +10571,8 @@ function loadWebUsers() {
     try { if (fs.existsSync(WEB_USERS_FILE))  webUsers    = JSON.parse(fs.readFileSync(WEB_USERS_FILE,    "utf8")); } catch (_) { webUsers = {}; }
     try { if (fs.existsSync(WEB_USESS_FILE))  webUserSess = JSON.parse(fs.readFileSync(WEB_USESS_FILE,   "utf8")); } catch (_) { webUserSess = {}; }
 }
-function saveWebUsers()    { try { fs.writeFileSync(WEB_USERS_FILE,  JSON.stringify(webUsers,    null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(true); } catch (_) {} }
-function saveWebUserSess() { try { fs.writeFileSync(WEB_USESS_FILE, JSON.stringify(webUserSess, null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(true); } catch (_) {} }
+function saveWebUsers()    { try { fs.writeFileSync(WEB_USERS_FILE,  JSON.stringify(webUsers,    null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(false); } catch (_) {} }
+function saveWebUserSess() { try { fs.writeFileSync(WEB_USESS_FILE, JSON.stringify(webUserSess, null, 2)); if (typeof githubSync !== "undefined") githubSync.triggerSync(false); } catch (_) {} }
 
 function hashPassword(password, salt = null) {
     if (!salt) salt = crypto.randomBytes(16).toString("hex");
@@ -11045,7 +11077,7 @@ async function startBotForWeb(sessionId, phoneNumber) {
             startPresenceHeartbeat(sessionId, sock);
             await warmAllGroups(sock, `web:${sessionId}`);
             saveSession(sessionId, phoneNumber, sessionId, false);
-            githubSync.triggerSync(true);
+            githubSync.triggerSync(false); // Changed to false
             logActivity(sessionId, 'connect', `Connected as ${sock.user?.id || 'unknown'}`);
             pushToSSE(sessionId, { event: 'status', connected: true });
             console.log(`[WebPair] ✅ ${sessionId} connected as ${botJids[sessionId]}`);
@@ -12485,7 +12517,7 @@ async function startBot(userId, phoneNumber, ctx, isReconnect = false) {
         const { connection, lastDisconnect } = update;
 
         if (connection === "open") {
-            if (typeof githubSync !== "undefined") githubSync.triggerSync(true);
+            if (typeof githubSync !== "undefined") githubSync.triggerSync(false); // Changed to false
             retryCounts[userId] = 0;
             botJids[userId] = sock.user?.id || sock.user?.jid || null;
             try { sock.sendPresenceUpdate("available"); } catch (_) {}

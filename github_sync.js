@@ -443,8 +443,10 @@ function triggerSync(immediate = false) {
         return;
     }
 
+    // Completely disable immediate syncs (never fire after 5s) to guarantee high network stability
+    // All backups now wait a mandatory 15-minute cool-off / debounce window before firing.
     const now = Date.now();
-    const delay = immediate ? 5000 : 300000;
+    const delay = 15 * 60 * 1000; // 15 minutes pure stability window
     const targetTime = now + delay;
 
     if (!syncTimer || targetTime < nextSyncTime) {
