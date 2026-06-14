@@ -5643,6 +5643,18 @@ async function handleMessage(sock, msg) {
         // T08: command receipt reaction (fires for every recognized cmd start)
         if (cmd && cmd.startsWith(".")) reactToCmd(sock, msg, "received");
 
+        // T-log: pretty-print every parsed command to the console
+        if (cmd && cmd.startsWith(".")) {
+            const chatType = isGroup ? "group" : (isSelfChat ? "self" : "dm");
+            const args = parts.slice(1);
+            const ts = new Date().toISOString();
+            console.log(
+                `[CMD] ${ts} ${chatType} | chat=${from} | sender=${senderJid || from} | ` +
+                `raw=${JSON.stringify((typeof body === "string" ? body : "").slice(0, 200))} | ` +
+                `cmd=${cmd} | args=${JSON.stringify(args)} | fromMe=${!!msg.key.fromMe}`
+            );
+        }
+
         switch (cmd) {
             
             
